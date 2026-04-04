@@ -67,7 +67,7 @@ pub struct CloseAllPositionsParams {
 
 /// Get account information.
 ///
-/// Returns current balances, margin, and equity.
+/// Returns current balances, margin, equity, and buying power.
 #[utoipa::path(
     get,
     path = "/account",

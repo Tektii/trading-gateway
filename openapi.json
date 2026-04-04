@@ -92,7 +92,7 @@
           "account"
         ],
         "summary": "Get account information.",
-        "description": "Returns current balances, margin, and equity.",
+        "description": "Returns current balances, margin, equity, and buying power.",
         "operationId": "get_account",
         "responses": {
           "200": {
