@@ -1,0 +1,38 @@
+[package]
+name = "tektii-gateway-alpaca"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Alpaca broker adapter for Tektii Gateway (Paper + Live)"
+readme = "README.md"
+keywords = ["trading", "gateway", "alpaca", "broker"]
+categories = ["finance"]
+
+[dependencies]
+tektii-gateway-core = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+secrecy = { workspace = true }
+futures-util = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tektii-gateway-test-support = { path = "../test-support" }
+serde_json = { workspace = true }
+rust_decimal_macros = { workspace = true }

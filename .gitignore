@@ -1,0 +1,32 @@
+/target
+.DS_Store
+
+# Credentials — only .env.example is tracked
+.env
+.env.*
+!.env.example
+
+# TLS / key material
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and state
+*.log
+gateway-exit-state.json
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# User-specific Claude Code settings
+.claude/settings.local.json
+
+# Unix core dumps
+/core
+
+# Local scratch
+tmp/

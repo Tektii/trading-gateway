@@ -1,0 +1,3337 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tektii Gateway API",
+    "description": "Unified trading gateway API for multiple providers",
+    "license": {
+      "name": "Elastic License 2.0",
+      "url": "https://www.elastic.co/licensing/elastic-license"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Detailed health endpoint.",
+        "description": "Returns per-provider connection status. A single provider with stale\ndata is reported as \"degraded\", not unhealthy — this avoids k8s\nrestart loops from transient broker blips.\n\nAlways returns 200; degraded status is informational.",
+        "operationId": "get_health",
+        "responses": {
+          "200": {
+            "description": "Gateway health details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetailedHealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/livez": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness probe endpoint.",
+        "description": "Returns 200 OK if the process is up. Use for Kubernetes liveness probes.\nThis endpoint does not check provider connections or other dependencies.",
+        "operationId": "get_livez",
+        "responses": {
+          "200": {
+            "description": "Service is alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness probe endpoint.",
+        "description": "Returns 200 OK if the adapter is configured and the gateway is not shutting down.\nReturns 503 Service Unavailable otherwise. Use for Kubernetes readiness probes.",
+        "operationId": "get_readyz",
+        "responses": {
+          "200": {
+            "description": "Service is ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/account": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Get account information.",
+        "description": "Returns current balances, margin, and equity.",
+        "operationId": "get_account",
+        "responses": {
+          "200": {
+            "description": "Account information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Account"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bars/{symbol}": {
+      "get": {
+        "tags": [
+          "market_data"
+        ],
+        "summary": "Get historical bars for a symbol.",
+        "description": "Returns OHLCV candlestick data for the specified symbol and timeframe.",
+        "operationId": "get_bars",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "path",
+            "description": "Symbol (e.g., S:AAPL, F:EURUSD)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeframe",
+            "in": "query",
+            "description": "Bar timeframe/interval",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Timeframe"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "description": "Start of date range (inclusive)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "description": "End of date range (inclusive)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of bars to return",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Historical bar data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Bar"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (bad timeframe or symbol)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Symbol not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get provider capabilities.",
+        "operationId": "get_capabilities",
+        "responses": {
+          "200": {
+            "description": "Provider capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/circuit-breakers": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Get the status of both circuit breakers.",
+        "operationId": "get_circuit_breaker_status",
+        "responses": {
+          "200": {
+            "description": "Circuit breaker status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CircuitBreakerStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/circuit-breakers/reset": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Reset both circuit breakers to closed state.",
+        "description": "Returns 409 Conflict if either breaker is in cooldown (re-tripped within 60s of last reset).",
+        "operationId": "reset_circuit_breakers",
+        "responses": {
+          "200": {
+            "description": "Circuit breakers reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CircuitBreakerStatusResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Reset rejected — cooldown active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orders": {
+      "get": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "List open orders.",
+        "operationId": "get_orders",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter by symbol",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by status (multiple allowed)",
+            "required": false,
+            "schema": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/components/schemas/OrderStatus"
+              }
+            }
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "description": "Filter by side",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/Side"
+                }
+              ]
+            }
+          },
+          {
+            "name": "client_order_id",
+            "in": "query",
+            "description": "Filter by client order ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "oco_group_id",
+            "in": "query",
+            "description": "Filter by OCO group ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Filter orders created after this time",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Filter orders created before this time",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of orders to return",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Submit a new order.",
+        "description": "Returns an order handle with the assigned order ID.",
+        "operationId": "submit_order",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Order submitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderHandle"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Order rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Operation not supported by provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Cancel all orders.",
+        "description": "Cancels all open orders, optionally filtered by symbol.",
+        "operationId": "cancel_all_orders",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter by symbol (None = cancel all orders)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Orders cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelAllResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orders/history": {
+      "get": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Get order history.",
+        "operationId": "get_order_history",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter by symbol",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by status (multiple allowed)",
+            "required": false,
+            "schema": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/components/schemas/OrderStatus"
+              }
+            }
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "description": "Filter by side",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/Side"
+                }
+              ]
+            }
+          },
+          {
+            "name": "client_order_id",
+            "in": "query",
+            "description": "Filter by client order ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "oco_group_id",
+            "in": "query",
+            "description": "Filter by OCO group ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Filter orders created after this time",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Filter orders created before this time",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of orders to return",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orders/{order_id}": {
+      "get": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Get order by ID.",
+        "operationId": "get_order",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "description": "Order ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Order not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Cancel an order.",
+        "operationId": "cancel_order",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "description": "Order ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelOrderResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Order not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "orders"
+        ],
+        "summary": "Modify an existing order.",
+        "operationId": "modify_order",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "description": "Order ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModifyOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Order modified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModifyOrderResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Order not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Order not modifiable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/positions": {
+      "get": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "Get open positions.",
+        "operationId": "get_positions",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Optional symbol to filter positions.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of positions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Position"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "Close all positions.",
+        "description": "Closes all open positions, optionally filtered by symbol.",
+        "operationId": "close_all_positions",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter by symbol (None = close all positions)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Close orders created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrderHandle"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/positions/{position_id}": {
+      "get": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "Get position by ID.",
+        "operationId": "get_position",
+        "parameters": [
+          {
+            "name": "position_id",
+            "in": "path",
+            "description": "Position ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Position details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Position"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Position not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "Close a position.",
+        "operationId": "close_position",
+        "parameters": [
+          {
+            "name": "position_id",
+            "in": "path",
+            "description": "Position ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional close parameters",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ClosePositionRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Position close order created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderHandle"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Position not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/quotes/{symbol}": {
+      "get": {
+        "tags": [
+          "market_data"
+        ],
+        "summary": "Get quote for a symbol.",
+        "operationId": "get_quote",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "path",
+            "description": "Symbol (e.g., AAPL, BTC/USD)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Quote data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Symbol not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get connection status.",
+        "operationId": "get_connection_status",
+        "responses": {
+          "200": {
+            "description": "Connection status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trades": {
+      "get": {
+        "tags": [
+          "trades"
+        ],
+        "summary": "Get trade history.",
+        "operationId": "get_trades",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter by symbol",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "order_id",
+            "in": "query",
+            "description": "Filter by order ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Return trades after this time (inclusive)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Return trades before this time (exclusive)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of trades to return",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of trades",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Trade"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Account": {
+        "type": "object",
+        "description": "Trading account information.\n\nRepresents the current state of a trading account including cash balance,\nequity (balance + unrealized P&L), and margin usage. All monetary values\nare in the account's base currency.",
+        "required": [
+          "balance",
+          "equity",
+          "margin_used",
+          "margin_available",
+          "unrealized_pnl",
+          "currency"
+        ],
+        "properties": {
+          "balance": {
+            "type": "string",
+            "description": "Cash balance (excluding unrealized P&L)."
+          },
+          "currency": {
+            "type": "string",
+            "description": "Account base currency (e.g., \"USD\", \"EUR\")."
+          },
+          "equity": {
+            "type": "string",
+            "description": "Total equity (balance + unrealized P&L)."
+          },
+          "margin_available": {
+            "type": "string",
+            "description": "Available margin for new positions."
+          },
+          "margin_used": {
+            "type": "string",
+            "description": "Margin currently in use for open positions."
+          },
+          "unrealized_pnl": {
+            "type": "string",
+            "description": "Total unrealized P&L across all open positions."
+          }
+        }
+      },
+      "AccountEventType": {
+        "type": "string",
+        "description": "Account event types.",
+        "enum": [
+          "BALANCE_UPDATED",
+          "MARGIN_WARNING",
+          "MARGIN_CALL"
+        ]
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "API error response body (JSON wire format).",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode",
+            "description": "Machine-readable error code (e.g., `ORDER_NOT_FOUND`, `RATE_LIMITED`)"
+          },
+          "details": {
+            "description": "Additional error context (varies by error type)"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error message"
+          }
+        }
+      },
+      "AssetClass": {
+        "type": "string",
+        "description": "Asset class",
+        "enum": [
+          "STOCK",
+          "FOREX",
+          "CRYPTO",
+          "FUTURES"
+        ]
+      },
+      "Bar": {
+        "type": "object",
+        "description": "OHLCV bar/candlestick.",
+        "required": [
+          "symbol",
+          "provider",
+          "timeframe",
+          "timestamp",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume"
+        ],
+        "properties": {
+          "close": {
+            "type": "string",
+            "description": "Closing price"
+          },
+          "high": {
+            "type": "string",
+            "description": "Highest price during the period"
+          },
+          "low": {
+            "type": "string",
+            "description": "Lowest price during the period"
+          },
+          "open": {
+            "type": "string",
+            "description": "Opening price"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Data source provider"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Symbol in canonical format"
+          },
+          "timeframe": {
+            "$ref": "#/components/schemas/Timeframe",
+            "description": "Bar timeframe"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Bar start timestamp"
+          },
+          "volume": {
+            "type": "string",
+            "description": "Trading volume during the period"
+          }
+        }
+      },
+      "BarParams": {
+        "type": "object",
+        "description": "Request parameters for historical bars.",
+        "required": [
+          "timeframe"
+        ],
+        "properties": {
+          "end": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "End of date range (inclusive)"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum number of bars to return",
+            "minimum": 0
+          },
+          "start": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Start of date range (inclusive)"
+          },
+          "timeframe": {
+            "$ref": "#/components/schemas/Timeframe",
+            "description": "Bar timeframe/interval"
+          }
+        }
+      },
+      "CancelAllOrdersParams": {
+        "type": "object",
+        "description": "Query parameters for cancelling all orders.",
+        "properties": {
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by symbol (None = cancel all orders)"
+          }
+        }
+      },
+      "CancelAllResult": {
+        "type": "object",
+        "description": "Result of cancelling multiple orders.",
+        "required": [
+          "cancelled_count",
+          "failed_count"
+        ],
+        "properties": {
+          "cancelled_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of orders successfully cancelled",
+            "minimum": 0
+          },
+          "failed_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of orders that failed to cancel",
+            "minimum": 0
+          },
+          "failed_order_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "IDs of orders that failed to cancel"
+          }
+        }
+      },
+      "CancelOrderResult": {
+        "type": "object",
+        "description": "Result of cancelling an order.",
+        "required": [
+          "success",
+          "order"
+        ],
+        "properties": {
+          "order": {
+            "$ref": "#/components/schemas/Order",
+            "description": "Updated order state"
+          },
+          "success": {
+            "type": "boolean",
+            "description": "Whether cancellation succeeded"
+          }
+        }
+      },
+      "Capabilities": {
+        "type": "object",
+        "description": "Provider capabilities describing supported features.",
+        "required": [
+          "supported_asset_classes",
+          "supported_order_types",
+          "position_mode",
+          "features"
+        ],
+        "properties": {
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of supported optional features."
+          },
+          "max_leverage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maximum leverage multiplier (if applicable)"
+          },
+          "position_mode": {
+            "$ref": "#/components/schemas/PositionMode",
+            "description": "Position mode (netting vs hedging)"
+          },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RateLimits",
+                "description": "Provider rate limits (None means unlimited, e.g., Tektii engine)"
+              }
+            ]
+          },
+          "supported_asset_classes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetClass"
+            },
+            "description": "Asset classes supported by this provider"
+          },
+          "supported_order_types": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderType"
+            },
+            "description": "Order types supported by this provider"
+          }
+        }
+      },
+      "CircuitBreakerSnapshot": {
+        "type": "object",
+        "description": "Point-in-time snapshot of a circuit breaker's state.\n\nUsed by the REST API to report status without holding locks.",
+        "required": [
+          "state",
+          "failure_count"
+        ],
+        "properties": {
+          "failure_count": {
+            "type": "integer",
+            "description": "Number of recent failures within the time window.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "Current state: `\"open\"` or `\"closed\"`."
+          }
+        }
+      },
+      "CircuitBreakerStatusResponse": {
+        "type": "object",
+        "description": "Status of both circuit breakers.",
+        "required": [
+          "adapter",
+          "exit_order"
+        ],
+        "properties": {
+          "adapter": {
+            "$ref": "#/components/schemas/CircuitBreakerSnapshot",
+            "description": "Adapter circuit breaker (provider outage detection)."
+          },
+          "exit_order": {
+            "$ref": "#/components/schemas/CircuitBreakerSnapshot",
+            "description": "Exit order circuit breaker (SL/TP placement failure detection)."
+          }
+        }
+      },
+      "CloseAllPositionsParams": {
+        "type": "object",
+        "description": "Query parameters for closing all positions.",
+        "properties": {
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by symbol (None = close all positions)"
+          }
+        }
+      },
+      "ClosePositionRequest": {
+        "type": "object",
+        "description": "Request to close a position.",
+        "properties": {
+          "cancel_associated_orders": {
+            "type": "boolean",
+            "description": "Cancel pending SL/TP orders for this position (default: true)"
+          },
+          "limit_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Limit price (required if `order_type` is LIMIT)"
+          },
+          "order_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OrderType",
+                "description": "Order type for close (default: MARKET)"
+              }
+            ]
+          },
+          "quantity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Quantity to close (None = close entire position)"
+          }
+        }
+      },
+      "ConnectionEventType": {
+        "type": "string",
+        "description": "Connection event types.",
+        "enum": [
+          "CONNECTED",
+          "DISCONNECTING",
+          "RECONNECTING",
+          "BROKER_DISCONNECTED",
+          "BROKER_RECONNECTED",
+          "BROKER_CONNECTION_FAILED"
+        ]
+      },
+      "ConnectionStatus": {
+        "type": "object",
+        "description": "Connection status to the trading provider.",
+        "required": [
+          "connected",
+          "latency_ms",
+          "last_heartbeat"
+        ],
+        "properties": {
+          "connected": {
+            "type": "boolean",
+            "description": "Whether the connection to the provider is active"
+          },
+          "last_heartbeat": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp of last successful heartbeat/ping"
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Round-trip latency in milliseconds",
+            "minimum": 0
+          }
+        }
+      },
+      "DataStalenessEventType": {
+        "type": "string",
+        "description": "Data staleness event types.\n\nSent per-instrument when market data becomes stale (broker feed lost) or\nfresh (first live tick received after reconnect).",
+        "enum": [
+          "STALE",
+          "FRESH"
+        ]
+      },
+      "DetailedHealthStatus": {
+        "type": "object",
+        "description": "Detailed health response for the `/health` endpoint.\n\nAlways returned with 200 status — degraded is informational,\nnot an error. This prevents k8s from restarting the pod on a\ntransient broker blip.",
+        "required": [
+          "status",
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderHealth"
+            },
+            "description": "Per-provider health details"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OverallStatus",
+            "description": "Overall status: \"connected\" or \"degraded\""
+          }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "Machine-readable error codes for API error responses.",
+        "enum": [
+          "INVALID_REQUEST",
+          "INVALID_VALUE",
+          "VALIDATION_ERROR",
+          "UNAUTHORIZED",
+          "ORDER_NOT_FOUND",
+          "POSITION_NOT_FOUND",
+          "SYMBOL_NOT_FOUND",
+          "OCO_GROUP_NOT_FOUND",
+          "ORDER_NOT_MODIFIABLE",
+          "RESET_COOLDOWN",
+          "ORDER_REJECTED",
+          "RATE_LIMITED",
+          "INTERNAL_ERROR",
+          "UNSUPPORTED_OPERATION",
+          "PROVIDER_ERROR",
+          "SHUTTING_DOWN",
+          "PROVIDER_UNAVAILABLE"
+        ]
+      },
+      "GetPositionsParams": {
+        "type": "object",
+        "description": "Request body for get positions with optional symbol filter.",
+        "properties": {
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional symbol to filter positions."
+          }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "description": "Health check response for liveness probes.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Health status (always \"ok\" if responding)"
+          }
+        }
+      },
+      "MarginMode": {
+        "type": "string",
+        "description": "Margin mode for leveraged trading",
+        "enum": [
+          "CROSS",
+          "ISOLATED"
+        ]
+      },
+      "ModifyOrderRequest": {
+        "type": "object",
+        "description": "Request to modify an existing order.",
+        "properties": {
+          "limit_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New limit price"
+          },
+          "quantity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New total quantity (must be >= `filled_quantity`)"
+          },
+          "stop_loss": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New stop loss price"
+          },
+          "stop_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New stop price"
+          },
+          "take_profit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New take profit price"
+          },
+          "trailing_distance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New trailing distance"
+          }
+        }
+      },
+      "ModifyOrderResult": {
+        "type": "object",
+        "description": "Result of modifying an order.\n\nSome providers (e.g., Alpaca) implement modify as cancel-replace,\nwhich may result in a new order ID.",
+        "required": [
+          "order"
+        ],
+        "properties": {
+          "order": {
+            "$ref": "#/components/schemas/Order",
+            "description": "The modified (or replacement) order"
+          },
+          "previous_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Previous order ID if the provider used cancel-replace.\n`None` if the order was modified in-place."
+          }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "description": "Full order details.",
+        "required": [
+          "id",
+          "symbol",
+          "side",
+          "order_type",
+          "quantity",
+          "filled_quantity",
+          "remaining_quantity",
+          "status",
+          "time_in_force",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "average_fill_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Weighted average fill price"
+          },
+          "client_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Client-provided order ID (if any)"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Gateway-assigned correlation ID for tracing this order through its lifecycle."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the order was created"
+          },
+          "display_quantity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display quantity for iceberg orders"
+          },
+          "filled_quantity": {
+            "type": "string",
+            "description": "Quantity filled so far"
+          },
+          "hidden": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether this is a hidden order"
+          },
+          "id": {
+            "type": "string",
+            "description": "Server-assigned order ID"
+          },
+          "limit_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Limit price (for LIMIT and `STOP_LIMIT` orders)"
+          },
+          "oco_group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OCO group ID if this order is part of an OCO pair."
+          },
+          "order_type": {
+            "$ref": "#/components/schemas/OrderType",
+            "description": "Order type"
+          },
+          "position_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Associated position ID (for hedging accounts)"
+          },
+          "post_only": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether this is a post-only order"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Original order quantity"
+          },
+          "reduce_only": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether this is a reduce-only order"
+          },
+          "reject_reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RejectReason",
+                "description": "Rejection reason (if status is REJECTED)"
+              }
+            ]
+          },
+          "remaining_quantity": {
+            "type": "string",
+            "description": "Quantity remaining"
+          },
+          "side": {
+            "$ref": "#/components/schemas/Side",
+            "description": "Order side"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OrderStatus",
+            "description": "Current order status"
+          },
+          "stop_loss": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stop loss price (for bracket orders)"
+          },
+          "stop_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stop price (for STOP and `STOP_LIMIT` orders)"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Trading symbol"
+          },
+          "take_profit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Take profit price (for bracket orders)"
+          },
+          "time_in_force": {
+            "$ref": "#/components/schemas/TimeInForce",
+            "description": "Time in force"
+          },
+          "trailing_distance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Trailing distance (for trailing stop orders)"
+          },
+          "trailing_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrailingType",
+                "description": "Trailing type (absolute or percent)"
+              }
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the order was last updated"
+          }
+        }
+      },
+      "OrderEventType": {
+        "type": "string",
+        "description": "Order event types.",
+        "enum": [
+          "ORDER_CREATED",
+          "ORDER_MODIFIED",
+          "ORDER_CANCELLED",
+          "ORDER_REJECTED",
+          "ORDER_FILLED",
+          "ORDER_PARTIALLY_FILLED",
+          "ORDER_EXPIRED",
+          "BRACKET_ORDER_CREATED",
+          "BRACKET_ORDER_MODIFIED"
+        ]
+      },
+      "OrderHandle": {
+        "type": "object",
+        "description": "Minimal response after order submission.",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "client_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Client-provided order ID (if any)"
+          },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Gateway-assigned correlation ID for tracing this order through its lifecycle."
+          },
+          "id": {
+            "type": "string",
+            "description": "Server-assigned order ID"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OrderStatus",
+            "description": "Initial order status"
+          }
+        }
+      },
+      "OrderQueryParams": {
+        "type": "object",
+        "description": "Query parameters for listing orders.",
+        "properties": {
+          "client_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by client order ID"
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum number of orders to return",
+            "minimum": 0
+          },
+          "oco_group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by OCO group ID"
+          },
+          "side": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Side",
+                "description": "Filter by side"
+              }
+            ]
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Filter orders created after this time"
+          },
+          "status": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/OrderStatus"
+            },
+            "description": "Filter by status (multiple allowed)"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by symbol"
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Filter orders created before this time"
+          }
+        }
+      },
+      "OrderRequest": {
+        "type": "object",
+        "description": "Request to submit a new order.",
+        "required": [
+          "symbol",
+          "side",
+          "quantity",
+          "order_type"
+        ],
+        "properties": {
+          "client_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Client-provided order ID for idempotency"
+          },
+          "display_quantity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Visible quantity for iceberg orders"
+          },
+          "hidden": {
+            "type": "boolean",
+            "description": "If true, order not visible in order book"
+          },
+          "leverage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Leverage multiplier"
+          },
+          "limit_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for LIMIT and `STOP_LIMIT` orders"
+          },
+          "margin_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MarginMode",
+                "description": "Margin mode (cross or isolated)"
+              }
+            ]
+          },
+          "oco_group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OCO group ID to link orders (one-cancels-other)."
+          },
+          "order_type": {
+            "$ref": "#/components/schemas/OrderType",
+            "description": "Order type"
+          },
+          "position_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target position ID (for hedging accounts)"
+          },
+          "post_only": {
+            "type": "boolean",
+            "description": "If true, reject if would immediately fill (maker only)"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Quantity in base units (must be positive)"
+          },
+          "reduce_only": {
+            "type": "boolean",
+            "description": "If true, can only reduce position"
+          },
+          "side": {
+            "$ref": "#/components/schemas/Side",
+            "description": "Buy or sell"
+          },
+          "stop_loss": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stop loss price for bracket order"
+          },
+          "stop_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for STOP and `STOP_LIMIT` orders"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Canonical symbol format (e.g., \"EUR/USD\", \"AAPL\")"
+          },
+          "take_profit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Take profit price for bracket order"
+          },
+          "time_in_force": {
+            "$ref": "#/components/schemas/TimeInForce",
+            "description": "Time in force (default: GTC)"
+          },
+          "trailing_distance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Distance for `TRAILING_STOP` orders"
+          },
+          "trailing_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrailingType",
+                "description": "Type of trailing stop (absolute or percent)"
+              }
+            ]
+          }
+        }
+      },
+      "OrderStatus": {
+        "type": "string",
+        "description": "Order status",
+        "enum": [
+          "PENDING",
+          "PENDING_CANCEL",
+          "OPEN",
+          "PARTIALLY_FILLED",
+          "FILLED",
+          "CANCELLED",
+          "REJECTED",
+          "EXPIRED"
+        ]
+      },
+      "OrderType": {
+        "type": "string",
+        "description": "Order type",
+        "enum": [
+          "MARKET",
+          "LIMIT",
+          "STOP",
+          "STOP_LIMIT",
+          "TRAILING_STOP"
+        ]
+      },
+      "OverallStatus": {
+        "type": "string",
+        "description": "Overall gateway health status for detailed health endpoint.",
+        "enum": [
+          "connected",
+          "degraded"
+        ]
+      },
+      "PingPayload": {
+        "type": "object",
+        "description": "Server ping payload.",
+        "required": [
+          "timestamp"
+        ],
+        "properties": {
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server timestamp."
+          }
+        }
+      },
+      "Position": {
+        "type": "object",
+        "description": "Position details.",
+        "required": [
+          "id",
+          "symbol",
+          "side",
+          "quantity",
+          "average_entry_price",
+          "current_price",
+          "unrealized_pnl",
+          "realized_pnl",
+          "opened_at",
+          "updated_at"
+        ],
+        "properties": {
+          "average_entry_price": {
+            "type": "string",
+            "description": "Weighted average entry price"
+          },
+          "current_price": {
+            "type": "string",
+            "description": "Current market price"
+          },
+          "id": {
+            "type": "string",
+            "description": "Position ID (may be synthetic for stock brokers)"
+          },
+          "leverage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Leverage multiplier"
+          },
+          "liquidation_price": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Liquidation price (for leveraged positions)"
+          },
+          "margin_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MarginMode",
+                "description": "Margin mode (for leveraged positions)"
+              }
+            ]
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the position was opened"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Current position quantity"
+          },
+          "realized_pnl": {
+            "type": "string",
+            "description": "Realized profit/loss (from partial closes)"
+          },
+          "side": {
+            "$ref": "#/components/schemas/PositionSide",
+            "description": "Position direction (long or short)"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Trading symbol"
+          },
+          "unrealized_pnl": {
+            "type": "string",
+            "description": "Unrealized profit/loss"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the position was last modified"
+          }
+        }
+      },
+      "PositionEventType": {
+        "type": "string",
+        "description": "Position event types.",
+        "enum": [
+          "POSITION_OPENED",
+          "POSITION_MODIFIED",
+          "POSITION_CLOSED"
+        ]
+      },
+      "PositionMode": {
+        "type": "string",
+        "description": "Position mode (how positions are aggregated)",
+        "enum": [
+          "NETTING",
+          "HEDGING"
+        ]
+      },
+      "PositionSide": {
+        "type": "string",
+        "description": "Position side (long or short)",
+        "enum": [
+          "LONG",
+          "SHORT"
+        ]
+      },
+      "ProviderHealth": {
+        "type": "object",
+        "description": "Per-provider health detail.",
+        "required": [
+          "platform",
+          "connected"
+        ],
+        "properties": {
+          "connected": {
+            "type": "boolean",
+            "description": "Whether all instrument data is fresh"
+          },
+          "platform": {
+            "type": "string",
+            "description": "Platform identifier"
+          },
+          "stale_instruments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Instruments with stale data (empty when healthy)"
+          }
+        }
+      },
+      "Quote": {
+        "type": "object",
+        "description": "Real-time quote with bid/ask/last prices.",
+        "required": [
+          "symbol",
+          "provider",
+          "bid",
+          "ask",
+          "last",
+          "timestamp"
+        ],
+        "properties": {
+          "ask": {
+            "type": "string",
+            "description": "Best ask price (lowest sell offer)"
+          },
+          "ask_size": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Quantity available at ask price"
+          },
+          "bid": {
+            "type": "string",
+            "description": "Best bid price (highest buy offer)"
+          },
+          "bid_size": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Quantity available at bid price"
+          },
+          "last": {
+            "type": "string",
+            "description": "Last traded price"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Data source provider (e.g., \"alpaca\", \"binance\")"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Symbol in canonical format (e.g., \"EUR/USD\", \"AAPL\")"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Quote timestamp"
+          },
+          "volume": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Trading volume (if available)"
+          }
+        }
+      },
+      "RateLimitEventType": {
+        "type": "string",
+        "description": "Rate limit event types.",
+        "enum": [
+          "RATE_LIMIT_WARNING",
+          "RATE_LIMIT_HIT"
+        ]
+      },
+      "RateLimits": {
+        "type": "object",
+        "description": "Rate limit information for a trading provider.",
+        "properties": {
+          "orders_per_day": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum orders per day",
+            "minimum": 0
+          },
+          "orders_per_second": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum order submissions per second",
+            "minimum": 0
+          },
+          "requests_per_minute": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum API requests per minute",
+            "minimum": 0
+          }
+        }
+      },
+      "ReadyStatus": {
+        "type": "object",
+        "description": "Readiness check response for readiness probes.",
+        "required": [
+          "ready",
+          "providers",
+          "provider_count"
+        ],
+        "properties": {
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional message explaining non-ready state"
+          },
+          "provider_count": {
+            "type": "integer",
+            "description": "Number of registered providers",
+            "minimum": 0
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of registered provider names"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Whether the service is ready to accept requests"
+          }
+        }
+      },
+      "RejectReason": {
+        "type": "string",
+        "description": "Order rejection reason",
+        "enum": [
+          "INSUFFICIENT_MARGIN",
+          "INSUFFICIENT_BALANCE",
+          "INVALID_QUANTITY",
+          "INVALID_PRICE",
+          "SYMBOL_NOT_TRADEABLE",
+          "MARKET_CLOSED",
+          "REDUCE_ONLY_VIOLATED",
+          "POST_ONLY_VIOLATED",
+          "RATE_LIMITED",
+          "UNKNOWN"
+        ]
+      },
+      "Side": {
+        "type": "string",
+        "description": "Order side (buy or sell)",
+        "enum": [
+          "BUY",
+          "SELL"
+        ]
+      },
+      "TimeInForce": {
+        "type": "string",
+        "description": "Time in force for orders.",
+        "enum": [
+          "GTC",
+          "DAY",
+          "IOC",
+          "FOK"
+        ]
+      },
+      "Timeframe": {
+        "type": "string",
+        "description": "Bar timeframe/interval.\n\nSupports 12 timeframes from 1 minute to 1 week.\nSerializes to compact string format: `\"1m\"`, `\"1h\"`, `\"1d\"`, etc.",
+        "enum": [
+          "1m",
+          "2m",
+          "5m",
+          "10m",
+          "15m",
+          "30m",
+          "1h",
+          "2h",
+          "4h",
+          "12h",
+          "1d",
+          "1w"
+        ]
+      },
+      "Trade": {
+        "type": "object",
+        "description": "Individual trade/fill record.",
+        "required": [
+          "id",
+          "order_id",
+          "symbol",
+          "side",
+          "quantity",
+          "price",
+          "commission",
+          "commission_currency",
+          "timestamp"
+        ],
+        "properties": {
+          "commission": {
+            "type": "string",
+            "description": "Commission/fee amount for this trade"
+          },
+          "commission_currency": {
+            "type": "string",
+            "description": "Currency of the commission (e.g., \"USD\", \"USDT\", \"BNB\")"
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique trade identifier from provider"
+          },
+          "is_maker": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether this trade was a maker (added liquidity) or taker."
+          },
+          "order_id": {
+            "type": "string",
+            "description": "Order ID this trade belongs to"
+          },
+          "price": {
+            "type": "string",
+            "description": "Fill price"
+          },
+          "quantity": {
+            "type": "string",
+            "description": "Fill quantity in base units"
+          },
+          "side": {
+            "$ref": "#/components/schemas/Side",
+            "description": "Trade side (buy or sell)"
+          },
+          "symbol": {
+            "type": "string",
+            "description": "Symbol traded"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Trade execution timestamp"
+          }
+        }
+      },
+      "TradeEventType": {
+        "type": "string",
+        "description": "Trade event types.",
+        "enum": [
+          "TRADE_FILLED"
+        ]
+      },
+      "TradeQueryParams": {
+        "type": "object",
+        "description": "Query parameters for listing trades.",
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum number of trades to return",
+            "minimum": 0
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by order ID"
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Return trades after this time (inclusive)"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by symbol"
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Return trades before this time (exclusive)"
+          }
+        }
+      },
+      "TradingPlatform": {
+        "type": "string",
+        "description": "Trading platform identifier.\n\nEach variant represents a specific trading platform and environment combination.",
+        "enum": [
+          "alpaca-live",
+          "alpaca-paper",
+          "binance-spot-live",
+          "binance-spot-testnet",
+          "binance-futures-live",
+          "binance-futures-testnet",
+          "binance-margin-live",
+          "binance-margin-testnet",
+          "binance-coin-futures-live",
+          "binance-coin-futures-testnet",
+          "oanda-practice",
+          "oanda-live",
+          "saxo-sim",
+          "saxo-live",
+          "tektii",
+          "mock"
+        ]
+      },
+      "TrailingType": {
+        "type": "string",
+        "description": "Trailing stop type (how trailing distance is interpreted)",
+        "enum": [
+          "ABSOLUTE",
+          "PERCENT"
+        ]
+      },
+      "WsErrorCode": {
+        "type": "string",
+        "description": "WebSocket error codes.",
+        "enum": [
+          "INVALID_MESSAGE",
+          "INTERNAL_ERROR",
+          "POSITION_UNPROTECTED",
+          "LIQUIDATION",
+          "OCO_DOUBLE_EXIT"
+        ]
+      },
+      "WsMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Response to server ping.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pong"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Event acknowledgment from strategy.\n\nStrategies send this message to acknowledge they have processed events.\nThis is **required** for simulation mode (controls time progression) and\n**informational-only** for live trading.\n\n# Example\n```json\n{\n  \"type\": \"event_ack\",\n  \"correlation_id\": \"550e8400-e29b-41d4-a716-446655440000\",\n  \"events_processed\": [\"evt_123\", \"evt_124\"],\n  \"timestamp\": 1700000000000\n}\n```",
+            "required": [
+              "correlation_id",
+              "events_processed",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "correlation_id": {
+                "type": "string",
+                "description": "Unique correlation ID for tracking this acknowledgment."
+              },
+              "events_processed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "List of event IDs that were processed by the strategy."
+              },
+              "timestamp": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix timestamp (milliseconds) when events were processed.",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "event_ack"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Server heartbeat ping.",
+            "required": [
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Server timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Order state change.",
+            "required": [
+              "event",
+              "order",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "event": {
+                "$ref": "#/components/schemas/OrderEventType",
+                "description": "Type of order event."
+              },
+              "order": {
+                "$ref": "#/components/schemas/Order",
+                "description": "Current state of the order."
+              },
+              "parent_order_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Parent order ID for bracket/OCO child orders."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "order"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Position state change.",
+            "required": [
+              "event",
+              "position",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "event": {
+                "$ref": "#/components/schemas/PositionEventType",
+                "description": "Type of position event."
+              },
+              "position": {
+                "$ref": "#/components/schemas/Position",
+                "description": "Current state of the position."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "position"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Account state change.",
+            "required": [
+              "event",
+              "account",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "account": {
+                "$ref": "#/components/schemas/Account",
+                "description": "Current account state."
+              },
+              "event": {
+                "$ref": "#/components/schemas/AccountEventType",
+                "description": "Type of account event."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "account"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Candle (OHLCV bar) data.",
+            "required": [
+              "bar",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "bar": {
+                "$ref": "#/components/schemas/Bar",
+                "description": "The bar data (includes symbol, provider, timeframe, OHLCV)."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp (when event was emitted)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "candle"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Quote (bid/ask) data.",
+            "required": [
+              "quote",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "quote": {
+                "$ref": "#/components/schemas/Quote",
+                "description": "The quote data (includes symbol, provider, bid/ask/last)."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp (when event was emitted)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "quote"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Trade execution event.",
+            "required": [
+              "event",
+              "trade",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "event": {
+                "$ref": "#/components/schemas/TradeEventType",
+                "description": "Type of trade event."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "trade": {
+                "$ref": "#/components/schemas/Trade",
+                "description": "The executed trade."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "trade"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Connection state change.",
+            "required": [
+              "event",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "broker": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Broker/platform name (e.g., \"alpaca-paper\"). Present for broker events."
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Error message if disconnecting/reconnecting due to error."
+              },
+              "event": {
+                "$ref": "#/components/schemas/ConnectionEventType",
+                "description": "Type of connection event."
+              },
+              "gap_duration_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Duration of the connection gap in milliseconds (for `BrokerReconnected`).",
+                "minimum": 0
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "connection"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Per-instrument data staleness notification.\n\nSent when market data becomes stale (broker disconnect) or fresh\n(first tick received after reconnect). Strategies should pause\ntrading decisions for stale instruments.",
+            "required": [
+              "event",
+              "symbols",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "broker": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Broker/platform name."
+              },
+              "event": {
+                "$ref": "#/components/schemas/DataStalenessEventType",
+                "description": "Whether data became stale or fresh."
+              },
+              "stale_since": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time",
+                "description": "When the data became stale. Present on both Stale (the moment it\nhappened) and Fresh (for gap duration calculation) events."
+              },
+              "symbols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Affected instrument symbols."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "data_staleness"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Rate limit notification.",
+            "required": [
+              "event",
+              "requests_remaining",
+              "reset_at",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "event": {
+                "$ref": "#/components/schemas/RateLimitEventType",
+                "description": "Type of rate limit event."
+              },
+              "requests_remaining": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Number of requests remaining in current window.",
+                "minimum": 0
+              },
+              "reset_at": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the rate limit window resets."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "rate_limit"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Error notification.",
+            "required": [
+              "code",
+              "message",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "#/components/schemas/WsErrorCode",
+                "description": "Error code."
+              },
+              "details": {
+                "description": "Additional error details."
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable error message."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "All possible WebSocket messages.\n\nUses serde's internally tagged representation for clean JSON:\n```json\n{\"type\": \"order\", \"event\": \"ORDER_FILLED\", \"order\": {...}}\n{\"type\": \"ping\", \"timestamp\": \"2025-01-01T00:00:00Z\"}\n```\n\n# Client -> Server Messages\n\n- `Pong` - Response to server ping (heartbeat)\n- `EventAck` - Acknowledge processed events (required for simulation, optional for live)\n\n# Server -> Client Messages\n\n- `Ping` - Server heartbeat\n- `Order` - Order state change\n- `Position` - Position state change\n- `Account` - Account state change\n- `Connection` - Connection state change\n- `RateLimit` - Rate limit notification\n- `Error` - Error notification\n\n# Subscription Configuration\n\nNote: There are no Subscribe/Unsubscribe messages. Event subscriptions\nare configured at startup via environment variables (e.g., `SUBSCRIPTIONS`)."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "account",
+      "description": "Account information"
+    },
+    {
+      "name": "orders",
+      "description": "Order management"
+    },
+    {
+      "name": "positions",
+      "description": "Position management"
+    },
+    {
+      "name": "trades",
+      "description": "Trade history"
+    },
+    {
+      "name": "market_data",
+      "description": "Market data"
+    },
+    {
+      "name": "system",
+      "description": "System status and capabilities"
+    },
+    {
+      "name": "operations",
+      "description": "Operational controls (circuit breakers)"
+    },
+    {
+      "name": "health",
+      "description": "Health and readiness probes"
+    }
+  ]
+}

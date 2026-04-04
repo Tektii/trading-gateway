@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Edit(*.rs)|Write(*.rs)",
+            "command": "jq -r '.tool_input.file_path' | xargs rustfmt"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CMD=$(jq -r '.tool_input.command') && echo \"$CMD\" | grep -qE '^cargo[[:space:]]+test' && ! echo \"$CMD\" | grep -q 'nextest' && { echo 'Use cargo nextest, not cargo test. See CLAUDE.md conventions.' >&2; exit 2; } || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

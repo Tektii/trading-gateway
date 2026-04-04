@@ -1,0 +1,205 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/alpaca",
+    "crates/binance",
+    "crates/oanda",
+    "crates/saxo",
+    "crates/tektii",
+    "crates/mock",
+    "crates/protocol",
+    "crates/test-support",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version = "1.91.0"
+authors = ["Tektii <oss@tektii.com>"]
+homepage = "https://tektii.com"
+repository = "https://github.com/tektii/trading-gateway"
+license-file = "LICENSE"
+
+[workspace.dependencies]
+# Workspace crates
+tektii-gateway-core = { path = "crates/core" }
+tektii-gateway-alpaca = { path = "crates/alpaca" }
+tektii-gateway-binance = { path = "crates/binance" }
+tektii-gateway-oanda = { path = "crates/oanda" }
+tektii-gateway-saxo = { path = "crates/saxo" }
+tektii-gateway-tektii = { path = "crates/tektii" }
+tektii-gateway-mock = { path = "crates/mock" }
+tektii-protocol = { path = "crates/protocol" }
+tektii-gateway-test-support = { path = "crates/test-support" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+futures-util = "0.3"
+
+# Web framework
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Byte buffers
+bytes = "1"
+
+# Concurrency
+dashmap = "6"
+parking_lot = "0.12"
+
+# Collections
+smallvec = { version = "1", features = ["serde"] }
+
+# Crypto (Binance auth)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# Secrets
+secrecy = "0.10"
+subtle = "2"
+
+# API documentation
+utoipa = { version = "5", features = ["axum_extras", "chrono", "decimal"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Validation
+validator = { version = "0.19", features = ["derive"] }
+
+# Types
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Random number generation (mock provider)
+rand = "0.9"
+
+# Regex (credential scrubbing)
+regex = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Async trait (needed for dyn TradingAdapter dispatch)
+async-trait = "0.1"
+
+# Testing
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Noisy — permanently suppress
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_const_for_fn = "allow"          # nursery: too aggressive, flags fns that may gain logic later
+items_after_statements = "allow"        # pedantic: common pattern in test modules
+doc_markdown = "allow"                  # pedantic: backtick noise on types/params in doc comments
+similar_names = "allow"                 # pedantic: flags state/stale, req/res — all clear in context
+significant_drop_tightening = "allow"   # nursery: suggestions rarely improve clarity
+redundant_pub_crate = "allow"           # nursery: conflicts with unreachable_pub
+option_if_let_else = "allow"            # nursery: often less readable than if-let
+missing_docs_in_private_items = "allow" # private items: internal API, not part of public contract
+manual_midpoint = "allow"              # nursery: (a + b) / 2 vs midpoint() — only matters at bounds
+many_single_char_names = "allow"       # pedantic: common in math/protocol code (x, y, t, s)
+significant_drop_in_scrutinee = "allow" # nursery: lock-in-if-let patterns reviewed and acceptable
+format_push_string = "allow"           # nursery: format!+push_str is clearer than write! in many cases
+
+[package]
+name = "tektii-gateway"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file = "LICENSE"
+repository.workspace = true
+description = "A unified trading API gateway that normalises multiple broker APIs into a single REST + WebSocket interface"
+
+[[bin]]
+name = "openapi-export"
+path = "src/bin/openapi_export.rs"
+
+[features]
+default = ["alpaca", "binance", "oanda", "saxo", "mock"]
+alpaca = ["dep:tektii-gateway-alpaca"]
+binance = ["dep:tektii-gateway-binance"]
+oanda = ["dep:tektii-gateway-oanda"]
+saxo = ["dep:tektii-gateway-saxo"]
+tektii = ["dep:tektii-gateway-tektii"]
+mock = ["dep:tektii-gateway-mock"]
+
+[dependencies]
+tektii-gateway-core = { workspace = true }
+tektii-gateway-alpaca = { workspace = true, optional = true }
+tektii-gateway-binance = { workspace = true, optional = true }
+tektii-gateway-oanda = { workspace = true, optional = true }
+tektii-gateway-saxo = { workspace = true, optional = true }
+tektii-gateway-tektii = { workspace = true, optional = true }
+tektii-gateway-mock = { workspace = true, optional = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+axum = { workspace = true }
+futures = { workspace = true }
+secrecy = { workspace = true }
+serde_json = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tektii-gateway-core = { workspace = true, features = ["test-utils"] }
+tektii-gateway-alpaca = { workspace = true }
+tektii-gateway-binance = { workspace = true }
+tektii-gateway-oanda = { workspace = true }
+tektii-gateway-saxo = { workspace = true }
+tektii-gateway-test-support = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+tempfile = "3.27.0"
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+wiremock = { workspace = true }
+metrics = { workspace = true }
+async-trait = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+smallvec = { workspace = true }
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

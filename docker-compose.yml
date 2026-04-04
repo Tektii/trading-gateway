@@ -1,0 +1,16 @@
+services:
+  gateway:
+    image: ghcr.io/tektii/gateway:latest
+    build:  # override: docker compose up --build
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file: .env
+    ports:
+      - "127.0.0.1:8080:8080"   # REST + WebSocket + Metrics
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

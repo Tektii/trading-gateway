@@ -1,0 +1,30 @@
+[package]
+name = "tektii-gateway-mock"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "Mock provider adapter for local strategy development (no broker credentials required)"
+readme = "README.md"
+keywords = ["trading", "gateway", "mock", "testing"]
+categories = ["finance"]
+
+[dependencies]
+tektii-gateway-core = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
