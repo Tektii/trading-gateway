@@ -25,10 +25,10 @@ use tektii_gateway_core::adapter::{AdapterRegistry, TradingAdapter};
 use tektii_gateway_core::api::middleware::auth_middleware;
 use tektii_gateway_core::api::routes::create_gateway_router;
 use tektii_gateway_core::api::state::GatewayState;
-use tektii_gateway_core::config::{GatewayConfig, load_required_env_vars};
+use tektii_gateway_core::config::{load_required_env_vars, GatewayConfig};
 use tektii_gateway_core::events::router::EventRouter;
 use tektii_gateway_core::exit_management::ExitHandlerRegistry;
-use tektii_gateway_core::metrics::{MetricsHandle, metrics_handler};
+use tektii_gateway_core::metrics::{metrics_handler, MetricsHandle};
 use tektii_gateway_core::models::{
     GatewayMode, TradingPlatform, TradingPlatformKind, VALID_PROVIDERS,
 };
@@ -88,6 +88,15 @@ async fn main() -> anyhow::Result<()> {
     let platform = provider.to_platform(mode);
     check_feature_enabled(provider)?;
     let credentials = load_required_env_vars(provider)?;
+
+    // Diagnostic: log parsed subscriptions and platforms
+    info!(
+        subscription_count = config.subscriptions.len(),
+        platforms = ?config.platforms_used(),
+        ?provider,
+        ?mode,
+        "Gateway subscriptions loaded"
+    );
 
     if provider == TradingPlatformKind::Mock {
         info!(
@@ -169,7 +178,9 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => error!("Failed to connect mock provider: {e}"),
                 }
             } else {
+                info!("Provider connection task started");
                 connect_providers(&config, &provider_registry, &event_routers).await;
+                info!("Provider connection task completed");
             }
             let _ = mock_provider; // suppress unused warning
         });
@@ -853,7 +864,13 @@ async fn connect_providers(
     provider_registry: &Arc<ProviderRegistry>,
     event_routers: &[AdapterInfo],
 ) {
-    for platform in config.platforms_used() {
+    let platforms: Vec<_> = config.platforms_used().into_iter().collect();
+    info!(
+        count = platforms.len(),
+        ?platforms,
+        "Connecting providers for platforms"
+    );
+    for platform in platforms {
         let symbols = config.symbols_for_platform(platform);
         let event_types = config.events_for_platform(platform);
 
