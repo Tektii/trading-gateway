@@ -177,11 +177,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(()) => info!("Mock provider WebSocket connected with default symbols"),
                     Err(e) => error!("Failed to connect mock provider: {e}"),
                 }
-            } else {
-                info!("Provider connection task started");
-                connect_providers(&config, &provider_registry, &event_routers).await;
-                info!("Provider connection task completed");
+                return;
             }
+
+            info!("Provider connection task started");
+            connect_providers(&config, &provider_registry, &event_routers).await;
+            info!("Provider connection task completed");
             let _ = mock_provider; // suppress unused warning
         });
     }
