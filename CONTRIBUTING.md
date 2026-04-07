@@ -15,7 +15,7 @@ Please open an [issue](https://github.com/tektii/trading-gateway/issues) for bug
 
 ```bash
 git clone https://github.com/tektii/trading-gateway.git
-cd tektii-gateway
+cd trading-gateway
 cargo check --workspace
 ```
 

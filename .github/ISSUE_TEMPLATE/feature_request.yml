@@ -9,8 +9,29 @@ body:
       description: Describe the feature and why it would be useful.
     validations:
       required: true
+  - type: dropdown
+    id: broker
+    attributes:
+      label: Related broker adapter
+      description: Does this relate to a specific broker adapter?
+      options:
+        - All / General
+        - Alpaca
+        - Binance
+        - Oanda
+        - Saxo
+        - Tektii
+        - New adapter
+    validations:
+      required: false
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
       description: Any workarounds or alternative approaches you've tried.
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Would you be willing to contribute this?
+      options:
+        - label: I'd be interested in submitting a PR for this feature

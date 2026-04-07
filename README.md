@@ -1,46 +1,108 @@
 # Trading Gateway
 
-A source-available trading API gateway that normalises multiple broker APIs into a single REST + WebSocket interface — the same protocol used by the [Tektii](https://tektii.com) backtesting engine, so strategies go from backtest to live with zero code changes. Built in Rust. Language-agnostic.
+One API. Any broker. Backtesting included.
+
+Built in Rust. Language-agnostic — anything that speaks HTTP can connect.
 
 [![License: Elastic License 2.0](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/tektii/trading-gateway/ci.yml?branch=main&label=CI)](https://github.com/tektii/trading-gateway/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/tektii/trading-gateway?label=release)](https://github.com/tektii/trading-gateway/releases)
+[![MSRV: 1.91.0](https://img.shields.io/badge/MSRV-1.91.0-blue)](rust-toolchain.toml)
+[![API Docs](https://img.shields.io/badge/docs-API%20Reference-blue)](https://tektii.github.io/trading-gateway)
 
-Trade through any [supported broker](#supported-brokers-and-exchanges) with a single API. No adapter code. No vendor lock-in. The gateway handles authentication, normalisation, WebSocket streaming, reconnection, and exit management — your strategy code never changes when you switch brokers or move from backtesting to live.
+Source-available under [Elastic License 2.0](LICENSE) — free to use, self-host, and embed.
 
-> **Disclaimer:** This software is for informational and educational purposes only. It is not financial advice. Trading financial instruments carries significant risk of loss. Use at your own risk — see [full disclaimer](#disclaimer) below.
+## Get Started
 
-> **Note:** The [Tektii backtesting platform](https://tektii.com) is launching soon. The gateway is fully functional as a standalone trading proxy today — the backtesting integration will be available shortly.
+No credentials needed — the built-in mock broker lets you try the full API immediately:
+
+```bash
+docker run -e GATEWAY_PROVIDER=mock -e ENABLE_SWAGGER=true -p 8080:8080 \
+  ghcr.io/tektii/gateway:latest
+```
+
+```bash
+# Check your (simulated) account
+curl http://localhost:8080/v1/account
+
+# Place an order
+curl -X POST http://localhost:8080/v1/orders \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "AAPL", "side": "BUY", "quantity": "10", "order_type": "MARKET"}'
+
+# View your position
+curl http://localhost:8080/v1/positions
+```
+
+Explore the interactive API docs at [localhost:8080/swagger-ui](http://localhost:8080/swagger-ui). Ready to connect a real broker? See [Quick Start](#quick-start).
 
 ## Table of Contents
 
-- [Why Use a Trading Gateway?](#why-use-a-trading-gateway)
-- [Architecture](#architecture)
-- [Supported Brokers and Exchanges](#supported-brokers-and-exchanges)
-- [Quick Start](#quick-start)
-- [Place Your First Trade — API Walkthrough](#place-your-first-trade--api-walkthrough)
-- [Examples](#examples)
-- [Configuration (Environment Variables)](#configuration-environment-variables)
-- [API Documentation](#api-documentation)
-- [REST API Reference](#rest-api-reference)
-- [Exit Management — Stop-Loss, Take-Profit, Trailing Stops](#exit-management--stop-loss-take-profit-trailing-stops)
-- [WebSocket API — Real-Time Market Data and Order Events](#websocket-api--real-time-market-data-and-order-events)
-- [Security and Authentication](#security-and-authentication)
-- [Monitoring](#monitoring)
-- [FAQ](#frequently-asked-questions)
-- [Disclaimer](#disclaimer)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
+- [Trading Gateway](#trading-gateway)
+  - [Get Started](#get-started)
+  - [Table of Contents](#table-of-contents)
+  - [Why Use a Trading Gateway?](#why-use-a-trading-gateway)
+    - [How Trading Gateway Compares](#how-trading-gateway-compares)
+  - [Architecture](#architecture)
+  - [Supported Brokers and Exchanges](#supported-brokers-and-exchanges)
+  - [Quick Start](#quick-start)
+    - [Option A: Docker (no clone needed)](#option-a-docker-no-clone-needed)
+    - [Option B: Docker Compose (clone the repo)](#option-b-docker-compose-clone-the-repo)
+    - [Option C: Build from Source](#option-c-build-from-source)
+    - [Verify It's Running](#verify-its-running)
+  - [Place Your First Trade — API Walkthrough](#place-your-first-trade--api-walkthrough)
+  - [Examples](#examples)
+    - [Python Strategy](#python-strategy)
+    - [Node.js Strategy](#nodejs-strategy)
+    - [Expected Output](#expected-output)
+  - [Configuration (Environment Variables)](#configuration-environment-variables)
+    - [Server](#server)
+    - [Subscriptions](#subscriptions)
+    - [Reconnection](#reconnection)
+    - [Exit Management](#exit-management)
+    - [Provider Selection](#provider-selection)
+  - [API Documentation](#api-documentation)
+  - [REST API Reference](#rest-api-reference)
+  - [Exit Management — Stop-Loss, Take-Profit, Trailing Stops](#exit-management--stop-loss-take-profit-trailing-stops)
+  - [WebSocket API — Real-Time Market Data and Order Events](#websocket-api--real-time-market-data-and-order-events)
+    - [Connection](#connection)
+    - [Subscriptions](#subscriptions-1)
+    - [Heartbeat](#heartbeat)
+    - [Server → Client Messages](#server--client-messages)
+    - [Client → Server Messages](#client--server-messages)
+  - [Security and Authentication](#security-and-authentication)
+    - [API key authentication](#api-key-authentication)
+    - [Network-level isolation](#network-level-isolation)
+  - [Monitoring](#monitoring)
+    - [Order Metrics](#order-metrics)
+    - [WebSocket Metrics](#websocket-metrics)
+    - [Broker Connection Metrics](#broker-connection-metrics)
+    - [Other Metrics](#other-metrics)
+  - [Frequently Asked Questions](#frequently-asked-questions)
+  - [Troubleshooting](#troubleshooting)
+  - [Disclaimer](#disclaimer)
+  - [License](#license)
 
 ## Why Use a Trading Gateway?
 
-Every broker speaks a different language. Different REST endpoints, different WebSocket protocols, different auth flows, different order models, different failure modes. You write adapter code for Alpaca. Then you want to try Binance and discover nothing transfers. Your reconnection logic works on one broker and silently drops events on another. Your bracket order implementation is broker-specific spaghetti.
+Every broker speaks a different language. Different REST endpoints, different WebSocket protocols, different auth flows, different order models, different failure modes. You write adapter code for one broker. Then you want to try another and discover nothing transfers. Your reconnection logic works on one broker and silently drops events on another. Your bracket order implementation is broker-specific spaghetti.
 
 Trading Gateway sits between your strategy and the broker. You code against one REST + WebSocket protocol. The gateway handles the rest.
 
 - **One protocol, any broker** — A single set of REST endpoints and WebSocket events for all supported brokers and exchanges. Language-agnostic: anything that speaks HTTP and WebSocket can connect — Python, Rust, JavaScript, or curl.
 - **Broker-agnostic exit management** — Stop-loss, take-profit, and trailing stops that work identically on every broker, whether or not the broker natively supports them. State persists across restarts. Automatic reconnection with exponential backoff. Your strategy places the order and moves on.
 - **Backtest-to-live with zero code changes** — The [Tektii](https://tektii.com) backtesting engine implements the same protocol. Write your strategy once, backtest it against the engine, then point it at the gateway for live or paper trading. No adapter code, no if-else branches.
+
+### How Trading Gateway Compares
+
+| | Trading Gateway | ccxt | FIX Protocol |
+|---|---|---|---|
+| Architecture | Standalone service | Embedded library | Session-based |
+| Language support | Any (REST + WebSocket) | Python, JS, PHP | C++, Java, C# |
+| Exit management | Built-in SL/TP/trailing | Manual | Manual |
+| Reconnection | Automatic with backoff | Manual | Library-dependent |
+| Metrics / monitoring | Prometheus built-in | None | Vendor-dependent |
+| Backtest parity | Same protocol | No | No |
 
 **This is for you if:**
 - You run algo trading strategies in any language and want a single multi-broker API
@@ -97,55 +159,39 @@ cargo build --release --no-default-features --features alpaca,oanda
 
 ## Quick Start
 
-1. **Configure credentials**
+### Option A: Docker (no clone needed)
 
-   ```bash
-   curl -O https://raw.githubusercontent.com/tektii/trading-gateway/main/.env.example
-   cp .env.example .env
-   ```
+```bash
+curl -O https://raw.githubusercontent.com/tektii/trading-gateway/main/.env.example
+cp .env.example .env
+```
 
-   Open `.env` and fill in your broker credentials. For a quick test with Alpaca paper trading:
+Open `.env` and set your broker credentials:
 
-   ```
-   GATEWAY_PROVIDER=alpaca
-   ALPACA_API_KEY=your-key
-   ALPACA_API_SECRET=your-secret
-   ```
+```
+GATEWAY_PROVIDER=alpaca
+ALPACA_API_KEY=your-key
+ALPACA_API_SECRET=your-secret
+```
 
-   This defaults to paper trading mode. Set `GATEWAY_MODE=live` when you're ready for real trading.
+This defaults to paper trading mode. Set `GATEWAY_MODE=live` when you're ready for real trading.
 
-2. **Start the gateway**
+```bash
+docker run --env-file .env -p 8080:8080 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  ghcr.io/tektii/gateway:latest
+```
 
-   ```bash
-   docker run --env-file .env -p 8080:8080 \
-     --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-     ghcr.io/tektii/gateway:latest
-   ```
+### Option B: Docker Compose (clone the repo)
 
-   Or with Docker Compose:
+```bash
+git clone https://github.com/tektii/trading-gateway.git
+cd trading-gateway
+cp .env.example .env      # then fill in your broker credentials
+docker compose up
+```
 
-   ```bash
-   git clone https://github.com/tektii/trading-gateway.git
-   cd trading-gateway
-   cp .env.example .env      # then fill in your broker credentials
-   docker compose up
-   ```
-
-3. **Verify it's running**
-
-   ```bash
-   curl http://localhost:8080/health
-   ```
-
-   You should see:
-
-   ```json
-   {"status":"connected","providers":[{"platform":"alpaca-paper","connected":true,"stale_instruments":[]}]}
-   ```
-
-4. **Explore the API** — open [http://localhost:8080/swagger-ui](http://localhost:8080/swagger-ui) for interactive documentation.
-
-### Build from Source
+### Option C: Build from Source
 
 ```bash
 git clone https://github.com/tektii/trading-gateway.git
@@ -155,9 +201,23 @@ cargo build --release
 cargo run --release      # reads .env automatically
 ```
 
+### Verify It's Running
+
+```bash
+curl http://localhost:8080/health
+```
+
+You should see:
+
+```json
+{"status":"connected","providers":[{"platform":"alpaca-paper","connected":true,"stale_instruments":[]}]}
+```
+
+Explore the API at [localhost:8080/swagger-ui](http://localhost:8080/swagger-ui) (requires `ENABLE_SWAGGER=true`).
+
 ## Place Your First Trade — API Walkthrough
 
-With the gateway running against Alpaca Paper (see Quick Start), walk through a full order lifecycle:
+With the gateway running against a paper trading account (see Quick Start), walk through a full order lifecycle:
 
 **1. Check your account**
 
@@ -544,7 +604,7 @@ curl http://localhost:8080/metrics
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `gateway_orders_submitted_total` | Counter | `platform` | Total orders submitted to the broker |
-| `gateway_order_submit_duration_seconds` | Histogram | `platform` | Order submission round-trip latency (1ms–10s buckets) |
+| `gateway_order_submit_duration_seconds` | Histogram | `platform` | Order submission round-trip latency (1ms-10s buckets) |
 | `gateway_order_events_total` | Counter | `platform`, `event_type` | Order lifecycle events (filled, cancelled, rejected, expired, partially_filled) |
 | `gateway_oco_double_exit_total` | Counter | `platform` | OCO race conditions where both legs filled simultaneously |
 
@@ -576,15 +636,7 @@ curl http://localhost:8080/metrics
 
 **How is this different from ccxt?**
 
-ccxt is a **library** you embed in Python or JavaScript. Trading Gateway is a **standalone service** with a language-agnostic REST + WebSocket protocol — connect from any language that speaks HTTP. A modern alternative to FIX protocol gateways, using REST and WebSocket instead of FIX sessions.
-
-| | Trading Gateway | ccxt | FIX Protocol |
-|---|---|---|---|
-| Architecture | Standalone service | Embedded library | Session-based |
-| Language support | Any (REST + WebSocket) | Python, JS, PHP | C++, Java, C# |
-| Exit management | Built-in SL/TP/trailing | Manual | Manual |
-| Reconnection | Automatic with backoff | Manual | Library-dependent |
-| Backtest parity | Same protocol | No | No |
+See the [comparison table](#how-trading-gateway-compares) in the "Why" section above. In short: ccxt is a **library** you embed in Python or JavaScript. Trading Gateway is a **standalone service** with a language-agnostic REST + WebSocket protocol — connect from any language that speaks HTTP.
 
 **Do I need the Tektii backtesting platform?**
 
@@ -593,18 +645,6 @@ No. The gateway is fully standalone. The Tektii adapter is opt-in (`--features t
 **Is this production-ready?**
 
 The gateway has 1000+ tests, hardened Docker images, and is used in production. That said, it's v0.1.0 — expect API evolution. Pin your version.
-
-## Disclaimer
-
-This software is provided for **informational and educational purposes only** and does not constitute financial, investment, or trading advice. The authors and contributors are not registered investment advisors, broker-dealers, or financial planners.
-
-**Risk warning:** Trading financial instruments — including equities, futures, options, forex, and cryptocurrency — involves substantial risk of loss and is not suitable for every investor. Automated trading systems carry additional risks including but not limited to software bugs, network failures, unexpected market conditions, and incorrect order execution. Leveraged instruments can amplify losses beyond your initial deposit.
-
-**No warranty:** This software is provided "as is" without warranty of any kind. The authors accept no responsibility for any financial losses, damages, or other consequences resulting from the use of this software. You are solely responsible for evaluating the risks and for any trading decisions you make.
-
-**Before trading with real money:** independently verify all order execution, test thoroughly in paper trading mode, and consult a qualified financial advisor if you are unsure whether trading is appropriate for your situation.
-
-By using this software, you acknowledge that you understand these risks and accept full responsibility for your trading activity.
 
 ## Troubleshooting
 
@@ -618,10 +658,22 @@ You must set the `GATEWAY_PROVIDER` environment variable. See [Supported Brokers
 Check the `SUBSCRIPTIONS` env var. It must be valid JSON — an array of objects with `platform`, `instrument`, and `events` fields. Example: `[{"platform": "alpaca-paper", "instrument": "AAPL", "events": ["quote"]}]`.
 
 **Orders are rejected**
-Broker-specific requirements vary. Common causes: Alpaca requires whole shares for some instruments, Binance enforces minimum notional and lot size rules, Oanda requires valid instrument IDs (e.g., `EUR_USD` not `EUR/USD`). Check the error message in the response body.
+Broker-specific requirements vary. Common causes: minimum notional or lot size rules, instrument ID format differences. Check the error message in the response body.
 
 **Connection drops / frequent reconnections**
 The gateway auto-reconnects with exponential backoff. If reconnections are frequent, check your network stability and broker API status pages. Tune backoff behaviour with `RECONNECT_INITIAL_BACKOFF_MS`, `RECONNECT_MAX_BACKOFF_MS`, and `RECONNECT_MAX_DURATION_SECS`.
+
+## Disclaimer
+
+This software is provided for **informational and educational purposes only** and does not constitute financial, investment, or trading advice. The authors and contributors are not registered investment advisors, broker-dealers, or financial planners.
+
+**Risk warning:** Trading financial instruments — including equities, futures, options, forex, and cryptocurrency — involves substantial risk of loss and is not suitable for every investor. Automated trading systems carry additional risks including but not limited to software bugs, network failures, unexpected market conditions, and incorrect order execution. Leveraged instruments can amplify losses beyond your initial deposit.
+
+**No warranty:** This software is provided "as is" without warranty of any kind. The authors accept no responsibility for any financial losses, damages, or other consequences resulting from the use of this software. You are solely responsible for evaluating the risks and for any trading decisions you make.
+
+**Before trading with real money:** independently verify all order execution, test thoroughly in paper trading mode, and consult a qualified financial advisor if you are unsure whether trading is appropriate for your situation.
+
+By using this software, you acknowledge that you understand these risks and accept full responsibility for your trading activity.
 
 ## License
 

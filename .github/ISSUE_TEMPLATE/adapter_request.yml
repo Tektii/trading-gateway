@@ -1,0 +1,46 @@
+name: New Broker Adapter Request
+description: Request support for a new broker or exchange
+labels: ["enhancement", "adapter"]
+body:
+  - type: input
+    id: broker_name
+    attributes:
+      label: Broker / exchange name
+      placeholder: "e.g. Interactive Brokers, Kraken, Bybit"
+    validations:
+      required: true
+  - type: input
+    id: api_docs
+    attributes:
+      label: API documentation URL
+      placeholder: "https://..."
+    validations:
+      required: false
+  - type: dropdown
+    id: asset_classes
+    attributes:
+      label: Asset classes
+      description: What does this broker support?
+      multiple: true
+      options:
+        - Equities
+        - Crypto
+        - Forex
+        - Futures
+        - Options
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why this broker?
+      description: What makes this broker important for your use case?
+    validations:
+      required: false
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Would you be willing to contribute this?
+      options:
+        - label: I'd be interested in submitting a PR for this adapter

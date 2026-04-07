@@ -3,7 +3,47 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Tektii Trading Gateway — API Reference</title>
+    <title>Trading Gateway API Reference — Unified REST + WebSocket Trading API</title>
+    <meta name="description" content="API reference for Trading Gateway — a unified REST + WebSocket trading API gateway. One interface for any broker. Built in Rust." />
+    <link rel="canonical" href="https://tektii.github.io/trading-gateway/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Trading Gateway — API Reference" />
+    <meta property="og:description" content="Unified REST + WebSocket trading API gateway. One interface for any broker. Built in Rust." />
+    <meta property="og:url" content="https://tektii.github.io/trading-gateway/" />
+    <meta property="og:site_name" content="Trading Gateway" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Trading Gateway — API Reference" />
+    <meta name="twitter:description" content="Unified REST + WebSocket trading API gateway. One interface for any broker. Built in Rust." />
+
+    <!-- Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Trading Gateway",
+      "description": "A unified trading API gateway that normalises multiple broker APIs into a single REST + WebSocket interface.",
+      "applicationCategory": "FinanceApplication",
+      "operatingSystem": "Linux, macOS",
+      "programmingLanguage": "Rust",
+      "license": "https://www.elastic.co/licensing/elastic-license",
+      "url": "https://github.com/tektii/trading-gateway",
+      "author": {
+        "@type": "Organization",
+        "name": "Tektii",
+        "url": "https://tektii.com"
+      },
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      }
+    }
+    </script>
+
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/redoc@2.4.0/bundles/redoc.standalone.min.css"
@@ -11,6 +51,15 @@
   </head>
   <body>
     <div id="redoc-container"></div>
+    <noscript>
+      <h1>Trading Gateway API Reference</h1>
+      <p>A unified trading API gateway that normalises multiple broker APIs into a single REST + WebSocket interface. Built in Rust.</p>
+      <ul>
+        <li><a href="https://github.com/tektii/trading-gateway">GitHub Repository</a></li>
+        <li><a href="https://tektii.github.io/trading-gateway/openapi.json">OpenAPI Specification (JSON)</a></li>
+      </ul>
+      <p>Enable JavaScript to view the interactive API documentation.</p>
+    </noscript>
     <script src="https://cdn.jsdelivr.net/npm/redoc@2.4.0/bundles/redoc.standalone.min.js"></script>
     <script>
       Redoc.init("./openapi.json", {

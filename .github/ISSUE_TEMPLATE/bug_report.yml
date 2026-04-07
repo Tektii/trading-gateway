@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in Tektii Gateway
+description: Report a bug in Trading Gateway
 labels: ["bug"]
 body:
   - type: textarea
@@ -40,6 +40,33 @@ body:
         - Oanda
         - Saxo
         - Tektii
+        - Mock
         - N/A
     validations:
       required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: How are you running the gateway?
+      options:
+        - Docker
+        - Docker Compose
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 14.5 ARM, Ubuntu 24.04 x86_64"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Paste any relevant log output. Please redact any credentials.
+      render: shell
+    validations:
+      required: false
