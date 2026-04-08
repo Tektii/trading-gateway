@@ -66,7 +66,7 @@ parking_lot = "0.12"
 smallvec = { version = "1", features = ["serde"] }
 
 # Crypto (Binance auth)
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.11"
 hex = "0.4"
 
