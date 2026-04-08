@@ -25,10 +25,10 @@ use tektii_gateway_core::adapter::{AdapterRegistry, TradingAdapter};
 use tektii_gateway_core::api::middleware::auth_middleware;
 use tektii_gateway_core::api::routes::create_gateway_router;
 use tektii_gateway_core::api::state::GatewayState;
-use tektii_gateway_core::config::{load_required_env_vars, GatewayConfig};
+use tektii_gateway_core::config::{GatewayConfig, load_required_env_vars};
 use tektii_gateway_core::events::router::EventRouter;
 use tektii_gateway_core::exit_management::ExitHandlerRegistry;
-use tektii_gateway_core::metrics::{metrics_handler, MetricsHandle};
+use tektii_gateway_core::metrics::{MetricsHandle, metrics_handler};
 use tektii_gateway_core::models::{
     GatewayMode, TradingPlatform, TradingPlatformKind, VALID_PROVIDERS,
 };
