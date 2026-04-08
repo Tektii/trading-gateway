@@ -9,7 +9,7 @@ use crate::common::auth::current_timestamp_ms;
 use crate::common::error::binance_error_mapper;
 
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretBox};
