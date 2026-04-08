@@ -3,7 +3,7 @@
 //! Provides HMAC-SHA256 signing for authenticated Binance API requests.
 //! Used by all Binance product adapters (Spot, Futures, Margin, etc.).
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 /// Sign a query string using HMAC-SHA256.
