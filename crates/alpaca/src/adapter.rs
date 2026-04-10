@@ -79,6 +79,9 @@ pub struct AlpacaAdapter {
 
     /// Circuit breaker for detecting provider outages.
     circuit_breaker: Arc<RwLock<AdapterCircuitBreaker>>,
+
+    /// Data feed for market data requests (`"iex"` free tier, `"sip"` paid).
+    feed: String,
 }
 
 impl AlpacaAdapter {
@@ -148,6 +151,11 @@ impl AlpacaAdapter {
             "alpaca",
         )));
 
+        let feed = credentials
+            .feed
+            .clone()
+            .unwrap_or_else(|| "iex".to_string());
+
         Ok(Self {
             client,
             base_url,
@@ -161,6 +169,7 @@ impl AlpacaAdapter {
             event_router,
             platform,
             circuit_breaker,
+            feed,
         })
     }
 
@@ -576,10 +585,12 @@ impl AlpacaAdapter {
                 code: "AUTH_FAILED".to_string(),
             },
 
-            404 => GatewayError::ProviderError {
-                message: format!("Upstream returned 404: {message}"),
-                provider: Some("alpaca".to_string()),
-                source: None,
+            // 404 from Alpaca data endpoints means the resource (symbol, etc.) wasn't found.
+            // Order/position 404s are handled before map_http_error is called.
+            // This must NOT be ProviderError — client errors shouldn't trip the circuit breaker.
+            404 => GatewayError::InvalidRequest {
+                message: format!("Not found: {message}"),
+                field: None,
             },
 
             422 => {
@@ -592,13 +603,33 @@ impl AlpacaAdapter {
                 }
             }
 
-            _ => GatewayError::ProviderError {
-                message: format!("HTTP {}: {}", status.as_u16(), message),
+            // Server errors → ProviderError (counts toward circuit breaker)
+            s if s >= 500 => GatewayError::ProviderError {
+                message: format!("HTTP {s}: {message}"),
                 provider: Some("alpaca".to_string()),
                 source: None,
             },
+
+            // Remaining client errors → InvalidRequest (does NOT trip circuit breaker)
+            s => GatewayError::InvalidRequest {
+                message: format!("HTTP {s}: {message}"),
+                field: None,
+            },
         }
     }
+}
+
+/// Check if a string looks like a valid UUID (Alpaca order IDs are UUIDs).
+///
+/// Rejects non-UUID strings early so Alpaca doesn't return misleading 422 errors.
+fn is_valid_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    s.bytes().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    })
 }
 
 /// Map an Alpaca error `code` field to a canonical reject code.
@@ -740,6 +771,12 @@ impl TradingAdapter for AlpacaAdapter {
     }
 
     async fn get_order(&self, order_id: &str) -> GatewayResult<Order> {
+        if !is_valid_uuid(order_id) {
+            return Err(GatewayError::OrderNotFound {
+                id: order_id.to_string(),
+            });
+        }
+
         self.check_circuit_breaker().await?;
 
         let (api_key, api_secret) = self.credentials();
@@ -919,8 +956,10 @@ impl TradingAdapter for AlpacaAdapter {
     async fn get_position(&self, position_id: &str) -> GatewayResult<Position> {
         self.check_circuit_breaker().await?;
 
-        // For Alpaca, position_id is the symbol — pass through directly
-        let alpaca_symbol = position_id;
+        // Strip synthetic _position suffix if present (list_positions returns "{symbol}_position")
+        let alpaca_symbol = position_id
+            .strip_suffix("_position")
+            .unwrap_or(position_id);
         let (api_key, api_secret) = self.credentials();
 
         let downstream_start = Instant::now();
@@ -985,8 +1024,10 @@ impl TradingAdapter for AlpacaAdapter {
     ) -> GatewayResult<OrderHandle> {
         let (api_key, api_secret) = self.credentials();
 
-        // For Alpaca, position_id is the symbol — pass through directly
-        let alpaca_symbol = position_id;
+        // Strip synthetic _position suffix if present (list_positions returns "{symbol}_position")
+        let alpaca_symbol = position_id
+            .strip_suffix("_position")
+            .unwrap_or(position_id);
 
         let url = if let Some(qty) = request.quantity {
             format!(
@@ -1448,6 +1489,12 @@ impl AlpacaAdapter {
     }
 
     async fn cancel_order_internal(&self, order_id: &str) -> GatewayResult<()> {
+        if !is_valid_uuid(order_id) {
+            return Err(GatewayError::OrderNotFound {
+                id: order_id.to_string(),
+            });
+        }
+
         let (api_key, api_secret) = self.credentials();
 
         let downstream_start = Instant::now();
@@ -1494,6 +1541,12 @@ impl AlpacaAdapter {
         order_id: &str,
         request: &ModifyOrderRequest,
     ) -> GatewayResult<ModifyOrderResult> {
+        if !is_valid_uuid(order_id) {
+            return Err(GatewayError::OrderNotFound {
+                id: order_id.to_string(),
+            });
+        }
+
         let (api_key, api_secret) = self.credentials();
 
         let alpaca_request = AlpacaModifyOrderRequest {
@@ -1577,8 +1630,8 @@ impl AlpacaAdapter {
             )
         } else {
             format!(
-                "{}/v2/stocks/{}/quotes/latest",
-                self.data_url, alpaca_symbol
+                "{}/v2/stocks/{}/quotes/latest?feed={}",
+                self.data_url, alpaca_symbol, self.feed
             )
         };
 
@@ -1706,6 +1759,11 @@ impl AlpacaAdapter {
 
         let separator = if is_crypto { "&" } else { "?" };
         url.push_str(&format!("{separator}timeframe={alpaca_timeframe}"));
+
+        // For stocks, specify the data feed (iex = free tier, sip = paid)
+        if !is_crypto {
+            url.push_str(&format!("&feed={}", self.feed));
+        }
 
         let limit = params.limit.unwrap_or(100);
         url.push_str(&format!("&limit={limit}"));

@@ -31,6 +31,17 @@ pub use trade::{Trade, TradeQueryParams};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Helper for deserializing query params that may arrive as a single value or a list.
+///
+/// `serde_urlencoded` can produce either a single string or a `Vec<String>` depending on
+/// whether repeated keys (`?x=a&x=b`) or a single key (`?x=a`) is sent.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum OneOrMany<T> {
+    Many(Vec<T>),
+    One(T),
+}
+
 /// Order side (buy or sell)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

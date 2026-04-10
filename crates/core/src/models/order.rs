@@ -579,8 +579,12 @@ pub struct OrderQueryParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
 
-    /// Filter by status (multiple allowed)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Filter by status (multiple allowed, accepts comma-separated values)
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "deserialize_comma_separated_status"
+    )]
     pub status: Option<Vec<OrderStatus>>,
 
     /// Filter by side
@@ -606,6 +610,54 @@ pub struct OrderQueryParams {
     /// Maximum number of orders to return
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+}
+
+/// Deserialize status field accepting both repeated params (`?status=X&status=Y`)
+/// and comma-separated values (`?status=X,Y`).
+fn deserialize_comma_separated_status<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<OrderStatus>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    // Try to deserialize as a sequence first (repeated params), fall back to string
+    let raw: Option<super::OneOrMany<String>> = Option::deserialize(deserializer)?;
+    match raw {
+        None => Ok(None),
+        Some(super::OneOrMany::One(s)) => {
+            let statuses: Result<Vec<OrderStatus>, _> = s
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| serde_json::from_value(serde_json::Value::String(s.to_string())))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| D::Error::custom(format!("invalid status value: {e}")));
+            let statuses = statuses?;
+            if statuses.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(statuses))
+            }
+        }
+        Some(super::OneOrMany::Many(values)) => {
+            let statuses: Result<Vec<OrderStatus>, _> = values
+                .into_iter()
+                .flat_map(|s| s.split(',').map(str::to_string).collect::<Vec<_>>())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(|s| serde_json::from_value(serde_json::Value::String(s)))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| D::Error::custom(format!("invalid status value: {e}")));
+            let statuses = statuses?;
+            if statuses.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(statuses))
+            }
+        }
+    }
 }
 
 /// Result of cancelling an order.

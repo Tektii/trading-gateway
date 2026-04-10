@@ -340,7 +340,7 @@
           {
             "name": "status",
             "in": "query",
-            "description": "Filter by status (multiple allowed)",
+            "description": "Filter by status (multiple allowed, accepts comma-separated values)",
             "required": false,
             "schema": {
               "type": [
@@ -617,7 +617,7 @@
           {
             "name": "status",
             "in": "query",
-            "description": "Filter by status (multiple allowed)",
+            "description": "Filter by status (multiple allowed, accepts comma-separated values)",
             "required": false,
             "schema": {
               "type": [
@@ -2190,7 +2190,7 @@
             "items": {
               "$ref": "#/components/schemas/OrderStatus"
             },
-            "description": "Filter by status (multiple allowed)"
+            "description": "Filter by status (multiple allowed, accepts comma-separated values)"
           },
           "symbol": {
             "type": [
