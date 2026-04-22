@@ -160,7 +160,9 @@ async fn main() -> anyhow::Result<()> {
                     "BTCUSD".to_string(),
                     "EURUSD".to_string(),
                 ];
-                let default_events = vec!["quote".to_string()];
+                // Candles are the most common default for strategies; users who
+                // want quote streaming can override via SUBSCRIPTIONS.
+                let default_events = vec!["candle".to_string()];
                 info!(
                     symbols = ?default_symbols,
                     "Mock mode: auto-subscribing to default symbols (set SUBSCRIPTIONS to override)"
