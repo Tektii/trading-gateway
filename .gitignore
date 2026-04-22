@@ -30,3 +30,10 @@ gateway-exit-state.json
 
 # Local scratch
 tmp/
+
+# Python (strategy templates under examples/python)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/

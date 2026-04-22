@@ -1,0 +1,25 @@
+[project]
+name = "tektii-template-ma-crossover"
+version = "0.1.0"
+description = "Tektii platform reference strategy: SMA crossover trend-following."
+requires-python = ">=3.11"
+dependencies = [
+    "tektii-gateway>=0.1,<1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["strategy"]
