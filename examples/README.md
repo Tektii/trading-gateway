@@ -32,8 +32,8 @@ pip install -e .
 SYMBOL=EUR/USD python strategy.py
 ```
 
-The SDK reads `TEKTII_GATEWAY_URL` (default `http://localhost:8080`) and
-`TEKTII_API_KEY` from the environment, so pointing at a remote gateway is
+The SDK reads `TRADING_GATEWAY_URL` (default `http://localhost:8080`) and
+`TRADING_GATEWAY_API_KEY` from the environment, so pointing at a remote gateway is
 a one-line change.
 
 ## Running the tests
@@ -58,7 +58,7 @@ docker build -t tektii-template-ma-crossover:dev .
 # Linux: --network=host works. macOS: --network=host doesn't reach the host,
 # so point the SDK at the Docker host bridge instead.
 docker run --rm \
-  -e TEKTII_GATEWAY_URL=http://host.docker.internal:8080 \
+  -e TRADING_GATEWAY_URL=http://host.docker.internal:8080 \
   -e SYMBOL=EUR/USD \
   tektii-template-ma-crossover:dev
 ```
@@ -74,10 +74,10 @@ and adjusting the install line.
 
 ## Backtest and live parity
 
-Templates use the SDK's `auto_ack=True` mode, which is required by the
-Tektii backtest engine (ACKs drive simulated time progression) and a no-op
-against live brokers. The same strategy binary runs unchanged in both
-environments — backtest, then deploy.
+The same strategy binary runs unchanged against a live broker and the Tektii
+backtest engine. The SDK coordinates simulated-time progression with the
+engine internally — there is no code path for the strategy author to toggle
+between modes.
 
 ## What about Node.js?
 

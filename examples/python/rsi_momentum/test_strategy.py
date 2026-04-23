@@ -11,7 +11,7 @@ import httpx
 import pytest
 import respx
 
-from tektii import AsyncTektiiGateway, CandleEvent
+from tektii import AsyncTradingGateway, CandleEvent
 
 from strategy import (
     Config,
@@ -100,7 +100,7 @@ async def test_oversold_entry_submits_buy_with_bracket(respx_mock: respx.MockRou
         stop_loss_pct=Decimal("0.02"),
         take_profit_pct=Decimal("0.05"),
     )
-    async with AsyncTektiiGateway(base_url="http://localhost:8080") as gw:
+    async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
         strat = RsiMomentumStrategy(gw, cfg)
         for close in ("100", "95", "90", "85"):
             await strat.on_candle(_candle(close))

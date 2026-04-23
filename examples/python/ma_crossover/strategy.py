@@ -21,8 +21,8 @@ MA_LONG              20              Long SMA period, in bars
 STOP_LOSS_PCT        (unset)         e.g. "0.02" = attach 2% SL to entries
 TAKE_PROFIT_PCT      (unset)         e.g. "0.04" = attach 4% TP to entries
 LOG_LEVEL            INFO            Python logging level
-TEKTII_GATEWAY_URL   localhost:8080  Gateway base URL (read by the SDK)
-TEKTII_API_KEY       (unset)         API key for remote gateways (read by the SDK)
+TRADING_GATEWAY_URL   localhost:8080  Gateway base URL (read by the SDK)
+TRADING_GATEWAY_API_KEY       (unset)         API key for remote gateways (read by the SDK)
 ===================  ==============  ==============================================
 
 Local run
@@ -49,7 +49,7 @@ from enum import Enum, auto
 from typing import Deque
 
 from tektii import (
-    AsyncTektiiGateway,
+    AsyncTradingGateway,
     CandleEvent,
     ConnectionEvent,
     ErrorEvent,
@@ -161,7 +161,7 @@ def bracket_prices(
 
 
 class MaCrossoverStrategy:
-    def __init__(self, gw: AsyncTektiiGateway, cfg: Config) -> None:
+    def __init__(self, gw: AsyncTradingGateway, cfg: Config) -> None:
         self._gw = gw
         self._cfg = cfg
         self._short: Deque[Decimal] = deque(maxlen=cfg.short_window)
@@ -313,10 +313,7 @@ async def main() -> None:
     stop = asyncio.Event()
     _install_signal_handlers(loop, stop)
 
-    # auto_ack=True is required by the Tektii backtest engine (ACKs drive
-    # simulated time) and is a no-op against live brokers. Hardcoding it
-    # keeps the template runnable unmodified in both modes.
-    async with AsyncTektiiGateway(auto_ack=True) as gw:
+    async with AsyncTradingGateway() as gw:
         strategy = MaCrossoverStrategy(gw, cfg)
         run_task = asyncio.create_task(strategy.run(), name="strategy")
         stop_task = asyncio.create_task(stop.wait(), name="stop")

@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from tektii import AsyncTektiiGateway, CandleEvent
+from tektii import AsyncTradingGateway, CandleEvent
 
 from strategy import (
     Config,
@@ -79,7 +79,7 @@ async def test_golden_cross_submits_buy_with_bracket(respx_mock: respx.MockRoute
         stop_loss_pct=Decimal("0.02"),
         take_profit_pct=Decimal("0.04"),
     )
-    async with AsyncTektiiGateway(base_url="http://localhost:8080") as gw:
+    async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
         strat = MaCrossoverStrategy(gw, cfg)
 
         # Warm-up + short below long: closes [1, 2, 3] -> short=2.5, long=2.0
