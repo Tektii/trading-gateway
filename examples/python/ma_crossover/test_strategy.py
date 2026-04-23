@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from tektii_gateway import AsyncTektiiGateway, CandleEvent
+from tektii import AsyncTektiiGateway, CandleEvent
 
 from strategy import (
     Config,

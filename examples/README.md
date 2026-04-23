@@ -1,7 +1,7 @@
 # Strategy Templates
 
 Reference strategies for the Tektii platform. Each template is a runnable,
-dockerised Python program built on the [Tektii Python SDK](https://pypi.org/project/tektii-gateway/).
+dockerised Python program built on the [Tektii Python SDK](https://pypi.org/project/tektii/).
 They are the same images the platform provisions when you pick "start from
 template" in the UI — fork one, tune it to your edge, and point it at the
 gateway or the backtest engine.
@@ -67,7 +67,7 @@ The images run as an unprivileged user and exec `python` as PID 1 so
 `SIGTERM` is delivered cleanly on `docker stop` — Cloud Run's 10-second
 grace shutdown is honoured without extra work.
 
-The `pip install` step pulls `tektii-gateway` from PyPI. Once the Python
+The `pip install` step pulls `tektii` from PyPI. Once the Python
 SDK is published, these images build standalone. Until then, build against
 a local SDK checkout by copying the built wheel into the template directory
 and adjusting the install line.

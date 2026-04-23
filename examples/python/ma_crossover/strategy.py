@@ -48,7 +48,7 @@ from decimal import Decimal
 from enum import Enum, auto
 from typing import Deque
 
-from tektii_gateway import (
+from tektii import (
     AsyncTektiiGateway,
     CandleEvent,
     ConnectionEvent,
