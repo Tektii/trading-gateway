@@ -18,6 +18,8 @@ SYMBOL               EUR/USD         Trading symbol
 ORDER_QUANTITY       0.01            Order size (fractional allowed on forex/crypto)
 MA_SHORT             10              Short SMA period, in bars
 MA_LONG              20              Long SMA period, in bars
+TIMEFRAME            1m              Bar resolution used for the warm-up backfill;
+                                     should match the gateway stream resolution
 STOP_LOSS_PCT        (unset)         e.g. "0.02" = attach 2% SL to entries
 TAKE_PROFIT_PCT      (unset)         e.g. "0.04" = attach 4% TP to entries
 LOG_LEVEL            INFO            Python logging level
@@ -55,7 +57,13 @@ from tektii import (
     ErrorEvent,
     OrderEvent,
     OrderRejectedError,
+    TektiiError,
 )
+
+# Extra bars fetched beyond the minimum needed for the longest indicator
+# window — cushions against missing/duplicate/partial bars at the tail
+# of the provider's history.
+WARMUP_MARGIN_BARS = 5
 
 log = logging.getLogger("ma_crossover")
 
@@ -71,6 +79,7 @@ class Config:
     quantity: Decimal
     short_window: int
     long_window: int
+    timeframe: str
     stop_loss_pct: Decimal | None
     take_profit_pct: Decimal | None
 
@@ -86,6 +95,7 @@ class Config:
                 quantity=Decimal(os.environ.get("ORDER_QUANTITY", "0.01")),
                 short_window=int(os.environ.get("MA_SHORT", "10")),
                 long_window=int(os.environ.get("MA_LONG", "20")),
+                timeframe=os.environ.get("TIMEFRAME", "1m"),
                 stop_loss_pct=opt_decimal("STOP_LOSS_PCT"),
                 take_profit_pct=opt_decimal("TAKE_PROFIT_PCT"),
             )
@@ -168,6 +178,48 @@ class MaCrossoverStrategy:
         self._long: Deque[Decimal] = deque(maxlen=cfg.long_window)
         self._cross = Cross.UNKNOWN
         self._state = StrategyState.FLAT
+
+    async def warm_up(self) -> None:
+        """Seed the SMA windows from historical bars.
+
+        Without this, the strategy discards the first ``long_window`` live
+        bars as warm-up. With it, the first live bar can already produce a
+        cross signal.
+
+        Best-effort: any SDK error (connection, auth, 5xx, bad timeframe)
+        falls back to cold-start with a warning so a transient history
+        outage doesn't kill the strategy on boot.
+        """
+        limit = self._cfg.long_window + WARMUP_MARGIN_BARS
+        try:
+            bars = await self._gw.get_bars(
+                self._cfg.symbol, self._cfg.timeframe, limit=limit
+            )
+        except TektiiError as err:
+            log.warning(
+                "history fetch failed, falling back to cold start: %s", err
+            )
+            return
+
+        if not bars:
+            log.warning(
+                "history fetch returned no bars, falling back to cold start"
+            )
+            return
+
+        for bar in bars:
+            close = Decimal(bar.close)
+            self._short.append(close)
+            self._long.append(close)
+            if len(self._long) >= self._cfg.long_window:
+                short_ma = compute_sma(self._short)
+                long_ma = compute_sma(self._long)
+                self._cross = Cross.ABOVE if short_ma > long_ma else Cross.BELOW
+
+        log.info(
+            "warmed up from history: %d bars, cross=%s",
+            len(bars), self._cross.name,
+        )
 
     async def on_candle(self, event: CandleEvent) -> None:
         bar = event.bar
@@ -315,6 +367,7 @@ async def main() -> None:
 
     async with AsyncTradingGateway() as gw:
         strategy = MaCrossoverStrategy(gw, cfg)
+        await strategy.warm_up()
         run_task = asyncio.create_task(strategy.run(), name="strategy")
         stop_task = asyncio.create_task(stop.wait(), name="stop")
         done, _ = await asyncio.wait(
