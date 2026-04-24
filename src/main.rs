@@ -404,6 +404,9 @@ async fn register_adapter(
             if let Ok(url) = env::var("ALPACA_BASE_URL") {
                 creds = creds.with_base_url(url);
             }
+            if let Ok(url) = env::var("ALPACA_DATA_URL") {
+                creds = creds.with_data_url(url);
+            }
             if let Ok(feed) = env::var("ALPACA_FEED") {
                 creds = creds.with_feed(feed);
             }

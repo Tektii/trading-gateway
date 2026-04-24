@@ -5,6 +5,7 @@ pub struct AlpacaCredentials {
     pub api_secret: SecretBox<String>,
     pub feed: Option<String>,
     pub base_url: Option<String>,
+    pub data_url: Option<String>,
 }
 
 impl AlpacaCredentials {
@@ -14,6 +15,7 @@ impl AlpacaCredentials {
             api_secret: SecretBox::new(Box::new(api_secret.into())),
             feed: None,
             base_url: None,
+            data_url: None,
         }
     }
 
@@ -28,6 +30,12 @@ impl AlpacaCredentials {
         self.base_url = Some(url.into());
         self
     }
+
+    #[must_use]
+    pub fn with_data_url(mut self, url: impl Into<String>) -> Self {
+        self.data_url = Some(url.into());
+        self
+    }
 }
 
 impl std::fmt::Debug for AlpacaCredentials {
@@ -37,6 +45,7 @@ impl std::fmt::Debug for AlpacaCredentials {
             .field("api_secret", &"[REDACTED]")
             .field("feed", &self.feed)
             .field("base_url", &self.base_url)
+            .field("data_url", &self.data_url)
             .finish()
     }
 }

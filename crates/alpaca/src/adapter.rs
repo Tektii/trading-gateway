@@ -110,13 +110,13 @@ impl AlpacaAdapter {
                 _ => "https://paper-api.alpaca.markets".to_string(),
             });
 
-        // For testing (custom base_url), use same URL for data
-        // For production, use the dedicated data URL
-        let data_url = if credentials.base_url.is_some() {
-            base_url.clone()
-        } else {
-            ALPACA_DATA_URL.to_string()
-        };
+        // Data URL is independent of trading base URL — Alpaca serves market data
+        // from data.alpaca.markets regardless of paper/live. Tests can override to
+        // point at a wiremock by calling with_data_url.
+        let data_url = credentials
+            .data_url
+            .clone()
+            .unwrap_or_else(|| ALPACA_DATA_URL.to_string());
 
         // Configure client with connection pooling for optimal performance
         let client = Client::builder()

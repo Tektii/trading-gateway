@@ -10,8 +10,13 @@ use tektii_gateway_test_support::wiremock_helpers::merge_json;
 use tokio::sync::broadcast;
 
 /// Create an `AlpacaAdapter` pointed at a wiremock server.
+///
+/// Both the trading and data URLs are aimed at the same mock so a single
+/// wiremock instance can serve all of an adapter's outbound calls.
 pub fn test_adapter(base_url: &str) -> AlpacaAdapter {
-    let credentials = AlpacaCredentials::new("test-key", "test-secret").with_base_url(base_url);
+    let credentials = AlpacaCredentials::new("test-key", "test-secret")
+        .with_base_url(base_url)
+        .with_data_url(base_url);
     let (broadcaster, _rx) = broadcast::channel::<WsMessage>(16);
     AlpacaAdapter::new(&credentials, broadcaster, TradingPlatform::AlpacaPaper)
         .expect("Failed to build HTTP client")
