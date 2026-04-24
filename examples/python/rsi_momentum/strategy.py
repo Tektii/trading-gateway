@@ -19,6 +19,8 @@ ORDER_QUANTITY       0.01            Order size (fractional allowed on forex/cry
 RSI_PERIOD           14              RSI lookback, in bars (Wilder's smoothing)
 RSI_OVERSOLD         30              Enter long when RSI crosses below this
 RSI_OVERBOUGHT       70              Exit long when RSI crosses above this
+TIMEFRAME            1m              Bar resolution used for the warm-up backfill;
+                                     should match the gateway stream resolution
 STOP_LOSS_PCT        (unset)         e.g. "0.02" = attach 2% SL to entries
 TAKE_PROFIT_PCT      (unset)         e.g. "0.04" = attach 4% TP to entries
 LOG_LEVEL            INFO            Python logging level
@@ -54,7 +56,13 @@ from tektii import (
     ErrorEvent,
     OrderEvent,
     OrderRejectedError,
+    TektiiError,
 )
+
+# Extra bars fetched beyond the minimum needed for the longest indicator
+# window — cushions against missing/duplicate/partial bars at the tail
+# of the provider's history.
+WARMUP_MARGIN_BARS = 5
 
 log = logging.getLogger("rsi_momentum")
 
@@ -71,6 +79,7 @@ class Config:
     period: int
     oversold: Decimal
     overbought: Decimal
+    timeframe: str
     stop_loss_pct: Decimal | None
     take_profit_pct: Decimal | None
 
@@ -87,6 +96,7 @@ class Config:
                 period=int(os.environ.get("RSI_PERIOD", "14")),
                 oversold=Decimal(os.environ.get("RSI_OVERSOLD", "30")),
                 overbought=Decimal(os.environ.get("RSI_OVERBOUGHT", "70")),
+                timeframe=os.environ.get("TIMEFRAME", "1m"),
                 stop_loss_pct=opt_decimal("STOP_LOSS_PCT"),
                 take_profit_pct=opt_decimal("TAKE_PROFIT_PCT"),
             )
@@ -235,6 +245,50 @@ class RsiMomentumStrategy:
         self._zone = Zone.UNKNOWN
         self._state = StrategyState.FLAT
 
+    async def warm_up(self) -> None:
+        """Seed the Wilder RSI state from historical bars.
+
+        Without this, ``RsiState`` returns None for the first ``period + 1``
+        live bars. With it, the first live bar already produces an RSI value
+        and can fire a zone-entry signal.
+
+        Best-effort: any SDK error (connection, auth, 5xx, bad timeframe)
+        falls back to cold-start with a warning so a transient history
+        outage doesn't kill the strategy on boot.
+        """
+        limit = self._cfg.period + 1 + WARMUP_MARGIN_BARS
+        try:
+            bars = await self._gw.get_bars(
+                self._cfg.symbol, self._cfg.timeframe, limit=limit
+            )
+        except TektiiError as err:
+            log.warning(
+                "history fetch failed, falling back to cold start: %s", err
+            )
+            return
+
+        if not bars:
+            log.warning(
+                "history fetch returned no bars, falling back to cold start"
+            )
+            return
+
+        last_rsi: Decimal | None = None
+        for bar in bars:
+            value = self._rsi.update(Decimal(bar.close))
+            if value is not None:
+                last_rsi = value
+
+        if last_rsi is not None:
+            self._zone = classify_zone(
+                last_rsi, self._cfg.oversold, self._cfg.overbought
+            )
+
+        log.info(
+            "warmed up from history: %d bars, rsi=%s zone=%s",
+            len(bars), last_rsi, self._zone.name,
+        )
+
     async def on_candle(self, event: CandleEvent) -> None:
         bar = event.bar
         if bar.symbol != self._cfg.symbol:
@@ -379,6 +433,7 @@ async def main() -> None:
 
     async with AsyncTradingGateway() as gw:
         strategy = RsiMomentumStrategy(gw, cfg)
+        await strategy.warm_up()
         run_task = asyncio.create_task(strategy.run(), name="strategy")
         stop_task = asyncio.create_task(stop.wait(), name="stop")
         done, _ = await asyncio.wait(

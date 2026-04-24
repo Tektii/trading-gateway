@@ -25,6 +25,20 @@ from strategy import (
 )
 
 
+def _bar(close: str, *, timestamp: str = "2026-04-20T10:00:00Z") -> dict:
+    return {
+        "symbol": "EUR/USD",
+        "provider": "mock",
+        "timeframe": "1m",
+        "timestamp": timestamp,
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": "1000",
+    }
+
+
 def _candle(close: str, symbol: str = "EUR/USD") -> CandleEvent:
     return CandleEvent.model_validate(
         {
@@ -97,6 +111,7 @@ async def test_oversold_entry_submits_buy_with_bracket(respx_mock: respx.MockRou
         period=3,
         oversold=Decimal("30"),
         overbought=Decimal("70"),
+        timeframe="1m",
         stop_loss_pct=Decimal("0.02"),
         take_profit_pct=Decimal("0.05"),
     )
@@ -115,3 +130,84 @@ async def test_oversold_entry_submits_buy_with_bracket(respx_mock: respx.MockRou
     assert body["stop_loss"] == "83.30"
     assert body["take_profit"] == "89.25"
     assert strat._state == StrategyState.PENDING_ENTRY
+
+
+@pytest.mark.asyncio
+@respx.mock(base_url="http://localhost:8080")
+async def test_warmup_fires_signal_on_first_live_bar(respx_mock: respx.MockRouter) -> None:
+    """Seed RSI from history so the first live bar can produce an entry.
+
+    History is a 4-bar rise that leaves the Wilder state in the NEUTRAL
+    zone after warmup. The first live bar is a sharp drop that pulls RSI
+    into OVERSOLD — which fires a BUY on bar #1 instead of waiting
+    `period + 1` live bars.
+    """
+    bars_route = respx_mock.get("/v1/bars/EUR%2FUSD").mock(
+        return_value=httpx.Response(
+            200,
+            # Monotonic rise: all gains, zero losses → RSI saturates at 100
+            # → zone NEUTRAL only if RSI lands above oversold and below
+            # overbought. Rising gives RSI=100 (OVERBOUGHT). Use a mixed
+            # sequence ending NEUTRAL instead.
+            json=[_bar(c) for c in ("100", "101", "100", "101")],
+        )
+    )
+    orders_route = respx_mock.post("/v1/orders").mock(
+        return_value=httpx.Response(201, json={"id": "ord_1", "status": "PENDING"}),
+    )
+
+    cfg = Config(
+        symbol="EUR/USD",
+        quantity=Decimal("0.01"),
+        period=3,
+        oversold=Decimal("30"),
+        overbought=Decimal("70"),
+        timeframe="1m",
+        stop_loss_pct=None,
+        take_profit_pct=None,
+    )
+    async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
+        strat = RsiMomentumStrategy(gw, cfg)
+        await strat.warm_up()
+
+        # After warmup: RSI computed; zone should be NEUTRAL (RSI ~50
+        # from alternating gains/losses).
+        assert bars_route.called
+        assert strat._zone == Zone.NEUTRAL
+        assert strat._state == StrategyState.FLAT
+
+        # First live bar: a sharp drop takes RSI into OVERSOLD → BUY.
+        await strat.on_candle(_candle("10"))
+
+    assert orders_route.called, "expected BUY on the very first live bar"
+    assert strat._state == StrategyState.PENDING_ENTRY
+
+
+@pytest.mark.asyncio
+@respx.mock(base_url="http://localhost:8080")
+async def test_warmup_falls_back_cleanly_on_fetch_failure(
+    respx_mock: respx.MockRouter,
+) -> None:
+    """A 5xx from the bars endpoint must not kill the strategy — warm_up
+    logs and returns, leaving the strategy in cold-start state.
+    """
+    respx_mock.get("/v1/bars/EUR%2FUSD").mock(
+        return_value=httpx.Response(500, json={"code": "ERR", "message": "boom"})
+    )
+
+    cfg = Config(
+        symbol="EUR/USD",
+        quantity=Decimal("0.01"),
+        period=3,
+        oversold=Decimal("30"),
+        overbought=Decimal("70"),
+        timeframe="1m",
+        stop_loss_pct=None,
+        take_profit_pct=None,
+    )
+    async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
+        strat = RsiMomentumStrategy(gw, cfg)
+        await strat.warm_up()  # must not raise
+
+    assert strat._zone == Zone.UNKNOWN
+    assert strat._state == StrategyState.FLAT
