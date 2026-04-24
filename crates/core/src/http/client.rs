@@ -58,9 +58,23 @@ pub fn default_error_mapper(
             field: None,
         },
 
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => GatewayError::Unauthorized {
+        // 401 = bad credentials. 403 = authenticated but the requested action
+        // isn't permitted — for trading APIs that's almost always an order
+        // rejection (insufficient buying power, asset class disabled, cost
+        // basis below minimum, etc), not an auth issue.
+        StatusCode::UNAUTHORIZED => GatewayError::Unauthorized {
             reason: extract_message(&body),
             code: "AUTH_FAILED".to_string(),
+        },
+
+        StatusCode::FORBIDDEN => GatewayError::OrderRejected {
+            reason: extract_message(&body),
+            reject_code: body.get("code").and_then(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            }),
+            details: Some(body),
         },
 
         StatusCode::NOT_FOUND => GatewayError::ProviderError {
@@ -332,14 +346,25 @@ mod tests {
     }
 
     #[test]
-    fn default_mapper_403_unauthorized() {
-        let body = serde_json::json!({"message": "Forbidden"});
+    fn default_mapper_403_order_rejected() {
+        // 403 = action forbidden — for brokers this is order-level (insufficient
+        // funds, cost basis below minimum, etc), not bad credentials. Should
+        // surface as OrderRejected so SDK callers don't misread it as auth.
+        let body = serde_json::json!({
+            "message": "cost basis must be >= minimal amount of order 10",
+            "code": 40310000
+        });
         let err = default_error_mapper(StatusCode::FORBIDDEN, body, None, "test");
         match err {
-            GatewayError::Unauthorized { code, .. } => {
-                assert_eq!(code, "AUTH_FAILED");
+            GatewayError::OrderRejected {
+                reason,
+                reject_code,
+                ..
+            } => {
+                assert!(reason.contains("cost basis"), "got: {reason}");
+                assert_eq!(reject_code.as_deref(), Some("40310000"));
             }
-            other => panic!("Expected Unauthorized, got: {other:?}"),
+            other => panic!("Expected OrderRejected, got: {other:?}"),
         }
     }
 

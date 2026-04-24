@@ -580,10 +580,25 @@ impl AlpacaAdapter {
                 field: None,
             },
 
-            401 | 403 => GatewayError::Unauthorized {
+            // Bad/missing credentials. The caller's API key is invalid.
+            401 => GatewayError::Unauthorized {
                 reason: message,
                 code: "AUTH_FAILED".to_string(),
             },
+
+            // Alpaca uses 403 for "authenticated but the requested action is not
+            // allowed" — almost always an order-level rejection (insufficient
+            // buying power, cost basis below minimum, asset class disabled, etc).
+            // Treat as OrderRejected so callers don't misread it as an auth bug.
+            403 => {
+                let raw_code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+                let reject_code = Some(map_alpaca_reject_code(raw_code).to_string());
+                GatewayError::OrderRejected {
+                    reason: message,
+                    reject_code,
+                    details: Some(body.clone()),
+                }
+            }
 
             // 404 from Alpaca data endpoints means the resource (symbol, etc.) wasn't found.
             // Order/position 404s are handled before map_http_error is called.
@@ -2337,6 +2352,44 @@ mod tests {
                 assert_eq!(code, "AUTH_FAILED");
             }
             other => panic!("Expected Unauthorized, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_error_403_with_known_code_maps_to_order_rejected() {
+        // Alpaca returns 403 with code=insufficient_buying_power on order
+        // submission when the account lacks funds — not an auth failure.
+        let body = serde_json::json!({
+            "message": "insufficient buying power",
+            "code": "insufficient_buying_power"
+        });
+        let err = AlpacaAdapter::map_http_error(reqwest::StatusCode::FORBIDDEN, &body, None);
+        match err {
+            GatewayError::OrderRejected { reject_code, .. } => {
+                assert_eq!(reject_code.as_deref(), Some("INSUFFICIENT_FUNDS"));
+            }
+            other => panic!("Expected OrderRejected, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_error_403_cost_basis_message_maps_to_order_rejected() {
+        // 403 with no code, just a message (e.g. "cost basis must be >= 10")
+        // should still be classified as OrderRejected, not as an auth failure.
+        let body = serde_json::json!({
+            "message": "cost basis must be >= minimal amount of order 10"
+        });
+        let err = AlpacaAdapter::map_http_error(reqwest::StatusCode::FORBIDDEN, &body, None);
+        match err {
+            GatewayError::OrderRejected {
+                reason,
+                reject_code,
+                ..
+            } => {
+                assert!(reason.contains("cost basis"), "got: {reason}");
+                assert_eq!(reject_code.as_deref(), Some("ORDER_REJECTED"));
+            }
+            other => panic!("Expected OrderRejected, got: {other:?}"),
         }
     }
 
