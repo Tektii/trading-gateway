@@ -227,21 +227,24 @@ async fn submit_order_rejected() {
 
 #[tokio::test]
 async fn get_order_success() {
+    // Adapter validates that order_id is a UUID before hitting Alpaca, so tests must
+    // use real UUID strings (Alpaca order IDs are always UUIDs in production).
+    const ORDER_ID: &str = "11111111-1111-1111-1111-111111111111";
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
     mount_json(
         &server,
         "GET",
-        "/v2/orders/order-abc-123",
+        &format!("/v2/orders/{ORDER_ID}"),
         200,
-        alpaca_order_json(&json!({})),
+        alpaca_order_json(&json!({"id": ORDER_ID})),
     )
     .await;
 
-    let order = adapter.get_order("order-abc-123").await.unwrap();
+    let order = adapter.get_order(ORDER_ID).await.unwrap();
 
-    assert_eq!(order.id, "order-abc-123");
+    assert_eq!(order.id, ORDER_ID);
     assert_eq!(order.symbol, "AAPL");
     assert_eq!(order.side, Side::Buy);
     assert_eq!(order.order_type, OrderType::Market);
@@ -273,16 +276,17 @@ async fn get_order_not_found() {
 
 #[tokio::test]
 async fn get_order_filled() {
+    const ORDER_ID: &str = "22222222-2222-2222-2222-222222222222";
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
     mount_json(
         &server,
         "GET",
-        "/v2/orders/order-filled",
+        &format!("/v2/orders/{ORDER_ID}"),
         200,
         alpaca_order_json(&json!({
-            "id": "order-filled",
+            "id": ORDER_ID,
             "status": "filled",
             "filled_qty": "10",
             "filled_avg_price": "152.50"
@@ -290,7 +294,7 @@ async fn get_order_filled() {
     )
     .await;
 
-    let order = adapter.get_order("order-filled").await.unwrap();
+    let order = adapter.get_order(ORDER_ID).await.unwrap();
 
     assert_eq!(order.status, OrderStatus::Filled);
     assert_eq!(order.filled_quantity, dec!(10));
@@ -372,15 +376,17 @@ async fn get_order_history() {
 
 #[tokio::test]
 async fn modify_order_success() {
+    const ORDER_ID: &str = "33333333-3333-3333-3333-333333333333";
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
     mount_json(
         &server,
         "PATCH",
-        "/v2/orders/order-abc-123",
+        &format!("/v2/orders/{ORDER_ID}"),
         200,
         alpaca_order_json(&json!({
+            "id": ORDER_ID,
             "type": "limit",
             "limit_price": "160.00"
         })),
@@ -396,12 +402,9 @@ async fn modify_order_success() {
         trailing_distance: None,
     };
 
-    let result = adapter
-        .modify_order("order-abc-123", &request)
-        .await
-        .unwrap();
-    assert_eq!(result.previous_order_id, Some("order-abc-123".to_string()));
-    assert_eq!(result.order.id, "order-abc-123");
+    let result = adapter.modify_order(ORDER_ID, &request).await.unwrap();
+    assert_eq!(result.previous_order_id, Some(ORDER_ID.to_string()));
+    assert_eq!(result.order.id, ORDER_ID);
 }
 
 #[tokio::test]
@@ -439,12 +442,13 @@ async fn modify_order_not_found() {
 
 #[tokio::test]
 async fn cancel_order_success() {
+    const ORDER_ID: &str = "44444444-4444-4444-4444-444444444444";
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
     // cancel_order calls DELETE then GET
     Mock::given(method("DELETE"))
-        .and(path("/v2/orders/order-abc-123"))
+        .and(path(format!("/v2/orders/{ORDER_ID}")))
         .respond_with(ResponseTemplate::new(204))
         .mount(&server)
         .await;
@@ -452,13 +456,13 @@ async fn cancel_order_success() {
     mount_json(
         &server,
         "GET",
-        "/v2/orders/order-abc-123",
+        &format!("/v2/orders/{ORDER_ID}"),
         200,
-        alpaca_order_json(&json!({"status": "canceled"})),
+        alpaca_order_json(&json!({"id": ORDER_ID, "status": "canceled"})),
     )
     .await;
 
-    let result = adapter.cancel_order("order-abc-123").await.unwrap();
+    let result = adapter.cancel_order(ORDER_ID).await.unwrap();
     assert!(result.success);
     assert_eq!(result.order.status, OrderStatus::Cancelled);
 }

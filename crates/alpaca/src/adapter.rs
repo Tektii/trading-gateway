@@ -957,9 +957,7 @@ impl TradingAdapter for AlpacaAdapter {
         self.check_circuit_breaker().await?;
 
         // Strip synthetic _position suffix if present (list_positions returns "{symbol}_position")
-        let alpaca_symbol = position_id
-            .strip_suffix("_position")
-            .unwrap_or(position_id);
+        let alpaca_symbol = position_id.strip_suffix("_position").unwrap_or(position_id);
         let (api_key, api_secret) = self.credentials();
 
         let downstream_start = Instant::now();
@@ -1025,9 +1023,7 @@ impl TradingAdapter for AlpacaAdapter {
         let (api_key, api_secret) = self.credentials();
 
         // Strip synthetic _position suffix if present (list_positions returns "{symbol}_position")
-        let alpaca_symbol = position_id
-            .strip_suffix("_position")
-            .unwrap_or(position_id);
+        let alpaca_symbol = position_id.strip_suffix("_position").unwrap_or(position_id);
 
         let url = if let Some(qty) = request.quantity {
             format!(
@@ -2345,17 +2341,17 @@ mod tests {
     }
 
     #[test]
-    fn http_error_404_provider_error() {
+    fn http_error_404_invalid_request() {
+        // 404 from data endpoints (symbol unknown, etc.) is a client error, not a provider
+        // outage — must NOT trip the circuit breaker. Order/position 404s are translated to
+        // OrderNotFound / PositionNotFound before this map function is reached.
         let body = serde_json::json!({"message": "Not found"});
         let err = AlpacaAdapter::map_http_error(reqwest::StatusCode::NOT_FOUND, &body, None);
         match err {
-            GatewayError::ProviderError {
-                message, provider, ..
-            } => {
-                assert!(message.contains("404"), "message should mention 404");
-                assert_eq!(provider.as_deref(), Some("alpaca"));
+            GatewayError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Not found"), "got: {message}");
             }
-            other => panic!("Expected ProviderError, got: {other:?}"),
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
         }
     }
 
@@ -2373,14 +2369,29 @@ mod tests {
     }
 
     #[test]
-    fn http_error_unknown_status() {
+    fn http_error_unknown_4xx_invalid_request() {
+        // Unmapped 4xx → InvalidRequest (does not trip circuit breaker).
         let body = serde_json::json!({"message": "Teapot"});
         let err = AlpacaAdapter::map_http_error(reqwest::StatusCode::IM_A_TEAPOT, &body, None);
+        match err {
+            GatewayError::InvalidRequest { message, .. } => {
+                assert!(message.contains("HTTP 418"), "got: {message}");
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_error_unknown_5xx_provider_error() {
+        // Unmapped 5xx (not 500/502/503/504) → ProviderError (counts toward circuit breaker).
+        let body = serde_json::json!({"message": "Out of disk"});
+        let err =
+            AlpacaAdapter::map_http_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, &body, None);
         match err {
             GatewayError::ProviderError {
                 message, provider, ..
             } => {
-                assert!(message.contains("HTTP 418"), "got: {message}");
+                assert!(message.contains("HTTP 507"), "got: {message}");
                 assert_eq!(provider.as_deref(), Some("alpaca"));
             }
             other => panic!("Expected ProviderError, got: {other:?}"),

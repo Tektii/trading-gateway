@@ -154,6 +154,8 @@ async fn error_422_with_reject_codes() {
 
 #[tokio::test]
 async fn error_unknown_status() {
+    // Unmapped 4xx codes are treated as client errors (InvalidRequest) so they don't
+    // trip the circuit breaker. 5xx codes still surface as ProviderError.
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
@@ -168,16 +170,13 @@ async fn error_unknown_status() {
 
     let err = adapter.get_account().await.unwrap_err();
     match err {
-        GatewayError::ProviderError {
-            provider, message, ..
-        } => {
-            assert_eq!(provider.as_deref(), Some("alpaca"));
+        GatewayError::InvalidRequest { message, .. } => {
             assert!(
                 message.contains("418"),
                 "Expected message to contain status code, got: {message}"
             );
         }
-        other => panic!("Expected ProviderError, got: {other:?}"),
+        other => panic!("Expected InvalidRequest, got: {other:?}"),
     }
 }
 
