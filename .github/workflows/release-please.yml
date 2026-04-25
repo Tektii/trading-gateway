@@ -1,0 +1,28 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+# Maintains a perpetually-open "Release PR" that bumps the workspace version
+# and updates CHANGELOG.md based on Conventional Commits accumulated since the
+# last release. Merging the Release PR pushes a `vX.Y.Z` tag, which triggers
+# release.yml to smoke-test and promote the main-built images.
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

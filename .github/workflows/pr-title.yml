@@ -1,0 +1,38 @@
+name: PR Title
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+# Enforces Conventional Commits on the PR title. The title becomes the squash
+# commit message, so this is what release-please reads to decide major / minor
+# / patch bumps. Without this lint, authors can forget the prefix and the
+# release notes / version bump silently degrade.
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825 # v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject "{subject}" must start with a lowercase letter.
