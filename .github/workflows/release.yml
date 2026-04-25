@@ -267,21 +267,6 @@ jobs:
             --tag "${IMAGE}:${VERSION}-slim" \
             "${IMAGE}@${{ needs.validate.outputs.slim_digest }}"
 
-  # ===========================================================================
-  # 4. Create GitHub Release (only after images are tagged)
-  # ===========================================================================
-  release:
-    name: Create Release
-    needs: [validate, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
-        with:
-          name: v${{ needs.validate.outputs.version }}
-          generate_release_notes: true
-          prerelease: ${{ startsWith(needs.validate.outputs.version, '0.') }}
+  # The GitHub Release itself is created by release-please when the Release PR
+  # merges (see release-please.yml). That's what pushed the tag this workflow
+  # is reacting to, so by the time we get here the release page already exists.
