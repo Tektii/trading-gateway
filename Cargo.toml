@@ -83,7 +83,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics-exporter-prometheus = "0.18"
 
 # Validation
 validator = { version = "0.19", features = ["derive"] }
