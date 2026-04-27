@@ -86,7 +86,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # Validation
-validator = { version = "0.19", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 # Types
 chrono = { version = "0.4", features = ["serde"] }
