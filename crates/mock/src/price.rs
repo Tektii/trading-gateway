@@ -5,7 +5,7 @@
 
 use chrono::{Duration, Utc};
 use parking_lot::RwLock;
-use rand::Rng;
+use rand::RngExt;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
