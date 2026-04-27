@@ -232,4 +232,21 @@ pub trait WebSocketProvider: Send + Sync {
     fn supports_reconnection(&self) -> bool {
         true
     }
+
+    /// Whether the upstream is the source of truth for which events to emit.
+    ///
+    /// Returns `true` for providers that already filter events at the source
+    /// (e.g., the Tektii backtest engine, which only emits events for the
+    /// resolved subscriptions validated at startup). When `true`, the gateway's
+    /// `ProviderRegistry` skips its own subscription filter and rebroadcasts
+    /// every event the provider yields — re-filtering at the gateway with
+    /// weaker pattern semantics is exactly where TEK-268 silent drops creep in.
+    ///
+    /// Default `false`: live brokers may push unsolicited events (account
+    /// updates, exchange status, etc.); the gateway filter gates which of
+    /// those reach strategies. Opt-in unsafe — any new provider that doesn't
+    /// override this gets the safe (filtered) path.
+    fn filters_events_upstream(&self) -> bool {
+        false
+    }
 }

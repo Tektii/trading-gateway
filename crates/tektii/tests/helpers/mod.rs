@@ -9,8 +9,7 @@ use tektii_gateway_core::events::router::EventRouter;
 use tektii_gateway_core::exit_management::ExitHandler;
 use tektii_gateway_core::models::TradingPlatform;
 use tektii_gateway_core::state::StateManager;
-use tektii_gateway_core::subscription::filter::SubscriptionFilter;
-use tektii_gateway_core::websocket::messages::{InstrumentSubscription, WsMessage};
+use tektii_gateway_core::websocket::messages::WsMessage;
 use tektii_gateway_core::websocket::provider::ProviderConfig;
 use tektii_gateway_tektii::{TektiiAdapter, TektiiCredentials, TektiiWebSocketProvider};
 use tektii_gateway_test_support::wiremock_helpers::merge_json;
@@ -132,32 +131,9 @@ pub fn engine_trade_json(overrides: &Value) -> Value {
 // WebSocket provider helpers
 // =========================================================================
 
-/// Create a `TektiiWebSocketProvider` with an empty subscription filter
-/// (matches ALL events — subscribed path, events wait for strategy ACK).
+/// Create a `TektiiWebSocketProvider`.
 pub fn create_ws_provider(
     ws_url: &str,
-) -> (TektiiWebSocketProvider, broadcast::Receiver<WsMessage>) {
-    create_ws_provider_with_filter(ws_url, SubscriptionFilter::new(&[]))
-}
-
-/// Create a `TektiiWebSocketProvider` with a restrictive filter that matches
-/// nothing (forces non-subscribed / immediate-ack path for all events).
-pub fn create_ws_provider_no_subscriptions(
-    ws_url: &str,
-) -> (TektiiWebSocketProvider, broadcast::Receiver<WsMessage>) {
-    // A non-empty filter that only matches "NONEXISTENT" instrument — real
-    // events for AAPL etc. will not match, triggering the immediate-ack path.
-    let filter = SubscriptionFilter::new(&[InstrumentSubscription::new(
-        TradingPlatform::Tektii,
-        "NONEXISTENT".to_string(),
-        vec!["*".to_string()],
-    )]);
-    create_ws_provider_with_filter(ws_url, filter)
-}
-
-fn create_ws_provider_with_filter(
-    ws_url: &str,
-    filter: SubscriptionFilter,
 ) -> (TektiiWebSocketProvider, broadcast::Receiver<WsMessage>) {
     let state_manager = Arc::new(StateManager::new());
     let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> = Arc::new(
@@ -171,12 +147,8 @@ fn create_ws_provider_with_filter(
         TradingPlatform::Tektii,
     ));
 
-    let provider = TektiiWebSocketProvider::new(
-        ws_url.to_string(),
-        event_router,
-        TradingPlatform::Tektii,
-        Arc::new(filter),
-    );
+    let provider =
+        TektiiWebSocketProvider::new(ws_url.to_string(), event_router, TradingPlatform::Tektii);
 
     (provider, rx)
 }

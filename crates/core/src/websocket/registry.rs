@@ -59,6 +59,12 @@ struct SharedProvider {
 
     /// Per-instrument staleness tracker (stale during broker disconnect).
     staleness: Arc<StalenessTracker>,
+
+    /// Whether the provider already filters events at the source
+    /// ([`WebSocketProvider::filters_events_upstream`]). Captured at register
+    /// time to avoid re-locking the provider on every event in the broadcast
+    /// loop. When `true`, the registry skips its own subscription filter.
+    filters_events_upstream: bool,
 }
 
 /// Registry for managing WebSocket providers.
@@ -252,6 +258,7 @@ impl ProviderRegistry {
             }
         }
 
+        let filters_events_upstream = provider.filters_events_upstream();
         let shared = SharedProvider {
             provider,
             stream: Some(stream),
@@ -260,6 +267,7 @@ impl ProviderRegistry {
             symbols,
             event_types,
             staleness: Arc::new(StalenessTracker::new()),
+            filters_events_upstream,
         };
 
         {
@@ -365,12 +373,6 @@ impl ProviderRegistry {
         } else {
             debug!("No ACK bridge set - ACK is informational only");
         }
-    }
-
-    /// Get the subscription filter.
-    #[must_use]
-    pub fn subscription_filter(&self) -> Arc<SubscriptionFilter> {
-        self.subscription_filter.clone()
     }
 
     // =========================================================================
@@ -655,16 +657,17 @@ impl ProviderRegistry {
             let price_source_snapshot = price_source.read().await.clone();
 
             // Take the stream and staleness tracker from the provider
-            let (stream_opt, staleness, supports_reconnection) = {
+            let (stream_opt, staleness, supports_reconnection, filters_events_upstream) = {
                 let mut shared_guard = shared_providers_clone.write().await;
                 if let Some(p) = shared_guard.get_mut(&platform) {
                     (
                         p.stream.take(),
                         Arc::clone(&p.staleness),
                         p.provider.supports_reconnection(),
+                        p.filters_events_upstream,
                     )
                 } else {
-                    (None, Arc::new(StalenessTracker::new()), false)
+                    (None, Arc::new(StalenessTracker::new()), false, false)
                 }
             };
 
@@ -745,8 +748,15 @@ impl ProviderRegistry {
                                     other => other,
                                 };
 
-                                // Broadcast to connected strategies if event matches filter
-                                if subscription_filter.matches(&event, platform) {
+                                // Broadcast to connected strategies. Providers that
+                                // filter upstream (e.g., Tektii backtest engine, which
+                                // resolves SUBSCRIPTIONS at startup against its
+                                // instrument catalog) bypass the registry's filter —
+                                // re-filtering with weaker pattern semantics is the
+                                // class of bug TEK-268 was tracking.
+                                let should_broadcast = filters_events_upstream
+                                    || subscription_filter.matches(&event, platform);
+                                if should_broadcast {
                                     let strategies = connected_strategies_clone.read().await;
                                     for conn_id in strategies.iter() {
                                         let _ = connection_manager

@@ -16,9 +16,8 @@ use tektii_protocol::websocket::{ClientMessage, ServerMessage};
 use tokio::time::timeout;
 
 use helpers::{
-    create_ws_provider, create_ws_provider_no_subscriptions, make_engine_account,
-    make_engine_order, make_engine_position, make_engine_trade, minimal_provider_config,
-    parse_client_message,
+    create_ws_provider, make_engine_account, make_engine_order, make_engine_position,
+    make_engine_trade, minimal_provider_config, parse_client_message,
 };
 
 /// Helper: send a ServerMessage as JSON text through the mock server.
@@ -351,39 +350,6 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
                 events_processed.contains(&"evt-1".to_string()),
                 "ACK should contain evt-1, got: {events_processed:?}"
             );
-        }
-        other => panic!("Expected EventAck, got {other:?}"),
-    }
-
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn non_subscribed_event_gets_immediate_ack() {
-    let (server, tx, mut rx) = MockWsServer::start().await;
-    // Restrictive filter → AAPL events not subscribed → immediate ACK
-    let (provider, _broadcast_rx) = create_ws_provider_no_subscriptions(&server.url());
-
-    let _event_stream = provider
-        .connect(minimal_provider_config())
-        .await
-        .expect("connect failed");
-
-    let msg = ServerMessage::order("evt-1", OrderEventType::Created, make_engine_order());
-    send_server_message(&tx, &msg);
-
-    // ACK should arrive immediately (no strategy ACK needed)
-    let ack_raw = timeout(Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timeout — immediate ACK not sent")
-        .expect("channel closed");
-
-    let client_msg = parse_client_message(&ack_raw);
-    match client_msg {
-        ClientMessage::EventAck {
-            events_processed, ..
-        } => {
-            assert_eq!(events_processed, vec!["evt-1".to_string()]);
         }
         other => panic!("Expected EventAck, got {other:?}"),
     }

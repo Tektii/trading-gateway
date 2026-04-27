@@ -762,7 +762,6 @@ async fn connect_saxo(
 
 #[cfg(feature = "tektii")]
 async fn connect_tektii(
-    config: &GatewayConfig,
     platform: TradingPlatform,
     symbols: Vec<String>,
     event_types: Vec<String>,
@@ -782,20 +781,11 @@ async fn connect_tektii(
         return Err(format!("No event router registered for {platform:?}"));
     };
 
-    let subscription_filter = Arc::new(SubscriptionFilter::new(
-        &config
-            .subscriptions_for_platform(platform)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-    ));
-
-    let provider = Box::new(TektiiWebSocketProvider::new(
-        ws_url,
-        event_router,
-        platform,
-        subscription_filter,
-    ));
+    // No SubscriptionFilter is built here: the engine validates `SUBSCRIPTIONS`
+    // at startup against its instrument catalog and only emits events for the
+    // resolved set. The provider declares `filters_events_upstream() = true`
+    // so the registry rebroadcasts every event the engine sends.
+    let provider = Box::new(TektiiWebSocketProvider::new(ws_url, event_router, platform));
 
     let provider_config = ProviderConfig {
         platform,
@@ -929,7 +919,6 @@ async fn connect_providers(
             #[cfg(feature = "tektii")]
             tektii_gateway_core::models::TradingPlatformKind::Tektii => {
                 connect_tektii(
-                    config,
                     platform,
                     symbols,
                     event_types,
