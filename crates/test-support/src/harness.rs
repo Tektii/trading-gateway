@@ -38,6 +38,7 @@ use tektii_gateway_core::models::TradingPlatform;
 use tektii_gateway_core::subscription::filter::SubscriptionFilter;
 use tektii_gateway_core::websocket::connection::WsConnectionManager;
 use tektii_gateway_core::websocket::messages::WsMessage;
+use tektii_gateway_core::websocket::provider::ProviderEvent;
 use tektii_gateway_core::websocket::registry::ProviderRegistry;
 use tektii_gateway_core::websocket::server::ws_handler;
 
@@ -57,7 +58,7 @@ pub struct TestGateway {
 
     /// Channel to inject events into the provider event stream.
     /// These events will be broadcast to all connected strategy WebSocket clients.
-    pub event_tx: mpsc::UnboundedSender<WsMessage>,
+    pub event_tx: mpsc::UnboundedSender<ProviderEvent>,
 
     /// Handle to the server task (aborted on drop).
     server_handle: JoinHandle<()>,
@@ -93,7 +94,7 @@ impl TestGateway {
     /// The event will be broadcast to all connected strategy WebSocket clients
     /// (subject to subscription filter — empty filter matches all).
     pub fn inject_event(&self, event: WsMessage) {
-        let _ = self.event_tx.send(event);
+        let _ = self.event_tx.send(event.into());
     }
 
     /// Render current Prometheus metrics output (if metrics were initialised).

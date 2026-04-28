@@ -37,7 +37,9 @@ use tektii_gateway_core::websocket::error::WebSocketError;
 use tektii_gateway_core::websocket::messages::{
     EventAckMessage, InternalTradingEvent, OrderEventType, WsMessage,
 };
-use tektii_gateway_core::websocket::provider::{EventStream, ProviderConfig, WebSocketProvider};
+use tektii_gateway_core::websocket::provider::{
+    EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
+};
 
 // ============================================================================
 // Constants
@@ -95,7 +97,7 @@ pub struct OandaWebSocketProvider {
     /// Stored config from initial connect() for reconnection.
     stored_config: Arc<RwLock<Option<ProviderConfig>>>,
     /// Channel sender for events to the strategy.
-    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     /// Top-level cancellation token (cancels all streams).
     cancel_token: CancellationToken,
     /// Separate token for price stream -- cancelled on subscribe/unsubscribe to
@@ -332,7 +334,7 @@ async fn run_price_stream(
     account_id: &str,
     instruments: &[String],
     platform: TradingPlatform,
-    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     stream_cancel: CancellationToken,
     parent_cancel: CancellationToken,
 ) {
@@ -396,7 +398,7 @@ async fn run_single_price_stream(
     url: &str,
     api_token: &str,
     platform: TradingPlatform,
-    event_tx: &Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: &Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     stream_cancel: &CancellationToken,
     parent_cancel: &CancellationToken,
 ) -> StreamError {
@@ -453,7 +455,7 @@ async fn run_single_price_stream(
 async fn process_price_buffer(
     buffer: &mut BytesMut,
     platform: TradingPlatform,
-    event_tx: &Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: &Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
 ) {
     while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
         let line = buffer.split_to(pos + 1);
@@ -475,7 +477,7 @@ async fn process_price_buffer(
                 let tx_guard = event_tx.read().await;
                 if let Some(tx) = tx_guard.as_ref() {
                     for msg in messages {
-                        let _ = tx.send(msg);
+                        let _ = tx.send(msg.into());
                     }
                 }
             }
@@ -505,7 +507,7 @@ async fn run_transaction_stream(
     api_token: &str,
     account_id: &str,
     platform: TradingPlatform,
-    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     cancel_token: CancellationToken,
 ) {
     let url = format!("{stream_url}/v3/accounts/{account_id}/transactions/stream");
@@ -549,7 +551,7 @@ async fn run_transaction_stream(
         let tx_guard = event_tx.read().await;
         if let Some(tx) = tx_guard.as_ref() {
             for msg in result.1 {
-                let _ = tx.send(msg);
+                let _ = tx.send(msg.into());
             }
         }
         drop(tx_guard);

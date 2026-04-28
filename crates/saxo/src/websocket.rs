@@ -38,7 +38,9 @@ use tektii_gateway_core::websocket::messages::{
     AccountEventType, ConnectionEventType, EventAckMessage, InternalTradingEvent, OrderEventType,
     WsErrorCode, WsMessage,
 };
-use tektii_gateway_core::websocket::provider::{EventStream, ProviderConfig, WebSocketProvider};
+use tektii_gateway_core::websocket::provider::{
+    EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
+};
 
 // ============================================================================
 // Constants
@@ -168,7 +170,7 @@ pub struct SaxoWebSocketProvider {
     subscriptions: Arc<Mutex<HashMap<String, SubscriptionEntry>>>,
     cancel_token: CancellationToken,
     context_id: Arc<Mutex<Option<String>>>,
-    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     http_client: Arc<SaxoHttpClient>,
     instrument_map: Arc<RwLock<Option<SaxoInstrumentMap>>>,
     ws_url: String,
@@ -638,7 +640,7 @@ impl WebSocketProvider for SaxoWebSocketProvider {
 struct FrameReaderContext {
     snapshot_store: Arc<SnapshotStore>,
     subscriptions: Arc<Mutex<HashMap<String, SubscriptionEntry>>>,
-    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>,
+    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     platform: TradingPlatform,
     cancel_token: CancellationToken,
     heartbeat_timeout: Duration,
@@ -723,7 +725,7 @@ async fn run_frame_reader(
                 gap_duration_ms: None,
                 timestamp: Utc::now(),
             };
-            if tx.send(msg).is_err() {
+            if tx.send(msg.into()).is_err() {
                 debug!(platform = %ctx.platform, "Disconnect signal not sent (receiver already dropped)");
             }
         }
@@ -741,7 +743,7 @@ async fn process_message(
     message: &super::streaming::SaxoMessage,
     snapshot_store: &SnapshotStore,
     subscriptions: &Mutex<HashMap<String, SubscriptionEntry>>,
-    event_tx: &RwLock<Option<mpsc::UnboundedSender<WsMessage>>>,
+    event_tx: &RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>,
     platform: TradingPlatform,
     margin_monitor: &mut MarginMonitor,
     instrument_map: &RwLock<Option<SaxoInstrumentMap>>,
@@ -791,7 +793,7 @@ async fn process_price_update(
     payload: &serde_json::Value,
     snapshot_store: &SnapshotStore,
     subscriptions: &Mutex<HashMap<String, SubscriptionEntry>>,
-    event_tx: &RwLock<Option<mpsc::UnboundedSender<WsMessage>>>,
+    event_tx: &RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>,
     platform: TradingPlatform,
 ) {
     let symbol = {
@@ -823,7 +825,7 @@ async fn process_price_update(
         let ws_msg = WsMessage::quote(quote);
         let tx_guard = event_tx.read().await;
         if let Some(tx) = tx_guard.as_ref()
-            && tx.send(ws_msg).is_err()
+            && tx.send(ws_msg.into()).is_err()
         {
             debug!(platform = %platform, "Event channel closed");
         }
@@ -860,7 +862,7 @@ fn build_account_from_snapshot(merged: &serde_json::Value) -> Account {
 async fn process_balance_update(
     payload: &serde_json::Value,
     snapshot_store: &SnapshotStore,
-    event_tx: &RwLock<Option<mpsc::UnboundedSender<WsMessage>>>,
+    event_tx: &RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>,
     platform: TradingPlatform,
     margin_monitor: &mut MarginMonitor,
 ) {
@@ -921,7 +923,7 @@ async fn process_balance_update(
                 account: account.clone(),
                 timestamp: Utc::now(),
             };
-            if tx.send(ws_msg).is_err() {
+            if tx.send(ws_msg.into()).is_err() {
                 debug!(platform = %platform, "Event channel closed");
                 break;
             }
@@ -1055,7 +1057,7 @@ fn translate_order_from_snapshot(
 async fn process_order_update(
     payload: &serde_json::Value,
     snapshot_store: &SnapshotStore,
-    event_tx: &RwLock<Option<mpsc::UnboundedSender<WsMessage>>>,
+    event_tx: &RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>,
     platform: TradingPlatform,
     instrument_map: &RwLock<Option<SaxoInstrumentMap>>,
 ) {
@@ -1096,7 +1098,7 @@ async fn process_order_update(
 
         let tx_guard = event_tx.read().await;
         if let Some(tx) = tx_guard.as_ref()
-            && tx.send(ws_msg).is_err()
+            && tx.send(ws_msg.into()).is_err()
         {
             debug!(platform = %platform, "Event channel closed");
         }
@@ -1135,7 +1137,7 @@ async fn process_order_update(
 
     let tx_guard = event_tx.read().await;
     if let Some(tx) = tx_guard.as_ref() {
-        if tx.send(ws_msg).is_err() {
+        if tx.send(ws_msg.into()).is_err() {
             debug!(platform = %platform, "Event channel closed");
         } else {
             debug!(

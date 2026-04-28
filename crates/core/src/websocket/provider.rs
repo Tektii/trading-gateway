@@ -113,8 +113,55 @@ pub fn arc_secret_from_string(value: String) -> Arc<SecretBox<String>> {
     Arc::new(SecretBox::new(Box::new(value)))
 }
 
+/// A `WsMessage` plus optional metadata used internally by the gateway.
+///
+/// `engine_event_id` is set ONLY by the Tektii engine provider when the
+/// message has a downstream broadcast (so the registry can call
+/// `AckBridge::mark_sent` after `connection_manager.send_to` returns Ok).
+/// All live providers leave it `None`. The field is gateway-internal — it is
+/// never serialized or forwarded to strategy clients.
+#[derive(Debug, Clone)]
+pub struct ProviderEvent {
+    /// The WebSocket message destined for connected strategies.
+    pub msg: WsMessage,
+
+    /// Engine event_id for two-phase ACK pacing (TEK-270). `None` for live
+    /// providers; `Some` only for Tektii engine events that produce a
+    /// downstream broadcast.
+    pub engine_event_id: Option<String>,
+}
+
+impl ProviderEvent {
+    /// Build a `ProviderEvent` from a plain `WsMessage` (live provider path).
+    /// `engine_event_id` is `None` — these messages don't pace simulation.
+    #[must_use]
+    pub const fn live(msg: WsMessage) -> Self {
+        Self {
+            msg,
+            engine_event_id: None,
+        }
+    }
+
+    /// Build a `ProviderEvent` for a Tektii engine event that has a
+    /// downstream broadcast. The `engine_event_id` lets the registry
+    /// mark the event as `sent` after `send_to` returns Ok.
+    #[must_use]
+    pub const fn engine(msg: WsMessage, engine_event_id: String) -> Self {
+        Self {
+            msg,
+            engine_event_id: Some(engine_event_id),
+        }
+    }
+}
+
+impl From<WsMessage> for ProviderEvent {
+    fn from(msg: WsMessage) -> Self {
+        Self::live(msg)
+    }
+}
+
 /// Event stream type alias
-pub type EventStream = mpsc::UnboundedReceiver<WsMessage>;
+pub type EventStream = mpsc::UnboundedReceiver<ProviderEvent>;
 
 /// WebSocket provider trait for streaming market events
 ///

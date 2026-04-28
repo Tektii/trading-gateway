@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use tektii_gateway_core::websocket::error::WebSocketError;
 use tektii_gateway_core::websocket::messages::{EventAckMessage, WsMessage};
+use tektii_gateway_core::websocket::provider::ProviderEvent;
 use tektii_gateway_core::websocket::provider::{EventStream, ProviderConfig, WebSocketProvider};
 
 use crate::price::PriceGenerator;
@@ -20,7 +21,7 @@ use crate::price::PriceGenerator;
 /// Shared event sink that the adapter and WS provider both use to push events
 /// into the provider's event stream (which the ProviderRegistry consumes).
 /// Set when the WS provider connects; cleared on disconnect.
-pub type EventSink = Arc<RwLock<Option<mpsc::UnboundedSender<WsMessage>>>>;
+pub type EventSink = Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>;
 
 /// Create a new shared event sink. Pass one clone to the adapter and one to the WS provider.
 pub fn new_event_sink() -> EventSink {
@@ -85,7 +86,7 @@ impl MockWebSocketProvider {
         }
     }
 
-    fn start_streaming(&self, tx: mpsc::UnboundedSender<WsMessage>) {
+    fn start_streaming(&self, tx: mpsc::UnboundedSender<ProviderEvent>) {
         let price_gen = Arc::clone(&self.price_generator);
         let symbols = Arc::clone(&self.subscribed_symbols);
         let kinds = Arc::clone(&self.event_kinds);
@@ -106,13 +107,13 @@ impl MockWebSocketProvider {
                         for symbol in &current_symbols {
                             if current_kinds.quotes {
                                 let quote = price_gen.get_quote(symbol);
-                                if tx.send(WsMessage::quote(quote)).is_err() {
+                                if tx.send(WsMessage::quote(quote).into()).is_err() {
                                     return;
                                 }
                             }
                             if current_kinds.candles {
                                 let bar = price_gen.get_bar(symbol);
-                                if tx.send(WsMessage::candle(bar)).is_err() {
+                                if tx.send(WsMessage::candle(bar).into()).is_err() {
                                     return;
                                 }
                             }

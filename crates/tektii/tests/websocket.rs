@@ -46,7 +46,8 @@ async fn order_event_routed_to_event_stream() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     match ws_msg {
         WsMessage::Order { event, order, .. } => {
@@ -78,7 +79,8 @@ async fn trade_event_routed_to_event_stream() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     match ws_msg {
         WsMessage::Trade { trade, .. } => {
@@ -106,7 +108,8 @@ async fn position_event_routed_to_event_stream() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     match ws_msg {
         WsMessage::Position { position, .. } => {
@@ -134,7 +137,8 @@ async fn account_event_routed_to_event_stream() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     match ws_msg {
         WsMessage::Account { event, account, .. } => {
@@ -177,7 +181,8 @@ async fn candle_event_routed_to_event_stream() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     match ws_msg {
         WsMessage::Candle { bar, .. } => {
@@ -218,7 +223,8 @@ async fn error_event_produces_no_ws_message() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     // First message on EventStream should be the order, not the error
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
@@ -264,7 +270,8 @@ async fn pong_produces_no_ws_message_and_no_ack() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
 
     // Drain ACKs — we should only see ACK for "evt-ok", not for pong
@@ -315,7 +322,8 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
 
     // Short timeout: no ACK should have been sent yet (event is pending)
@@ -324,6 +332,16 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
         no_ack.is_err(),
         "ACK should NOT be sent before strategy ACK"
     );
+
+    // Simulate the registry calling `mark_sent` after `connection_manager.send_to`
+    // returns Ok (TEK-270). In production this happens inside
+    // `ProviderRegistry::spawn_provider_event_task`; here the test consumes the
+    // EventStream directly so we mark it manually.
+    let bridge = provider
+        .ack_bridge()
+        .await
+        .expect("ack_bridge available after connect");
+    bridge.mark_sent(vec!["evt-1".to_string()]).await;
 
     // Now send strategy ACK
     provider
@@ -392,6 +410,20 @@ async fn multiple_pending_events_batch_drained() {
         "No ACKs should be sent before strategy ACK"
     );
 
+    // Simulate the registry calling `mark_sent` for each event after
+    // `connection_manager.send_to` returns Ok (TEK-270).
+    let bridge = provider
+        .ack_bridge()
+        .await
+        .expect("ack_bridge available after connect");
+    bridge
+        .mark_sent(vec![
+            "evt-1".to_string(),
+            "evt-2".to_string(),
+            "evt-3".to_string(),
+        ])
+        .await;
+
     // Single strategy ACK drains all pending
     provider
         .handle_ack(EventAckMessage {
@@ -449,7 +481,8 @@ async fn disconnect_closes_event_stream() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
 
     // Disconnect
@@ -513,7 +546,8 @@ async fn malformed_json_skipped_without_crash() {
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout — provider may have crashed on malformed JSON")
-        .expect("stream closed");
+        .expect("stream closed")
+        .msg;
 
     assert!(
         matches!(ws_msg, WsMessage::Order { .. }),
