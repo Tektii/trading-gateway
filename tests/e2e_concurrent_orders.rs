@@ -193,12 +193,15 @@ async fn concurrent_reads_during_event_processing() {
                 order.status = OrderStatus::Filled;
                 order.filled_quantity = dec!(1);
                 order.remaining_quantity = dec!(0);
-                let _ = event_tx.send(WsMessage::Order {
-                    event: OrderEventType::OrderFilled,
-                    order,
-                    parent_order_id: None,
-                    timestamp: Utc::now(),
-                });
+                let _ = event_tx.send(
+                    WsMessage::Order {
+                        event: OrderEventType::OrderFilled,
+                        order,
+                        parent_order_id: None,
+                        timestamp: Utc::now(),
+                    }
+                    .into(),
+                );
             }
         })
     };
