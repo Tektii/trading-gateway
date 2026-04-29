@@ -92,6 +92,51 @@ async fn trade_event_routed_to_event_stream() {
     server.shutdown().await;
 }
 
+/// Regression for TEK-286: the engine omits `liquidation` on normal-close
+/// trade payloads. The gateway must accept the message rather than silently
+/// dropping the broadcast on a serde parse failure.
+#[tokio::test]
+async fn trade_event_without_liquidation_field_routed_to_event_stream() {
+    let (server, tx, _rx) = MockWsServer::start().await;
+    let (provider, _broadcast_rx) = create_ws_provider(&server.url());
+
+    let mut event_stream = provider
+        .connect(minimal_provider_config())
+        .await
+        .expect("connect failed");
+
+    let raw = r#"{
+        "type": "trade",
+        "event_id": "evt-2",
+        "trade": {
+            "id": "trade-001",
+            "order_id": "order-abc-123",
+            "symbol": "C:BTCUSD",
+            "side": "buy",
+            "quantity": "0.01",
+            "price": "60000",
+            "commission": "0",
+            "timestamp": 1704067200000
+        }
+    }"#;
+    tx.send(raw.to_string()).expect("send raw to MockWsServer");
+
+    let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
+        .await
+        .expect("timeout — parse likely failed and dropped the event")
+        .expect("stream closed")
+        .msg;
+
+    match ws_msg {
+        WsMessage::Trade { trade, .. } => {
+            assert_eq!(trade.symbol, "C:BTCUSD");
+        }
+        other => panic!("Expected WsMessage::Trade, got {other:?}"),
+    }
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn position_event_routed_to_event_stream() {
     let (server, tx, _rx) = MockWsServer::start().await;
