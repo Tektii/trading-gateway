@@ -276,14 +276,35 @@ impl Default for AckManager {
 ///
 /// This trait is implemented by specific adapters (e.g., the Tektii adapter)
 /// that need custom ACK behavior. `ProviderRegistry` holds `Arc<dyn AckBridge>`.
+///
+/// # Two-phase pending lifecycle
+///
+/// Pending events are tracked in two phases to avoid the race documented in
+/// TEK-270:
+///
+/// 1. `register_pending` is called at WS-read time, BEFORE the event has been
+///    delivered to the strategy WebSocket. The event is tracked but NOT yet
+///    eligible to be ACK'd back to the engine.
+/// 2. `mark_sent` is called by the registry's broadcast loop after
+///    `connection_manager.send_to` returns successfully. Only events that
+///    have been marked sent will be drained on the next strategy ACK.
+///
+/// `handle_strategy_ack` drains only events with `sent = true`. Events still
+/// in flight (registered but not yet sent) remain pending and will be drained
+/// by a later strategy ACK once they reach the strategy.
 #[async_trait]
 pub trait AckBridge: Send + Sync {
-    /// Handle an ACK from a connected strategy.
+    /// Handle an ACK from a connected strategy. Drains only events that have
+    /// been marked sent.
     async fn handle_strategy_ack(&self);
 
-    /// Register events as pending acknowledgment.
+    /// Register events as pending acknowledgment (phase 1: WS read).
     async fn register_pending(&self, event_ids: Vec<String>);
 
-    /// Immediately acknowledge events (bypass waiting).
+    /// Mark events as actually delivered to the strategy WebSocket
+    /// (phase 2: post `send_to`). Unknown event_ids are silently ignored.
+    async fn mark_sent(&self, event_ids: Vec<String>);
+
+    /// Immediately acknowledge events (bypass pending tracking).
     async fn immediate_ack(&self, event_ids: Vec<String>);
 }

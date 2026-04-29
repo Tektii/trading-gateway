@@ -34,7 +34,7 @@ use tektii_gateway_core::websocket::messages::{
     WsMessage,
 };
 use tektii_gateway_core::websocket::provider::{
-    Credentials, EventStream, ProviderConfig, WebSocketProvider,
+    Credentials, EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
 };
 
 /// Type alias for the WebSocket write half.
@@ -764,7 +764,7 @@ impl AlpacaWebSocketProvider {
         &self,
         credentials: &Credentials,
         platform: TradingPlatform,
-        tx: mpsc::UnboundedSender<WsMessage>,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
     ) -> Result<(), WebSocketError> {
         let url = self.trading_stream_url(platform);
         info!(platform = ?platform, %url, "Connecting to Alpaca trading stream");
@@ -825,7 +825,7 @@ impl AlpacaWebSocketProvider {
         &self,
         credentials: &Credentials,
         platform: TradingPlatform,
-        tx: mpsc::UnboundedSender<WsMessage>,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
     ) -> Result<(), WebSocketError> {
         self.connect_internal_trading_stream(credentials, platform, tx)
             .await
@@ -899,7 +899,7 @@ impl AlpacaWebSocketProvider {
 /// parsed order events to the provided channel.
 fn spawn_trading_stream_reader(
     mut read: futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    tx: mpsc::UnboundedSender<WsMessage>,
+    tx: mpsc::UnboundedSender<ProviderEvent>,
     platform: TradingPlatform,
     cancel_token: CancellationToken,
     trading_state: Arc<RwLock<ConnectionState>>,
@@ -930,7 +930,7 @@ fn spawn_trading_stream_reader(
                                 broker: Some(platform.to_string()),
                                 gap_duration_ms: None,
                                 timestamp: Utc::now(),
-                            });
+                            }.into());
                             return;
                         }
                         Some(Err(e)) => {
@@ -946,7 +946,7 @@ fn spawn_trading_stream_reader(
                                 broker: Some(platform.to_string()),
                                 gap_duration_ms: None,
                                 timestamp: Utc::now(),
-                            });
+                            }.into());
                             return;
                         }
                         None => {
@@ -965,7 +965,7 @@ fn spawn_trading_stream_reader(
 fn process_trading_stream_text(
     text: &str,
     platform: TradingPlatform,
-    tx: &mpsc::UnboundedSender<WsMessage>,
+    tx: &mpsc::UnboundedSender<ProviderEvent>,
 ) {
     match serde_json::from_str::<AlpacaTradingStreamMessage>(text) {
         Ok(stream_msg) => {
@@ -974,7 +974,7 @@ fn process_trading_stream_text(
                     match serde_json::from_value::<AlpacaTradingOrderUpdate>(data) {
                         Ok(update) => {
                             let ws_msg = parse_trading_event(&update);
-                            let _ = tx.send(ws_msg);
+                            let _ = tx.send(ws_msg.into());
                         }
                         Err(e) => {
                             warn!(
@@ -1015,7 +1015,7 @@ fn process_trading_stream_text(
 /// forwards parsed events to the provided channel.
 fn spawn_market_data_reader(
     mut read: futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    tx: mpsc::UnboundedSender<WsMessage>,
+    tx: mpsc::UnboundedSender<ProviderEvent>,
     platform: TradingPlatform,
     cancel_token: CancellationToken,
     connection_state: Arc<RwLock<ConnectionState>>,
@@ -1033,7 +1033,7 @@ fn spawn_market_data_reader(
                         Some(Ok(Message::Text(text))) => {
                             let text_str: &str = &text;
                             for event in AlpacaWebSocketProvider::process_alpaca_message(text_str, platform) {
-                                if tx.send(event).is_err() {
+                                if tx.send(event.into()).is_err() {
                                     return;
                                 }
                             }
@@ -1053,7 +1053,7 @@ fn spawn_market_data_reader(
                                 broker: Some(platform.to_string()),
                                 gap_duration_ms: None,
                                 timestamp: Utc::now(),
-                            });
+                            }.into());
                             return;
                         }
                         Some(Err(e)) => {
@@ -1069,7 +1069,7 @@ fn spawn_market_data_reader(
                                 broker: Some(platform.to_string()),
                                 gap_duration_ms: None,
                                 timestamp: Utc::now(),
-                            });
+                            }.into());
                             return;
                         }
                         None => {

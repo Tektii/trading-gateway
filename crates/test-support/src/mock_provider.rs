@@ -12,8 +12,10 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use tektii_gateway_core::websocket::error::WebSocketError;
-use tektii_gateway_core::websocket::messages::{EventAckMessage, WsMessage};
-use tektii_gateway_core::websocket::provider::{EventStream, ProviderConfig, WebSocketProvider};
+use tektii_gateway_core::websocket::messages::EventAckMessage;
+use tektii_gateway_core::websocket::provider::{
+    EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
+};
 
 /// Shared state that survives after the provider is moved into `ProviderRegistry`.
 ///
@@ -74,7 +76,7 @@ impl MockWebSocketProvider {
     ///
     /// Drop the sender to simulate a broker disconnect.
     #[must_use]
-    pub fn make_event_stream() -> (mpsc::UnboundedSender<WsMessage>, EventStream) {
+    pub fn make_event_stream() -> (mpsc::UnboundedSender<ProviderEvent>, EventStream) {
         mpsc::unbounded_channel()
     }
 }

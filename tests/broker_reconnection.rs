@@ -174,7 +174,7 @@ async fn reconnect_resumes_event_streaming() {
 
     // Send an event on the original stream, verify it arrives
     let quote = tektii_gateway_test_support::models::test_quote("AAPL");
-    tx.send(WsMessage::quote(quote)).unwrap();
+    tx.send(WsMessage::quote(quote).into()).unwrap();
 
     let msg = timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -196,7 +196,7 @@ async fn reconnect_resumes_event_streaming() {
 
     // Send event on the NEW stream — should arrive at strategy
     let quote2 = tektii_gateway_test_support::models::test_quote("BTCUSD");
-    new_tx.send(WsMessage::quote(quote2)).unwrap();
+    new_tx.send(WsMessage::quote(quote2).into()).unwrap();
 
     let msg = timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -343,7 +343,7 @@ async fn instruments_marked_stale_on_disconnect_cleared_on_fresh_tick() {
 
     // Send a quote for AAPL — should clear its staleness
     let quote = tektii_gateway_test_support::models::test_quote("AAPL");
-    new_tx.send(WsMessage::quote(quote)).unwrap();
+    new_tx.send(WsMessage::quote(quote).into()).unwrap();
 
     // Allow the event to be processed
     tokio::time::sleep(Duration::from_millis(50)).await;

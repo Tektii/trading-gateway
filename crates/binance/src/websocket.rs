@@ -33,7 +33,9 @@ use tektii_gateway_core::websocket::error::WebSocketError;
 use tektii_gateway_core::websocket::messages::{
     AccountEventType, ConnectionEventType, EventAckMessage, OrderEventType, WsMessage,
 };
-use tektii_gateway_core::websocket::provider::{EventStream, ProviderConfig, WebSocketProvider};
+use tektii_gateway_core::websocket::provider::{
+    EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
+};
 
 use crate::map_binance_order_status;
 use crate::user_data_stream::BinanceUserDataStream;
@@ -166,7 +168,7 @@ impl BinanceWebSocketProvider {
     async fn connect_market_data(
         &self,
         config: &ProviderConfig,
-    ) -> Result<(mpsc::UnboundedSender<WsMessage>, EventStream), WebSocketError> {
+    ) -> Result<(mpsc::UnboundedSender<ProviderEvent>, EventStream), WebSocketError> {
         *self.connection_state.write().await = ConnectionState::Connecting;
 
         let stream_names = self.build_stream_names(&config.symbols, &config.event_types);
@@ -214,7 +216,7 @@ impl BinanceWebSocketProvider {
                         match msg_result {
                             Some(Ok(Message::Text(text))) => {
                                 for event in process_market_message(&text, platform) {
-                                    if tx_clone.send(event).is_err() {
+                                    if tx_clone.send(event.into()).is_err() {
                                         return;
                                     }
                                 }
@@ -229,7 +231,7 @@ impl BinanceWebSocketProvider {
                                     broker: Some(format!("{platform:?}")),
                                     gap_duration_ms: None,
                                     timestamp: Utc::now(),
-                                });
+                                }.into());
                                 return;
                             }
                             Some(Err(e)) => {
@@ -241,7 +243,7 @@ impl BinanceWebSocketProvider {
                                     broker: Some(format!("{platform:?}")),
                                     gap_duration_ms: None,
                                     timestamp: Utc::now(),
-                                });
+                                }.into());
                                 return;
                             }
                             None => {
@@ -269,7 +271,7 @@ impl BinanceWebSocketProvider {
     /// - Listen key keepalive (every 20 minutes with jitter)
     async fn connect_user_data(
         &self,
-        tx: mpsc::UnboundedSender<WsMessage>,
+        tx: mpsc::UnboundedSender<ProviderEvent>,
     ) -> Result<(), WebSocketError> {
         let listen_key = self
             .user_data_stream
@@ -303,7 +305,7 @@ impl BinanceWebSocketProvider {
                         match msg_result {
                             Some(Ok(Message::Text(text))) => {
                                 for event in process_user_data_message(&text, platform, is_futures) {
-                                    if tx_read.send(event).is_err() {
+                                    if tx_read.send(event.into()).is_err() {
                                         return;
                                     }
                                 }

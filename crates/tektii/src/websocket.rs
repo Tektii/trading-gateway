@@ -35,7 +35,9 @@ use tektii_gateway_core::websocket::error::WebSocketError;
 use tektii_gateway_core::websocket::messages::{
     AccountEventType, EventAckMessage, PositionEventType, TradeEventType, WsMessage,
 };
-use tektii_gateway_core::websocket::provider::{EventStream, ProviderConfig, WebSocketProvider};
+use tektii_gateway_core::websocket::provider::{
+    EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
+};
 
 use crate::ack_bridge::TektiiAckBridge;
 use crate::conversions;
@@ -294,7 +296,7 @@ impl WebSocketProvider for TektiiWebSocketProvider {
 
 /// Context for the engine message processor background task.
 struct EngineMessageProcessorContext {
-    event_tx: mpsc::UnboundedSender<WsMessage>,
+    event_tx: mpsc::UnboundedSender<ProviderEvent>,
     event_router: Arc<EventRouter>,
     platform: TradingPlatform,
     cancel_token: CancellationToken,
@@ -355,12 +357,21 @@ fn spawn_engine_message_processor(
                                     // Process the message and send to EventRouter
                                     handle_server_message(&server_msg, &event_router);
 
-                                    // Also send to EventStream for broadcasting to strategies
-                                    if let Some(ws_msg) = ws_msg
-                                        && event_tx.send(ws_msg).is_err() {
+                                    // Also send to EventStream for broadcasting to strategies.
+                                    // The envelope carries the engine event_id (TEK-270) so the
+                                    // registry can call `AckBridge::mark_sent` after
+                                    // `connection_manager.send_to` returns Ok — closing the race
+                                    // where a strategy ACK arrives between WS-read and broadcast.
+                                    if let Some(ws_msg) = ws_msg {
+                                        let envelope = match event_id {
+                                            Some(id) => ProviderEvent::engine(ws_msg, id),
+                                            None => ProviderEvent::live(ws_msg),
+                                        };
+                                        if event_tx.send(envelope).is_err() {
                                             warn!("Event stream closed, stopping message processor");
                                             break;
                                         }
+                                    }
                                 },
                                 Err(e) => {
                                     warn!(error = %e, text = %text, "Failed to parse ServerMessage");

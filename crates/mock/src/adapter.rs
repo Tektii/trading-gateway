@@ -236,7 +236,7 @@ impl MockProviderAdapter {
     /// Send an event through the provider's event stream so it reaches strategy clients.
     fn send_event(event_sink: &EventSink, msg: WsMessage) {
         if let Some(ref sender) = *event_sink.read() {
-            let _ = sender.send(msg);
+            let _ = sender.send(msg.into());
         }
     }
 

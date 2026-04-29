@@ -33,7 +33,7 @@ use crate::websocket::ack::AckBridge;
 use crate::websocket::connection::WsConnectionManager;
 use crate::websocket::error::WebSocketError;
 use crate::websocket::messages::{InternalTradingEvent, OrderEventType, WsMessage};
-use crate::websocket::provider::{EventStream, WebSocketProvider};
+use crate::websocket::provider::{EventStream, ProviderEvent, WebSocketProvider};
 use crate::websocket::reconnection::ReconnectionHandler;
 use crate::websocket::staleness::StalenessTracker;
 
@@ -651,6 +651,7 @@ impl ProviderRegistry {
         let reconnection_config = self.reconnection_config.clone();
         let correlation_store = self.correlation_store.clone();
         let price_source = self.price_source.clone();
+        let tektii_ack_bridge = self.tektii_ack_bridge.clone();
 
         let task = tokio::spawn(async move {
             // Snapshot the price source once (set during startup, never changes)
@@ -684,7 +685,8 @@ impl ProviderRegistry {
                             break 'outer;
                         }
                         msg = stream.recv() => {
-                            if let Some(event) = msg {
+                            if let Some(envelope) = msg {
+                                let ProviderEvent { msg: event, engine_event_id } = envelope;
                                 debug!(platform = %platform, "Broadcasting event: {:?}", event);
 
                                 // Clear staleness and notify strategies on first fresh tick
@@ -768,6 +770,24 @@ impl ProviderRegistry {
                                         platform = %platform,
                                         "Event filtered out by subscription"
                                     );
+                                }
+
+                                // TEK-270: mark this engine event as actually
+                                // delivered to the strategy WebSocket. Only
+                                // events with `sent = true` will be drained on
+                                // the next strategy ACK. Called even if
+                                // `should_broadcast` was false (registry has
+                                // finished its work for this event_id) so the
+                                // engine cannot deadlock if the registry
+                                // declines to broadcast.
+                                if let Some(id) = engine_event_id {
+                                    let bridge_opt = {
+                                        let guard = tektii_ack_bridge.read().await;
+                                        guard.clone()
+                                    };
+                                    if let Some(bridge) = bridge_opt {
+                                        bridge.mark_sent(vec![id]).await;
+                                    }
                                 }
 
                                 // Emit fill/cancel events to internal channel

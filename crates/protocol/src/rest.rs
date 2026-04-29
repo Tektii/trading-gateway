@@ -348,6 +348,11 @@ pub struct Trade {
     pub timestamp: u64,
 
     /// Whether this trade was a system-initiated liquidation.
+    ///
+    /// Absent in JSON ≡ `false`. Engine emits this field only on liquidation
+    /// closes (TEK-286), so the gateway omits it on serialize when `false` to
+    /// round-trip the wire shape.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub liquidation: bool,
 }
 
@@ -529,4 +534,71 @@ pub struct SymbolInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolsResponse {
     pub symbols: Vec<SymbolInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    /// Engine emits a normal-close `Trade` without the `liquidation` field
+    /// (TEK-286). The gateway must accept it as `liquidation: false` rather
+    /// than failing to deserialize.
+    #[test]
+    fn trade_deserializes_with_liquidation_field_omitted() {
+        let json = r#"{
+            "id": "trade-001",
+            "order_id": "order-abc",
+            "symbol": "C:BTCUSD",
+            "side": "buy",
+            "quantity": "0.01",
+            "price": "60000",
+            "commission": "0",
+            "timestamp": 1704067200000
+        }"#;
+
+        let trade: Trade = serde_json::from_str(json).expect("missing liquidation must default");
+        assert!(!trade.liquidation);
+    }
+
+    /// Symmetry: a non-liquidation trade must serialize without the field, so
+    /// the gateway re-emits the same wire shape the engine produces.
+    #[test]
+    fn trade_omits_liquidation_on_serialize_when_false() {
+        let trade = trade_fixture(false);
+        let value = serde_json::to_value(&trade).expect("serialize");
+        assert!(
+            value.get("liquidation").is_none(),
+            "liquidation: false must be omitted, got: {value}"
+        );
+    }
+
+    /// Liquidation closes set `liquidation: true` explicitly and the field
+    /// must round-trip through serialize -> deserialize.
+    #[test]
+    fn trade_round_trips_when_liquidation_true() {
+        let trade = trade_fixture(true);
+        let json = serde_json::to_string(&trade).expect("serialize");
+        let parsed: Trade = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, trade);
+        assert!(parsed.liquidation);
+    }
+
+    fn trade_fixture(liquidation: bool) -> Trade {
+        Trade {
+            id: "trade-002".to_string(),
+            order_id: "order-xyz".to_string(),
+            position_id: None,
+            symbol: "C:BTCUSD".to_string(),
+            side: Side::Sell,
+            quantity: dec!(0.5),
+            price: dec!(45000),
+            base_price: None,
+            slippage_bps: None,
+            commission: dec!(1),
+            realized_pnl: Some(dec!(-100)),
+            timestamp: 1_704_067_200_000,
+            liquidation,
+        }
+    }
 }
