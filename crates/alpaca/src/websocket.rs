@@ -918,6 +918,20 @@ fn spawn_trading_stream_reader(
                                 &text, platform, &tx,
                             );
                         }
+                        Some(Ok(Message::Binary(bytes))) => {
+                            // Alpaca's `/stream` endpoint delivers `trade_updates`
+                            // (and auth/listening envelopes) as Binary frames whose
+                            // payload is UTF-8 JSON, not Text frames.
+                            match std::str::from_utf8(&bytes) {
+                                Ok(text) => process_trading_stream_text(
+                                    text, platform, &tx,
+                                ),
+                                Err(e) => warn!(
+                                    platform = ?platform,
+                                    "Non-UTF-8 binary frame on Alpaca trading stream: {e}"
+                                ),
+                            }
+                        }
                         Some(Ok(Message::Close(frame))) => {
                             info!(
                                 platform = ?platform,
@@ -1036,6 +1050,25 @@ fn spawn_market_data_reader(
                                 if tx.send(event.into()).is_err() {
                                     return;
                                 }
+                            }
+                        }
+                        Some(Ok(Message::Binary(bytes))) => {
+                            // Defensive: market-data currently arrives as Text frames,
+                            // but the trading-stream sibling sends JSON in Binary —
+                            // mirror that handling here so we don't repeat TEK-573 if
+                            // Alpaca ever switches this stream too.
+                            match std::str::from_utf8(&bytes) {
+                                Ok(text) => {
+                                    for event in AlpacaWebSocketProvider::process_alpaca_message(text, platform) {
+                                        if tx.send(event.into()).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    platform = ?platform,
+                                    "Non-UTF-8 binary frame on Alpaca market data stream: {e}"
+                                ),
                             }
                         }
                         Some(Ok(Message::Pong(_))) => {
@@ -1306,5 +1339,66 @@ const fn alpaca_provider_name(platform: TradingPlatform) -> &'static str {
         "alpaca-paper"
     } else {
         "alpaca-live"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tektii_gateway_core::websocket::messages::WsMessage;
+
+    /// Regression test for TEK-573: Alpaca's trading stream delivers
+    /// `trade_updates` as Binary WebSocket frames whose payload is UTF-8 JSON.
+    /// The reader previously matched only `Message::Text` and dropped Binary
+    /// frames on the catch-all arm, silently swallowing every fill / reject /
+    /// cancel event. Round-trip a synthetic fill payload through the
+    /// bytes→UTF-8→`process_trading_stream_text` pipeline and assert an
+    /// `OrderFilled` event lands on the channel.
+    #[test]
+    fn process_trading_stream_text_emits_order_filled_for_alpaca_fill_payload() {
+        let payload = r#"{
+            "stream": "trade_updates",
+            "data": {
+                "event": "fill",
+                "timestamp": "2026-05-19T10:00:00.000000000Z",
+                "order": {
+                    "id": "order-123",
+                    "client_order_id": "client-abc",
+                    "symbol": "BTC/USD",
+                    "side": "buy",
+                    "type": "market",
+                    "qty": "0.001",
+                    "filled_qty": "0.001",
+                    "filled_avg_price": "60000.0",
+                    "status": "filled",
+                    "time_in_force": "gtc",
+                    "created_at": "2026-05-19T10:00:00Z",
+                    "updated_at": "2026-05-19T10:00:00Z"
+                }
+            }
+        }"#;
+
+        let bytes = payload.as_bytes().to_vec();
+        let text = std::str::from_utf8(&bytes).expect("payload is valid UTF-8");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_trading_stream_text(text, TradingPlatform::AlpacaPaper, &tx);
+
+        let event = rx
+            .try_recv()
+            .expect("expected one ProviderEvent on the channel");
+        match event.msg {
+            WsMessage::Order { event, order, .. } => {
+                assert_eq!(event, OrderEventType::OrderFilled);
+                assert_eq!(order.id, "order-123");
+                assert_eq!(order.symbol, "BTC/USD");
+            }
+            other => panic!("expected WsMessage::Order, got {other:?}"),
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no further events expected on the channel"
+        );
     }
 }
