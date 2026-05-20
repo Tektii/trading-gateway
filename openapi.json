@@ -1154,7 +1154,7 @@
           {
             "name": "symbol",
             "in": "path",
-            "description": "Symbol (e.g., AAPL, BTC/USD)",
+            "description": "Symbol in the provider's native format (e.g., F:EURUSD, AAPL)",
             "required": true,
             "schema": {
               "type": "string"
@@ -1454,7 +1454,7 @@
           },
           "symbol": {
             "type": "string",
-            "description": "Symbol in canonical format"
+            "description": "Symbol in the provider's native format, exactly as subscribed (e.g., \"F:EURUSD\", \"AAPL\").\nThe gateway does not normalise symbols; use the same form your strategy subscribed with."
           },
           "timeframe": {
             "$ref": "#/components/schemas/Timeframe",
@@ -2312,7 +2312,7 @@
           },
           "symbol": {
             "type": "string",
-            "description": "Canonical symbol format (e.g., \"EUR/USD\", \"AAPL\")"
+            "description": "Symbol in the provider's native format, exactly as subscribed (e.g., \"F:EURUSD\", \"AAPL\").\nThe gateway does not normalise symbols; use the same form your strategy subscribed with."
           },
           "take_profit": {
             "type": [
@@ -2571,7 +2571,7 @@
           },
           "symbol": {
             "type": "string",
-            "description": "Symbol in canonical format (e.g., \"EUR/USD\", \"AAPL\")"
+            "description": "Symbol in the provider's native format, exactly as subscribed (e.g., \"F:EURUSD\", \"AAPL\").\nThe gateway does not normalise symbols; use the same form your strategy subscribed with."
           },
           "timestamp": {
             "type": "string",

@@ -496,7 +496,7 @@ pub async fn close_all_positions(
     get,
     path = "/quotes/{symbol}",
     params(
-        ("symbol" = String, Path, description = "Symbol (e.g., AAPL, BTC/USD)")
+        ("symbol" = String, Path, description = "Symbol in the provider's native format (e.g., F:EURUSD, AAPL)")
     ),
     responses(
         (status = 200, description = "Quote data", body = Quote),

@@ -13,7 +13,8 @@ use crate::error::GatewayError;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct OrderRequest {
-    /// Canonical symbol format (e.g., "EUR/USD", "AAPL")
+    /// Symbol in the provider's native format, exactly as subscribed (e.g., "F:EURUSD", "AAPL").
+    /// The gateway does not normalise symbols; use the same form your strategy subscribed with.
     #[validate(length(min = 1, max = 20))]
     pub symbol: String,
 

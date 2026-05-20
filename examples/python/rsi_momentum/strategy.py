@@ -14,7 +14,7 @@ Environment variables
 ===================  ==============  ==============================================
 Name                 Default         Description
 ===================  ==============  ==============================================
-SYMBOL               EUR/USD         Trading symbol
+SYMBOL               F:EURUSD        Trading symbol, provider-native form (e.g. F:EURUSD)
 ORDER_QUANTITY       0.01            Order size (fractional allowed on forex/crypto)
 RSI_PERIOD           14              RSI lookback, in bars (Wilder's smoothing)
 RSI_OVERSOLD         30              Enter long when RSI crosses below this
@@ -31,7 +31,7 @@ TRADING_GATEWAY_API_KEY       (unset)         API key for remote gateways (read 
 Local run
 ---------
     pip install -e .
-    SYMBOL=EUR/USD python strategy.py
+    SYMBOL=F:EURUSD python strategy.py
 
 Docker
 ------
@@ -91,7 +91,12 @@ class Config:
 
         try:
             cfg = cls(
-                symbol=os.environ.get("SYMBOL", "EUR/USD"),
+                # Provider-native symbol, exactly as subscribed on the engine.
+                # The gateway passes symbols through unchanged on both the
+                # history (REST) and stream (WS) surfaces — no normalisation —
+                # so this one form must drive subscription, warm-up, and the
+                # on_candle filter alike.
+                symbol=os.environ.get("SYMBOL", "F:EURUSD"),
                 quantity=Decimal(os.environ.get("ORDER_QUANTITY", "0.01")),
                 period=int(os.environ.get("RSI_PERIOD", "14")),
                 oversold=Decimal(os.environ.get("RSI_OVERSOLD", "30")),

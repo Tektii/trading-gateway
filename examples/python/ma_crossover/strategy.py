@@ -14,7 +14,7 @@ Environment variables
 ===================  ==============  ==============================================
 Name                 Default         Description
 ===================  ==============  ==============================================
-SYMBOL               EUR/USD         Trading symbol
+SYMBOL               F:EURUSD        Trading symbol, provider-native form (e.g. F:EURUSD)
 ORDER_QUANTITY       0.01            Order size (fractional allowed on forex/crypto)
 MA_SHORT             10              Short SMA period, in bars
 MA_LONG              20              Long SMA period, in bars
@@ -30,7 +30,7 @@ TRADING_GATEWAY_API_KEY       (unset)         API key for remote gateways (read 
 Local run
 ---------
     pip install -e .
-    SYMBOL=EUR/USD python strategy.py
+    SYMBOL=F:EURUSD python strategy.py
 
 Docker
 ------
@@ -91,7 +91,12 @@ class Config:
 
         try:
             cfg = cls(
-                symbol=os.environ.get("SYMBOL", "EUR/USD"),
+                # Provider-native symbol, exactly as subscribed on the engine.
+                # The gateway passes symbols through unchanged on both the
+                # history (REST) and stream (WS) surfaces — no normalisation —
+                # so this one form must drive subscription, warm-up, and the
+                # on_candle filter alike.
+                symbol=os.environ.get("SYMBOL", "F:EURUSD"),
                 quantity=Decimal(os.environ.get("ORDER_QUANTITY", "0.01")),
                 short_window=int(os.environ.get("MA_SHORT", "10")),
                 long_window=int(os.environ.get("MA_LONG", "20")),
