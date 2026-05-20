@@ -164,6 +164,12 @@ def bracket_prices(
     tighter template, wait for the ORDER_FILLED event, read
     ``order.average_fill_price``, then submit the bracket legs against
     that. Keeping it simple here so the core flow stays readable.
+
+    Note: the raw multiplication returns full-precision ``Decimal`` values.
+    The mock provider accepts these, but real brokers (Alpaca, Binance,
+    Oanda) reject prices that violate an instrument's tick size. Before
+    submitting against a real broker, ``Decimal.quantize(...)`` the SL/TP to
+    the instrument's tick.
     """
     sl = entry * (Decimal(1) - stop_loss_pct) if stop_loss_pct is not None else None
     tp = entry * (Decimal(1) + take_profit_pct) if take_profit_pct is not None else None
