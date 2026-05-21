@@ -163,8 +163,28 @@ pub struct ProviderHealth {
 pub struct DetailedHealthStatus {
     /// Overall status: "connected" or "degraded"
     pub status: OverallStatus,
+    /// Gateway semantic version (`CARGO_PKG_VERSION`), e.g. `0.1.0`.
+    pub version: String,
+    /// Git SHA of the build, baked in via the `GIT_SHA` env var at image
+    /// build time. `"unknown"` when the binary was built without it (e.g. a
+    /// local `cargo run`). Consumers — notably the canary capture binary —
+    /// rely on this for dataset provenance, so the field name and semantics
+    /// are stable.
+    pub git_sha: String,
     /// Per-provider health details
     pub providers: Vec<ProviderHealth>,
+}
+
+/// Git SHA this binary was built from.
+///
+/// Read at runtime from the `GIT_SHA` env var, which the Docker image sets
+/// from the `GIT_SHA` build-arg. Returns `"unknown"` when unset (local builds).
+#[must_use]
+pub fn build_git_sha() -> String {
+    std::env::var("GIT_SHA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 impl Capabilities {
@@ -198,6 +218,8 @@ mod tests {
     fn detailed_health_serializes_connected() {
         let health = DetailedHealthStatus {
             status: OverallStatus::Connected,
+            version: "0.1.0".to_string(),
+            git_sha: "abc1234".to_string(),
             providers: vec![ProviderHealth {
                 platform: "alpaca-paper".to_string(),
                 connected: true,
@@ -207,6 +229,8 @@ mod tests {
 
         let json = serde_json::to_value(&health).unwrap();
         assert_eq!(json["status"], "connected");
+        assert_eq!(json["version"], "0.1.0");
+        assert_eq!(json["git_sha"], "abc1234");
         assert_eq!(json["providers"][0]["platform"], "alpaca-paper");
         assert_eq!(json["providers"][0]["connected"], true);
         // stale_instruments should be skipped when empty
@@ -217,6 +241,8 @@ mod tests {
     fn detailed_health_serializes_degraded() {
         let health = DetailedHealthStatus {
             status: OverallStatus::Degraded,
+            version: "0.1.0".to_string(),
+            git_sha: "abc1234".to_string(),
             providers: vec![ProviderHealth {
                 platform: "alpaca-paper".to_string(),
                 connected: false,

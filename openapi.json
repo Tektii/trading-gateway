@@ -1763,9 +1763,15 @@
         "description": "Detailed health response for the `/health` endpoint.\n\nAlways returned with 200 status — degraded is informational,\nnot an error. This prevents k8s from restarting the pod on a\ntransient broker blip.",
         "required": [
           "status",
+          "version",
+          "git_sha",
           "providers"
         ],
         "properties": {
+          "git_sha": {
+            "type": "string",
+            "description": "Git SHA of the build, baked in via the `GIT_SHA` env var at image\nbuild time. `\"unknown\"` when the binary was built without it (e.g. a\nlocal `cargo run`). Consumers — notably the canary capture binary —\nrely on this for dataset provenance, so the field name and semantics\nare stable."
+          },
           "providers": {
             "type": "array",
             "items": {
@@ -1776,6 +1782,10 @@
           "status": {
             "$ref": "#/components/schemas/OverallStatus",
             "description": "Overall status: \"connected\" or \"degraded\""
+          },
+          "version": {
+            "type": "string",
+            "description": "Gateway semantic version (`CARGO_PKG_VERSION`), e.g. `0.1.0`."
           }
         }
       },
