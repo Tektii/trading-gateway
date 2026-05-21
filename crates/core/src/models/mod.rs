@@ -24,7 +24,7 @@ pub use position::{CloseAllPositionsResult, ClosePositionRequest, Position};
 pub use quote::Quote;
 pub use system::{
     Capabilities, ConnectionStatus, DetailedHealthStatus, HealthStatus, OverallStatus,
-    ProviderHealth, RateLimits, ReadyStatus,
+    ProviderHealth, RateLimits, ReadyStatus, build_git_sha,
 };
 pub use trade::{Trade, TradeQueryParams};
 
