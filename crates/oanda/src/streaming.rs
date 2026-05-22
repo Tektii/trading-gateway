@@ -18,9 +18,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use chrono::Utc;
+use chrono::{DateTime, Timelike, Utc};
 use reqwest::Client;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::str::FromStr;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::Instant;
@@ -28,10 +29,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::adapter::OandaAdapter;
-use super::types::{OandaPriceStreamMessage, OandaTransactionStreamLine};
+use super::types::{
+    OandaCandle, OandaCandlesResponse, OandaPriceStreamMessage, OandaTransactionStreamLine,
+};
 use crate::credentials::OandaCredentials;
 use tektii_gateway_core::models::{
-    Order, OrderStatus, OrderType, Quote, RejectReason, Side, TimeInForce, TradingPlatform,
+    Bar, Order, OrderStatus, OrderType, Quote, RejectReason, Side, TimeInForce, Timeframe,
+    TradingPlatform,
 };
 use tektii_gateway_core::websocket::error::WebSocketError;
 use tektii_gateway_core::websocket::messages::{
@@ -49,6 +53,21 @@ use tektii_gateway_core::websocket::provider::{
 const OANDA_PRACTICE_STREAM_URL: &str = "https://stream-fxpractice.oanda.com";
 /// Base URL for Oanda live streaming endpoints.
 const OANDA_LIVE_STREAM_URL: &str = "https://stream-fxtrade.oanda.com";
+
+/// Base URL for Oanda practice REST endpoints (candles live here, NOT the stream host).
+const OANDA_PRACTICE_REST_URL: &str = "https://api-fxpractice.oanda.com";
+/// Base URL for Oanda live REST endpoints.
+const OANDA_LIVE_REST_URL: &str = "https://api-fxtrade.oanda.com";
+
+/// Granularity requested for the live candle poll (matches `Timeframe::OneMinute`).
+const CANDLE_GRANULARITY: &str = "M1";
+/// Number of candles fetched per poll. The in-progress (`complete=false`) candle plus a
+/// couple of closed ones, so a single missed poll (process pause, late finalize) is
+/// recovered next poll instead of dropping a bar -- important for the canary's completeness.
+const CANDLE_POLL_COUNT: u32 = 3;
+/// Seconds to wait past each minute boundary before polling, giving Oanda time to
+/// finalize the candle that just closed.
+const CANDLE_POLL_OFFSET_SECS: i64 = 3;
 
 /// Heartbeat timeout -- if no data arrives within this window, reconnect.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -86,6 +105,8 @@ enum StreamError {
 pub struct OandaWebSocketProvider {
     /// Base URL for streaming endpoints.
     stream_url: String,
+    /// Base URL for REST endpoints (candle polling -- candles are not streamed).
+    rest_url: String,
     /// Bearer API token.
     api_token: Arc<SecretBox<String>>,
     /// Oanda account ID.
@@ -103,6 +124,9 @@ pub struct OandaWebSocketProvider {
     /// Separate token for price stream -- cancelled on subscribe/unsubscribe to
     /// respawn with updated instrument list.
     price_stream_cancel: Arc<RwLock<CancellationToken>>,
+    /// Separate token for the candle poll -- cancelled-and-replaced on each spawn so a
+    /// reconnect (which re-runs `connect()`) does not leave a duplicate poll task running.
+    candle_poll_cancel: Arc<RwLock<CancellationToken>>,
     /// HTTP client (shared across reconnections).
     client: Client,
 }
@@ -118,8 +142,18 @@ impl OandaWebSocketProvider {
                 _ => OANDA_PRACTICE_STREAM_URL.to_string(),
             });
 
+        // Candles live on the REST host, derived the same way the adapter does.
+        let rest_url = credentials
+            .rest_url
+            .clone()
+            .unwrap_or_else(|| match platform {
+                TradingPlatform::OandaLive => OANDA_LIVE_REST_URL.to_string(),
+                _ => OANDA_PRACTICE_REST_URL.to_string(),
+            });
+
         Self {
             stream_url,
+            rest_url,
             api_token: tektii_gateway_core::arc_secret(&credentials.api_token),
             account_id: credentials.account_id.clone(),
             platform,
@@ -128,6 +162,7 @@ impl OandaWebSocketProvider {
             cancel_token: CancellationToken::new(),
             stored_config: Arc::new(RwLock::new(None)),
             price_stream_cancel: Arc::new(RwLock::new(CancellationToken::new())),
+            candle_poll_cancel: Arc::new(RwLock::new(CancellationToken::new())),
             client: Client::new(),
         }
     }
@@ -209,6 +244,45 @@ impl OandaWebSocketProvider {
             .await;
         });
     }
+
+    /// Spawn (or respawn) the M1 candle poll task with the current instrument list.
+    ///
+    /// Reads the shared instrument list at the top of every iteration, so it never needs
+    /// respawning on subscribe/unsubscribe. It is cancelled-and-replaced here (like the
+    /// price stream) so that a reconnect -- which re-runs `connect()` -- replaces the old
+    /// poll task rather than leaving a duplicate running. It also stops on the top-level
+    /// `cancel_token` (disconnect).
+    async fn spawn_candle_poll(&self) {
+        // Cancel any existing candle poll, then install a fresh token.
+        let new_cancel = {
+            let mut guard = self.candle_poll_cancel.write().await;
+            guard.cancel();
+            *guard = CancellationToken::new();
+            guard.clone()
+        };
+
+        let instruments = Arc::clone(&self.instruments);
+        let parent_cancel = self.cancel_token.clone();
+        let event_tx = self.event_tx.clone();
+        let client = self.client.clone();
+        let rest_url = self.rest_url.clone();
+        let api_token = Arc::clone(&self.api_token);
+        let platform = self.platform;
+
+        tokio::spawn(async move {
+            run_candle_poll(
+                &client,
+                &rest_url,
+                api_token.expose_secret(),
+                instruments,
+                platform,
+                event_tx,
+                new_cancel,
+                parent_cancel,
+            )
+            .await;
+        });
+    }
 }
 
 // ============================================================================
@@ -229,6 +303,12 @@ impl WebSocketProvider for OandaWebSocketProvider {
 
         // Spawn price stream.
         self.spawn_price_stream().await;
+
+        // Spawn the candle poll only if the strategy asked for candles -- Oanda has no
+        // candle stream, so we REST-poll /candles on the minute boundary (see TEK-599).
+        if wants_candles(&config.event_types) {
+            self.spawn_candle_poll().await;
+        }
 
         // Spawn transaction stream.
         let provider = self.clone();
@@ -492,6 +572,252 @@ async fn process_price_buffer(
                     "Failed to parse price stream NDJSON line -- skipping"
                 );
             }
+        }
+    }
+}
+
+// ============================================================================
+// Candle poll
+// ============================================================================
+
+/// Whether the requested event types include candles/bars.
+///
+/// Mirrors the Alpaca adapter's mapping so subscriptions behave consistently across
+/// providers. Gates the candle poll so we don't run a 60s loop nobody consumes.
+fn wants_candles(event_types: &[String]) -> bool {
+    event_types.iter().any(|e| {
+        let e = e.to_ascii_lowercase();
+        matches!(e.as_str(), "candle" | "candles" | "bar" | "bars") || e.starts_with("candle_")
+    })
+}
+
+/// Start of the next minute after `now` (sub-minute components truncated).
+fn next_minute_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
+    let truncated = now
+        .with_second(0)
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or(now);
+    truncated + chrono::Duration::minutes(1)
+}
+
+/// Map an Oanda candle to a gateway [`Bar`], or `None` if it lacks mid prices.
+///
+/// Mirrors `OandaAdapter::get_bars` (mid OHLC, tick volume) so live candles are
+/// identical to historical ones. The provider string intentionally differs: this uses
+/// `platform.header_value()` (e.g. "oanda-practice") for consistency with the streamed
+/// quotes/orders, whereas `get_bars` hardcodes "oanda". Strategies key off OHLC, not the
+/// provider label, so this divergence is deliberate -- do not "fix" it.
+///
+/// Price/volume basis (TEK-599): uses **mid** OHLC (Oanda's `/candles` default, `price=M`)
+/// and Oanda's **tick volume** (count of price ticks, not traded notional -- forex is OTC
+/// with no consolidated volume). This matches both `get_bars` and the engine's single-series
+/// `Candle` (`crates/tektii/src/websocket.rs`), keeping the canary's live-vs-backtest
+/// comparison apples-to-apples *provided the engine's forex dataset is also mid + tick volume*
+/// (a canary-dataset concern owned by the repoint, TEK-597).
+fn candle_to_bar(symbol: &str, candle: &OandaCandle, platform: TradingPlatform) -> Option<Bar> {
+    let mid = candle.mid.as_ref()?;
+    let timestamp = DateTime::parse_from_rfc3339(&candle.time)
+        .ok()?
+        .with_timezone(&Utc);
+
+    Some(Bar {
+        symbol: symbol.to_string(),
+        provider: platform.header_value().to_string(),
+        timeframe: Timeframe::OneMinute,
+        open: Decimal::from_str(&mid.o).unwrap_or_default(),
+        high: Decimal::from_str(&mid.h).unwrap_or_default(),
+        low: Decimal::from_str(&mid.l).unwrap_or_default(),
+        close: Decimal::from_str(&mid.c).unwrap_or_default(),
+        volume: Decimal::from(candle.volume),
+        timestamp,
+    })
+}
+
+/// Failure mode of a candle poll.
+#[derive(Debug)]
+enum CandlePollError {
+    /// Permanent auth failure (401/403) -- the poll task should stop, matching how the
+    /// price/transaction streams treat `PermanentAuth`.
+    Auth(String),
+    /// Transient error (network, 5xx, decode) -- log and retry on the next boundary.
+    Transient(String),
+}
+
+impl std::fmt::Display for CandlePollError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auth(msg) | Self::Transient(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+/// Fetch recent M1 candles for an instrument and return the **closed** ones, oldest-first.
+///
+/// Requests `CANDLE_POLL_COUNT` candles so a single missed poll is recoverable; the
+/// in-progress (`complete=false`) candle is filtered out. Oanda returns candles oldest->newest,
+/// so the filtered result is already ascending.
+async fn poll_candles(
+    client: &Client,
+    rest_url: &str,
+    api_token: &str,
+    symbol: &str,
+) -> Result<Vec<OandaCandle>, CandlePollError> {
+    let url = format!(
+        "{rest_url}/v3/instruments/{symbol}/candles?granularity={CANDLE_GRANULARITY}&count={CANDLE_POLL_COUNT}"
+    );
+
+    let response = client
+        .get(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .map_err(|e| CandlePollError::Transient(e.to_string()))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(CandlePollError::Auth(format!("HTTP {status}")));
+    }
+    if !status.is_success() {
+        return Err(CandlePollError::Transient(format!("HTTP {status}")));
+    }
+
+    let resp: OandaCandlesResponse = response
+        .json()
+        .await
+        .map_err(|e| CandlePollError::Transient(e.to_string()))?;
+
+    Ok(resp.candles.into_iter().filter(|c| c.complete).collect())
+}
+
+/// Poll every instrument once and emit any newly-closed candles.
+///
+/// Timer-free so it can be tested directly against a mock server. `last_emitted` is the
+/// per-instrument watermark (timestamp of the last emitted candle) carried across calls:
+///
+/// * First poll for a symbol: emit only the **newest** closed candle, so startup does not
+///   replay historical candles.
+/// * Later polls: emit every closed candle strictly newer than the watermark, in order, so a
+///   single missed boundary recovers the skipped bar(s) rather than dropping them. A candle
+///   returned repeatedly (quiet/closed market) is suppressed because it is not past the watermark.
+///
+/// Returns `false` if a permanent auth failure was hit, signalling the caller to stop polling.
+async fn poll_and_emit(
+    client: &Client,
+    rest_url: &str,
+    api_token: &str,
+    symbols: &[String],
+    platform: TradingPlatform,
+    event_tx: &Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
+    last_emitted: &mut HashMap<String, DateTime<Utc>>,
+) -> bool {
+    for symbol in symbols {
+        let candles = match poll_candles(client, rest_url, api_token, symbol).await {
+            Ok(candles) => candles,
+            Err(CandlePollError::Auth(msg)) => {
+                error!(
+                    platform = %platform,
+                    symbol = %symbol,
+                    error = %msg,
+                    "Candle poll auth failure -- stopping candle poll"
+                );
+                return false;
+            }
+            Err(CandlePollError::Transient(msg)) => {
+                warn!(
+                    platform = %platform,
+                    symbol = %symbol,
+                    error = %msg,
+                    "Candle poll error -- will retry next minute"
+                );
+                continue;
+            }
+        };
+
+        // Map closed candles to bars (ascending), then select those past the watermark.
+        let bars: Vec<Bar> = candles
+            .iter()
+            .filter_map(|c| candle_to_bar(symbol, c, platform))
+            .collect();
+        let new_bars: Vec<Bar> = match last_emitted.get(symbol).copied() {
+            None => bars.into_iter().next_back().into_iter().collect(),
+            Some(watermark) => bars
+                .into_iter()
+                .filter(|b| b.timestamp > watermark)
+                .collect(),
+        };
+
+        if new_bars.is_empty() {
+            continue;
+        }
+
+        let tx_guard = event_tx.read().await;
+        if let Some(tx) = tx_guard.as_ref() {
+            for bar in new_bars {
+                last_emitted.insert(symbol.clone(), bar.timestamp);
+                let _ = tx.send(ProviderEvent::live(WsMessage::candle(bar)));
+            }
+        }
+    }
+
+    true
+}
+
+/// Poll Oanda's `/candles` endpoint on the minute boundary and emit `WsMessage::Candle`.
+///
+/// Boundary-aligned: each iteration recomputes the next minute from `Utc::now()` (so the
+/// schedule self-corrects against poll latency) and wakes a few seconds past it, by which
+/// point the just-closed candle is finalized. Transient errors are logged and retried next
+/// minute (the 60s cadence is its own backoff); a permanent auth failure stops the task.
+/// Also stops on `poll_cancel` (respawn) or `parent_cancel` (disconnect).
+#[allow(clippy::too_many_arguments)]
+async fn run_candle_poll(
+    client: &Client,
+    rest_url: &str,
+    api_token: &str,
+    instruments: Arc<RwLock<Vec<String>>>,
+    platform: TradingPlatform,
+    event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
+    poll_cancel: CancellationToken,
+    parent_cancel: CancellationToken,
+) {
+    let mut last_emitted: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+    loop {
+        let now = Utc::now();
+        let wake_at =
+            next_minute_boundary(now) + chrono::Duration::seconds(CANDLE_POLL_OFFSET_SECS);
+        let sleep_dur = (wake_at - now).to_std().unwrap_or(Duration::ZERO);
+
+        tokio::select! {
+            () = tokio::time::sleep(sleep_dur) => {}
+            () = poll_cancel.cancelled() => {
+                debug!(platform = %platform, "Candle poll cancelled (respawn)");
+                return;
+            }
+            () = parent_cancel.cancelled() => {
+                debug!(platform = %platform, "Candle poll cancelled (disconnect)");
+                return;
+            }
+        }
+
+        let symbols = instruments.read().await.clone();
+        if symbols.is_empty() {
+            continue;
+        }
+
+        let keep_polling = poll_and_emit(
+            client,
+            rest_url,
+            api_token,
+            &symbols,
+            platform,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        if !keep_polling {
+            return;
         }
     }
 }
@@ -1042,6 +1368,7 @@ fn transaction_reject_to_messages(
 mod tests {
     use super::*;
     use crate::types::OandaPriceBucket;
+    use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
     /// Helper to create a test transaction stream line with sensible defaults.
     fn test_tx(id: &str, tx_type: &str) -> OandaTransactionStreamLine {
@@ -1403,5 +1730,557 @@ mod tests {
 
         let provider = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
         assert_eq!(provider.stream_url, "http://localhost:9999");
+    }
+
+    // ------------------------------------------------------------------
+    // Candle poll (TEK-599)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn default_rest_urls() {
+        let creds = OandaCredentials::new("test", "test-account");
+
+        let practice = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
+        assert_eq!(practice.rest_url, OANDA_PRACTICE_REST_URL);
+
+        let live = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaLive);
+        assert_eq!(live.rest_url, OANDA_LIVE_REST_URL);
+    }
+
+    #[test]
+    fn custom_rest_url_override() {
+        let creds =
+            OandaCredentials::new("test", "test-account").with_rest_url("http://localhost:8888");
+
+        let provider = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
+        assert_eq!(provider.rest_url, "http://localhost:8888");
+    }
+
+    #[test]
+    fn wants_candles_matrix() {
+        assert!(wants_candles(&["candle".to_string()]));
+        assert!(wants_candles(&["candles".to_string()]));
+        assert!(wants_candles(&["bar".to_string()]));
+        assert!(wants_candles(&["bars".to_string()]));
+        assert!(wants_candles(&["candle_1m".to_string()]));
+        assert!(wants_candles(&["quote".to_string(), "CANDLE".to_string()]));
+
+        assert!(!wants_candles(&["quote".to_string()]));
+        assert!(!wants_candles(&[]));
+    }
+
+    #[test]
+    fn next_minute_boundary_truncates() {
+        let now = DateTime::parse_from_rfc3339("2024-01-15T10:30:42.5Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let boundary = next_minute_boundary(now);
+        assert_eq!(
+            boundary,
+            DateTime::parse_from_rfc3339("2024-01-15T10:31:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    /// Build an `OandaCandle` JSON value for tests.
+    fn candle_value(time: &str, complete: bool) -> serde_json::Value {
+        serde_json::json!({
+            "time": time,
+            "mid": { "o": "1.10000", "h": "1.10500", "l": "1.09500", "c": "1.10200" },
+            "volume": 1000,
+            "complete": complete,
+        })
+    }
+
+    #[test]
+    fn candle_to_bar_matches_get_bars_mapping() {
+        let candle: OandaCandle =
+            serde_json::from_value(candle_value("2024-01-15T10:00:00.000000000Z", true)).unwrap();
+
+        let bar = candle_to_bar("EUR_USD", &candle, TradingPlatform::OandaPractice).unwrap();
+
+        assert_eq!(bar.symbol, "EUR_USD");
+        assert_eq!(bar.timeframe, Timeframe::OneMinute);
+        assert_eq!(bar.open, Decimal::from_str("1.10000").unwrap());
+        assert_eq!(bar.high, Decimal::from_str("1.10500").unwrap());
+        assert_eq!(bar.low, Decimal::from_str("1.09500").unwrap());
+        assert_eq!(bar.close, Decimal::from_str("1.10200").unwrap());
+        assert_eq!(bar.volume, Decimal::from(1000));
+        assert_eq!(
+            bar.timestamp,
+            DateTime::parse_from_rfc3339("2024-01-15T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn candle_to_bar_skips_missing_mid() {
+        let candle: OandaCandle = serde_json::from_value(serde_json::json!({
+            "time": "2024-01-15T10:00:00.000000000Z",
+            "volume": 1000,
+            "complete": true,
+        }))
+        .unwrap();
+
+        assert!(candle_to_bar("EUR_USD", &candle, TradingPlatform::OandaPractice).is_none());
+    }
+
+    #[test]
+    fn candle_to_bar_provider_is_header_value() {
+        let candle: OandaCandle =
+            serde_json::from_value(candle_value("2024-01-15T10:00:00.000000000Z", true)).unwrap();
+
+        let practice = candle_to_bar("EUR_USD", &candle, TradingPlatform::OandaPractice).unwrap();
+        assert_eq!(practice.provider, "oanda-practice");
+
+        let live = candle_to_bar("EUR_USD", &candle, TradingPlatform::OandaLive).unwrap();
+        assert_eq!(live.provider, "oanda-live");
+    }
+
+    #[tokio::test]
+    async fn poll_candles_fetches_and_maps() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value("2024-01-15T10:00:00.000000000Z", true)] }),
+        )
+        .await;
+
+        let candles = poll_candles(&Client::new(), &base_url, "test-token", "EUR_USD")
+            .await
+            .unwrap();
+
+        assert_eq!(candles.len(), 1);
+        let bar = candle_to_bar("EUR_USD", &candles[0], TradingPlatform::OandaPractice).unwrap();
+        assert_eq!(bar.close, Decimal::from_str("1.10200").unwrap());
+    }
+
+    #[tokio::test]
+    async fn poll_candles_filters_incomplete_keeps_ascending() {
+        // Response: a closed candle followed by the in-progress (incomplete) minute.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({
+                "candles": [
+                    candle_value("2024-01-15T10:00:00.000000000Z", true),
+                    candle_value("2024-01-15T10:01:00.000000000Z", false),
+                ]
+            }),
+        )
+        .await;
+
+        let candles = poll_candles(&Client::new(), &base_url, "test-token", "EUR_USD")
+            .await
+            .unwrap();
+
+        assert_eq!(candles.len(), 1, "incomplete candle must be filtered out");
+        assert_eq!(candles[0].time, "2024-01-15T10:00:00.000000000Z");
+    }
+
+    #[tokio::test]
+    async fn poll_candles_empty_when_none_complete() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value("2024-01-15T10:01:00.000000000Z", false)] }),
+        )
+        .await;
+
+        let candles = poll_candles(&Client::new(), &base_url, "test-token", "EUR_USD")
+            .await
+            .unwrap();
+        assert!(
+            candles.is_empty(),
+            "no closed candle should yield empty vec"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_candles_server_error_is_transient() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            500,
+            serde_json::json!({ "errorMessage": "boom" }),
+        )
+        .await;
+
+        let err = poll_candles(&Client::new(), &base_url, "test-token", "EUR_USD")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CandlePollError::Transient(ref m) if m.contains("500")),
+            "expected Transient HTTP 500, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_candles_unauthorized_is_auth() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            401,
+            serde_json::json!({ "errorMessage": "bad token" }),
+        )
+        .await;
+
+        let err = poll_candles(&Client::new(), &base_url, "test-token", "EUR_USD")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CandlePollError::Auth(_)),
+            "401 should map to Auth, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_emits_candle_then_dedups() {
+        // The mock always returns the same closed candle. The first poll must emit it;
+        // a second poll (same timestamp) must be suppressed by the dedup map.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value("2024-01-15T10:00:00.000000000Z", true)] }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let symbols = vec!["EUR_USD".to_string()];
+        let mut last_emitted = HashMap::new();
+        let client = Client::new();
+
+        // First poll: one candle emitted.
+        poll_and_emit(
+            &client,
+            &base_url,
+            "test-token",
+            &symbols,
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        let event = rx.try_recv().expect("first poll should emit a candle");
+        match event.msg {
+            WsMessage::Candle { bar, .. } => {
+                assert_eq!(bar.symbol, "EUR_USD");
+                assert_eq!(bar.close, Decimal::from_str("1.10200").unwrap());
+                assert_eq!(bar.provider, "oanda-practice");
+            }
+            other => panic!("expected Candle, got {other:?}"),
+        }
+
+        // Second poll: same candle, dedup suppresses it.
+        poll_and_emit(
+            &client,
+            &base_url,
+            "test-token",
+            &symbols,
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "dedup should suppress re-emitting the same candle"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_no_candle_when_incomplete() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value("2024-01-15T10:01:00.000000000Z", false)] }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let mut last_emitted = HashMap::new();
+
+        poll_and_emit(
+            &Client::new(),
+            &base_url,
+            "test-token",
+            &["EUR_USD".to_string()],
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no closed candle should produce no message"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_first_poll_emits_only_newest() {
+        // On the first poll for a symbol, only the newest closed candle is emitted -- older
+        // candles in the response are NOT replayed as history.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({
+                "candles": [
+                    candle_value("2024-01-15T10:00:00.000000000Z", true),
+                    candle_value("2024-01-15T10:01:00.000000000Z", true),
+                ]
+            }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let mut last_emitted = HashMap::new();
+
+        let ok = poll_and_emit(
+            &Client::new(),
+            &base_url,
+            "test-token",
+            &["EUR_USD".to_string()],
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+        assert!(ok);
+
+        let event = rx.try_recv().expect("should emit the newest candle");
+        match event.msg {
+            WsMessage::Candle { bar, .. } => {
+                assert_eq!(
+                    bar.timestamp,
+                    DateTime::parse_from_rfc3339("2024-01-15T10:01:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    "only the newest candle should be emitted on first poll"
+                );
+            }
+            other => panic!("expected Candle, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "older candle must not be replayed");
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_recovers_candles_after_watermark() {
+        // With an existing watermark, every closed candle strictly newer than it is emitted
+        // in order -- recovering bars skipped by a missed poll.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({
+                "candles": [
+                    candle_value("2024-01-15T10:00:00.000000000Z", true),
+                    candle_value("2024-01-15T10:01:00.000000000Z", true),
+                    candle_value("2024-01-15T10:02:00.000000000Z", true),
+                ]
+            }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        // Watermark at 10:00 -- the gateway already emitted that minute.
+        let mut last_emitted = HashMap::from([(
+            "EUR_USD".to_string(),
+            DateTime::parse_from_rfc3339("2024-01-15T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )]);
+
+        poll_and_emit(
+            &Client::new(),
+            &base_url,
+            "test-token",
+            &["EUR_USD".to_string()],
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        let mut times: Vec<String> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let WsMessage::Candle { bar, .. } = ev.msg {
+                times.push(bar.timestamp.to_rfc3339());
+            }
+        }
+        assert_eq!(
+            times,
+            vec![
+                "2024-01-15T10:01:00+00:00".to_string(),
+                "2024-01-15T10:02:00+00:00".to_string(),
+            ],
+            "should emit both candles past the watermark, in ascending order"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_stops_on_auth_failure() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            403,
+            serde_json::json!({ "errorMessage": "forbidden" }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let mut last_emitted = HashMap::new();
+
+        let ok = poll_and_emit(
+            &Client::new(),
+            &base_url,
+            "test-token",
+            &["EUR_USD".to_string()],
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        assert!(!ok, "auth failure should signal the poll to stop");
+        assert!(rx.try_recv().is_err(), "no candle on auth failure");
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_dedup_is_per_symbol() {
+        // Two symbols with the SAME candle timestamp must BOTH emit -- proving the dedup
+        // map is keyed per symbol, not a single shared watermark.
+        let (server, base_url) = start_mock_server().await;
+        let ts = "2024-01-15T10:00:00.000000000Z";
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value(ts, true)] }),
+        )
+        .await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/GBP_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value(ts, true)] }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let symbols = vec!["EUR_USD".to_string(), "GBP_USD".to_string()];
+        let mut last_emitted = HashMap::new();
+        let client = Client::new();
+
+        poll_and_emit(
+            &client,
+            &base_url,
+            "test-token",
+            &symbols,
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        let mut got: Vec<String> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let WsMessage::Candle { bar, .. } = ev.msg {
+                got.push(bar.symbol);
+            }
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["EUR_USD".to_string(), "GBP_USD".to_string()],
+            "both symbols should emit despite identical timestamps"
+        );
+
+        // Second pass: both deduped.
+        poll_and_emit(
+            &client,
+            &base_url,
+            "test-token",
+            &symbols,
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "second pass should dedup both symbols"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_candle_poll_returns_on_cancel() {
+        // Pre-cancel the poll token: the first `select!` must take the cancel arm and
+        // return immediately, without waiting for the minute boundary.
+        let poll_cancel = CancellationToken::new();
+        poll_cancel.cancel();
+        let parent_cancel = CancellationToken::new();
+
+        let instruments = Arc::new(RwLock::new(vec!["EUR_USD".to_string()]));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_candle_poll(
+                &Client::new(),
+                "http://127.0.0.1:1",
+                "test-token",
+                instruments,
+                TradingPlatform::OandaPractice,
+                event_tx,
+                poll_cancel,
+                parent_cancel,
+            ),
+        )
+        .await;
+
+        assert!(
+            res.is_ok(),
+            "run_candle_poll should return promptly when cancelled"
+        );
     }
 }
