@@ -687,6 +687,9 @@ async fn connect_oanda(
     if let Ok(url) = env::var("OANDA_STREAM_URL") {
         creds = creds.with_stream_url(url);
     }
+    if let Ok(url) = env::var("OANDA_REST_URL") {
+        creds = creds.with_rest_url(url);
+    }
 
     let provider = Box::new(OandaWebSocketProvider::new(&creds, platform));
     let provider_config = ProviderConfig {
