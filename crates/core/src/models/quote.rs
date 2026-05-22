@@ -9,7 +9,8 @@ use utoipa::ToSchema;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Quote {
-    /// Symbol in canonical format (e.g., "EUR/USD", "AAPL")
+    /// Symbol in the provider's native format, exactly as subscribed (e.g., "F:EURUSD", "AAPL").
+    /// The gateway does not normalise symbols; use the same form your strategy subscribed with.
     pub symbol: String,
 
     /// Data source provider (e.g., "alpaca", "binance")

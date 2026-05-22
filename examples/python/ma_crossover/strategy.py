@@ -14,7 +14,7 @@ Environment variables
 ===================  ==============  ==============================================
 Name                 Default         Description
 ===================  ==============  ==============================================
-SYMBOL               EUR/USD         Trading symbol
+SYMBOL               F:EURUSD        Trading symbol, provider-native form (e.g. F:EURUSD)
 ORDER_QUANTITY       0.01            Order size (fractional allowed on forex/crypto)
 MA_SHORT             10              Short SMA period, in bars
 MA_LONG              20              Long SMA period, in bars
@@ -30,7 +30,7 @@ TRADING_GATEWAY_API_KEY       (unset)         API key for remote gateways (read 
 Local run
 ---------
     pip install -e .
-    SYMBOL=EUR/USD python strategy.py
+    SYMBOL=F:EURUSD python strategy.py
 
 Docker
 ------
@@ -91,7 +91,12 @@ class Config:
 
         try:
             cfg = cls(
-                symbol=os.environ.get("SYMBOL", "EUR/USD"),
+                # Provider-native symbol, exactly as subscribed on the engine.
+                # The gateway passes symbols through unchanged on both the
+                # history (REST) and stream (WS) surfaces — no normalisation —
+                # so this one form must drive subscription, warm-up, and the
+                # on_candle filter alike.
+                symbol=os.environ.get("SYMBOL", "F:EURUSD"),
                 quantity=Decimal(os.environ.get("ORDER_QUANTITY", "0.01")),
                 short_window=int(os.environ.get("MA_SHORT", "10")),
                 long_window=int(os.environ.get("MA_LONG", "20")),
@@ -159,6 +164,12 @@ def bracket_prices(
     tighter template, wait for the ORDER_FILLED event, read
     ``order.average_fill_price``, then submit the bracket legs against
     that. Keeping it simple here so the core flow stays readable.
+
+    Note: the raw multiplication returns full-precision ``Decimal`` values.
+    The mock provider accepts these, but real brokers (Alpaca, Binance,
+    Oanda) reject prices that violate an instrument's tick size. Before
+    submitting against a real broker, ``Decimal.quantize(...)`` the SL/TP to
+    the instrument's tick.
     """
     sl = entry * (Decimal(1) - stop_loss_pct) if stop_loss_pct is not None else None
     tp = entry * (Decimal(1) + take_profit_pct) if take_profit_pct is not None else None

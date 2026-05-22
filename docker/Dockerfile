@@ -83,6 +83,11 @@ ARG BUILD_DATE
 ARG GIT_SHA
 ARG VERSION
 
+# Make the build SHA readable at runtime (image labels are not). The gateway
+# reads GIT_SHA via std::env::var and serves it on /health for consumers like
+# the canary capture binary.
+ENV GIT_SHA=${GIT_SHA}
+
 LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.version="${VERSION}" \

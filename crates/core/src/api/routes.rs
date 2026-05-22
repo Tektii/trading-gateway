@@ -496,7 +496,7 @@ pub async fn close_all_positions(
     get,
     path = "/quotes/{symbol}",
     params(
-        ("symbol" = String, Path, description = "Symbol (e.g., AAPL, BTC/USD)")
+        ("symbol" = String, Path, description = "Symbol in the provider's native format (e.g., F:EURUSD, AAPL)")
     ),
     responses(
         (status = 200, description = "Quote data", body = Quote),
@@ -810,6 +810,8 @@ pub async fn get_health(State(state): State<GatewayState>) -> impl IntoResponse 
 
     Json(DetailedHealthStatus {
         status,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: crate::models::build_git_sha(),
         providers: vec![provider],
     })
 }
@@ -1092,6 +1094,9 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "connected");
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+        // GIT_SHA is unset under test, so the field falls back to "unknown".
+        assert!(json["git_sha"].is_string());
         assert_eq!(json["providers"].as_array().unwrap().len(), 1);
     }
 
