@@ -240,13 +240,11 @@ pub fn engine_order_to_api(order: &engine::Order) -> api::Order {
         take_profit: None,
         trailing_distance: None,
         trailing_type: None,
-        // Engine doesn't track average fill price separately; we use limit/stop price
-        // as approximation, but return None for market orders (price == 0)
-        average_fill_price: if order.filled_quantity.is_zero() || order.price.is_zero() {
-            None
-        } else {
-            Some(order.price)
-        },
+        // Pass through the engine's tracked average fill price. For market
+        // orders the engine's `price` field is zero, so deriving the fill
+        // from it (the old behaviour) silently dropped the fill price on the
+        // wire and stranded the canary's order-update parser.
+        average_fill_price: order.average_fill_price,
         // Derive PartiallyFilled from filled_quantity since engine only has Open status
         status: if order.status == engine::OrderStatus::Open
             && !order.filled_quantity.is_zero()

@@ -270,6 +270,12 @@ pub struct Order {
     /// Quantity filled so far.
     pub filled_quantity: Decimal,
 
+    /// Average fill price across all partial fills (None until the first fill).
+    /// For market orders this is the only authoritative fill price — `price` is
+    /// zero. For limit/stop orders this is the actual fill, not the trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_fill_price: Option<Decimal>,
+
     /// Stop/trigger price (0 for market orders, `stop_price` for stop/stop-limit orders).
     pub price: Decimal,
 
