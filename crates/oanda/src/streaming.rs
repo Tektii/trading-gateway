@@ -167,6 +167,20 @@ impl OandaWebSocketProvider {
         }
     }
 
+    /// Adopt a shared outbound event sender so the matching `OandaAdapter` can
+    /// publish events (e.g. REST-sourced order fills that Oanda's transaction
+    /// stream never delivers) onto the same stream this provider feeds to
+    /// strategy clients. Must be called before `connect`, which writes the
+    /// active sender into this shared handle.
+    #[must_use]
+    pub fn with_event_tx(
+        mut self,
+        event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
+    ) -> Self {
+        self.event_tx = event_tx;
+        self
+    }
+
     // ========================================================================
     // Internal trading stream (for EventRouter)
     // ========================================================================

@@ -430,6 +430,7 @@ mod tests {
             quantity: dec!(100),
             filled_quantity: dec!(50),
             price: dec!(150),
+            average_fill_price: None,
             limit_price: None,
             status: engine::OrderStatus::Open,
             position_id: None,
