@@ -8,17 +8,18 @@ use super::types::{
     OandaCreateOrderResponse, OandaOrder, OandaOrderRequest, OandaOrderRequestWrapper,
     OandaOrdersResponse, OandaPosition, OandaPositionResponse, OandaPositionsResponse,
     OandaPricingResponse, OandaStopLossOnFill, OandaTakeProfitOnFill, OandaTrade,
-    OandaTradesResponse,
+    OandaTradesResponse, OandaTransaction,
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretBox};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{OnceCell, RwLock, broadcast};
+use tokio::sync::{OnceCell, RwLock, broadcast, mpsc};
 use tracing::{debug, instrument, warn};
 
 use tektii_gateway_core::circuit_breaker::{
@@ -28,7 +29,8 @@ use tektii_gateway_core::error::{GatewayError, GatewayResult, reject_codes};
 use tektii_gateway_core::events::router::EventRouter;
 use tektii_gateway_core::exit_management::{ExitHandler, ExitHandlerConfig, ExitHandling};
 use tektii_gateway_core::state::StateManager;
-use tektii_gateway_core::websocket::messages::WsMessage;
+use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
+use tektii_gateway_core::websocket::provider::ProviderEvent;
 
 use crate::capabilities::OandaCapabilities;
 use crate::credentials::OandaCredentials;
@@ -38,7 +40,8 @@ use tektii_gateway_core::adapter::{ProviderCapabilities, TradingAdapter};
 use tektii_gateway_core::models::{
     Account, Bar, BarParams, CancelOrderResult, Capabilities, ClosePositionRequest,
     ConnectionStatus, ModifyOrderRequest, ModifyOrderResult, Order, OrderHandle, OrderQueryParams,
-    Position, PositionSide, Quote, Side, Timeframe, Trade, TradeQueryParams, TradingPlatform,
+    OrderStatus, Position, PositionSide, Quote, Side, Timeframe, Trade, TradeQueryParams,
+    TradingPlatform,
 };
 
 // ============================================================================
@@ -80,6 +83,13 @@ pub struct OandaAdapter {
     platform: TradingPlatform,
     /// Circuit breaker for detecting provider outages.
     circuit_breaker: Arc<RwLock<AdapterCircuitBreaker>>,
+    /// Shared handle to the `WebSocketProvider`'s outbound event sender.
+    ///
+    /// Populated by the provider's `connect` (the two share this `Arc`). Lets
+    /// the REST order path publish fill events onto the same stream strategies
+    /// receive from — Oanda's transaction stream omits `ORDER_FILL`, so the
+    /// synchronous REST fill is the only fill signal.
+    provider_event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
 }
 
 impl OandaAdapter {
@@ -153,7 +163,79 @@ impl OandaAdapter {
             event_router,
             platform,
             circuit_breaker,
+            provider_event_tx: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Shared handle to the provider's outbound `ProviderEvent` sender, so the
+    /// matching `OandaWebSocketProvider` can adopt the same `Arc` (via
+    /// `with_event_tx`) and the REST order path can publish fills onto it.
+    #[must_use]
+    pub fn provider_event_tx_handle(
+        &self,
+    ) -> Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>> {
+        Arc::clone(&self.provider_event_tx)
+    }
+
+    /// Publish an immediate-fill `Order` event from the synchronous REST order
+    /// response onto the provider's outbound event stream (if connected),
+    /// preserving the caller's `client_order_id`.
+    async fn emit_rest_fill(
+        &self,
+        request: &tektii_gateway_core::models::OrderRequest,
+        fill: &OandaTransaction,
+    ) {
+        let guard = self.provider_event_tx.read().await;
+        let Some(tx) = guard.as_ref() else {
+            debug!("provider event sender not connected; REST fill not published");
+            return;
+        };
+
+        let average_fill_price = fill
+            .price
+            .as_deref()
+            .and_then(|p| Decimal::from_str(p).ok());
+        let order = Order {
+            id: fill.order_id.clone().unwrap_or_else(|| fill.id.clone()),
+            client_order_id: request.client_order_id.clone(),
+            symbol: request.symbol.clone(),
+            side: request.side,
+            order_type: request.order_type,
+            quantity: request.quantity,
+            filled_quantity: request.quantity,
+            remaining_quantity: Decimal::ZERO,
+            limit_price: request.limit_price,
+            stop_price: request.stop_price,
+            stop_loss: None,
+            take_profit: None,
+            trailing_distance: None,
+            trailing_type: None,
+            average_fill_price,
+            status: OrderStatus::Filled,
+            reject_reason: None,
+            position_id: None,
+            reduce_only: None,
+            post_only: None,
+            hidden: None,
+            display_quantity: None,
+            oco_group_id: None,
+            correlation_id: None,
+            time_in_force: request.time_in_force,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        if tx
+            .send(ProviderEvent::live(WsMessage::Order {
+                event: OrderEventType::OrderFilled,
+                order,
+                parent_order_id: None,
+                timestamp: Utc::now(),
+            }))
+            .is_err()
+        {
+            debug!("no provider event receiver; REST fill dropped");
+        }
     }
 
     /// Enable custom `ExitHandler` configuration.
@@ -693,6 +775,12 @@ impl TradingAdapter for OandaAdapter {
         "oanda"
     }
 
+    fn provider_event_sender(
+        &self,
+    ) -> Option<Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>> {
+        Some(Arc::clone(&self.provider_event_tx))
+    }
+
     // =========================================================================
     // Account
     // =========================================================================
@@ -837,7 +925,13 @@ impl TradingAdapter for OandaAdapter {
 
         // Get order ID from create or fill transaction
         let (order_id, order_status) = if let Some(ref fill) = resp.order_fill_transaction {
-            // Market order filled immediately
+            // Market order filled immediately. Oanda's transaction stream
+            // delivers the MARKET_ORDER create transaction but not the
+            // ORDER_FILL, so strategy clients never observe the fill via
+            // streaming. Publish it onto the provider's event stream — the same
+            // path candles/quotes take to clients — stamped with the caller's
+            // client_order_id so a strategy can match it to the order it placed.
+            self.emit_rest_fill(request, fill).await;
             (
                 fill.id.clone(),
                 tektii_gateway_core::models::OrderStatus::Filled,

@@ -691,7 +691,16 @@ async fn connect_oanda(
         creds = creds.with_rest_url(url);
     }
 
-    let provider = Box::new(OandaWebSocketProvider::new(&creds, platform));
+    // Share the adapter's outbound event sender with the provider so the
+    // adapter's REST order path can publish fills (which Oanda's transaction
+    // stream omits) onto the same stream strategies receive from.
+    let mut provider = OandaWebSocketProvider::new(&creds, platform);
+    if let Some(adapter) = provider_registry.get_trading_adapter(platform).await
+        && let Some(event_tx) = adapter.provider_event_sender()
+    {
+        provider = provider.with_event_tx(event_tx);
+    }
+    let provider = Box::new(provider);
     let provider_config = ProviderConfig {
         platform,
         symbols: symbols.clone(),

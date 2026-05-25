@@ -6,7 +6,10 @@ pub mod registry;
 pub use capabilities::{BracketStrategy, ProviderCapabilities};
 pub use registry::AdapterRegistry;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::circuit_breaker::CircuitBreakerSnapshot;
 use crate::error::{GatewayError, GatewayResult};
@@ -16,6 +19,7 @@ use crate::models::{
     OrderHandle, OrderQueryParams, OrderRequest, PlaceOcoOrderRequest, PlaceOcoOrderResponse,
     Position, Quote, Trade, TradeQueryParams, TradingPlatform,
 };
+use crate::websocket::provider::ProviderEvent;
 
 /// Core trading adapter trait.
 ///
@@ -32,6 +36,24 @@ pub trait TradingAdapter: Send + Sync {
 
     /// Human-readable provider name.
     fn provider_name(&self) -> &'static str;
+
+    /// Shared handle to the provider's outbound `ProviderEvent` sender, used to
+    /// inject events into the same stream the [`WebSocketProvider`] feeds to
+    /// connected strategies.
+    ///
+    /// Most adapters return `None` — their events flow exclusively from the
+    /// provider's streaming side. The Oanda adapter returns `Some`: Oanda's
+    /// transaction stream does not deliver `ORDER_FILL`, so the synchronous REST
+    /// order response is the only fill signal, and the adapter publishes the
+    /// fill event onto this shared sender (populated by the provider's
+    /// `connect`) so strategy clients observe it.
+    ///
+    /// [`WebSocketProvider`]: crate::websocket::provider::WebSocketProvider
+    fn provider_event_sender(
+        &self,
+    ) -> Option<Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>> {
+        None
+    }
 
     // === Account ===
 
