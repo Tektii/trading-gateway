@@ -179,6 +179,7 @@ pub fn make_engine_order() -> tektii_protocol::rest::Order {
         quantity: dec!(10),
         filled_quantity: dec!(0),
         price: dec!(0),
+        average_fill_price: None,
         limit_price: None,
         status: tektii_protocol::rest::OrderStatus::Open,
         position_id: None,
