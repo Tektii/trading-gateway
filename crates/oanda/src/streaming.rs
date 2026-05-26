@@ -127,6 +127,10 @@ pub struct OandaWebSocketProvider {
     /// Separate token for the candle poll -- cancelled-and-replaced on each spawn so a
     /// reconnect (which re-runs `connect()`) does not leave a duplicate poll task running.
     candle_poll_cancel: Arc<RwLock<CancellationToken>>,
+    /// Separate token for the transaction stream -- cancelled-and-replaced on each spawn so a
+    /// reconnect (which re-runs `connect()`) does not leave a duplicate stream task running and
+    /// emit duplicate order events on the strategy channel (TEK-601).
+    transaction_stream_cancel: Arc<RwLock<CancellationToken>>,
     /// HTTP client (shared across reconnections).
     client: Client,
 }
@@ -163,6 +167,7 @@ impl OandaWebSocketProvider {
             stored_config: Arc::new(RwLock::new(None)),
             price_stream_cancel: Arc::new(RwLock::new(CancellationToken::new())),
             candle_poll_cancel: Arc::new(RwLock::new(CancellationToken::new())),
+            transaction_stream_cancel: Arc::new(RwLock::new(CancellationToken::new())),
             client: Client::new(),
         }
     }
@@ -259,6 +264,46 @@ impl OandaWebSocketProvider {
         });
     }
 
+    /// Spawn (or respawn) the transaction stream task.
+    ///
+    /// Cancel-and-replace mirrors `spawn_price_stream` / `spawn_candle_poll`: each call
+    /// cancels the previous task before spawning a new one, so a reconnect (which re-runs
+    /// `connect()`) does not leave the old generation running. Without this, both old and
+    /// new tasks read the same `event_tx` (repointed by `connect()`) and every order event
+    /// is delivered N+1 times after N reconnects (TEK-601). The stream loop also stops on
+    /// the top-level `cancel_token` (disconnect).
+    async fn spawn_transaction_stream(&self) {
+        // Cancel any existing transaction stream, then install a fresh token.
+        let new_cancel = {
+            let mut guard = self.transaction_stream_cancel.write().await;
+            guard.cancel();
+            *guard = CancellationToken::new();
+            guard.clone()
+        };
+
+        let parent_cancel = self.cancel_token.clone();
+        let event_tx = self.event_tx.clone();
+        let client = self.client.clone();
+        let stream_url = self.stream_url.clone();
+        let api_token = Arc::clone(&self.api_token);
+        let account_id = self.account_id.clone();
+        let platform = self.platform;
+
+        tokio::spawn(async move {
+            run_transaction_stream(
+                &client,
+                &stream_url,
+                api_token.expose_secret(),
+                &account_id,
+                platform,
+                event_tx,
+                new_cancel,
+                parent_cancel,
+            )
+            .await;
+        });
+    }
+
     /// Spawn (or respawn) the M1 candle poll task with the current instrument list.
     ///
     /// Reads the shared instrument list at the top of every iteration, so it never needs
@@ -324,21 +369,8 @@ impl WebSocketProvider for OandaWebSocketProvider {
             self.spawn_candle_poll().await;
         }
 
-        // Spawn transaction stream.
-        let provider = self.clone();
-        let cancel = self.cancel_token.clone();
-        tokio::spawn(async move {
-            run_transaction_stream(
-                &provider.client,
-                &provider.stream_url,
-                provider.api_token.expose_secret(),
-                &provider.account_id,
-                provider.platform,
-                provider.event_tx.clone(),
-                cancel,
-            )
-            .await;
-        });
+        // Spawn transaction stream (cancel-and-replace so reconnect does not duplicate -- TEK-601).
+        self.spawn_transaction_stream().await;
 
         info!(
             platform = %self.platform,
@@ -841,6 +873,10 @@ async fn run_candle_poll(
 // ============================================================================
 
 /// Run the transaction stream with reconnection (strategy-facing channel).
+///
+/// `stream_cancel` is the per-spawn token (cancel-and-replace on reconnect, TEK-601);
+/// `parent_cancel` is the top-level disconnect token. Either firing terminates the loop.
+#[allow(clippy::too_many_arguments)]
 async fn run_transaction_stream(
     client: &Client,
     stream_url: &str,
@@ -848,15 +884,29 @@ async fn run_transaction_stream(
     account_id: &str,
     platform: TradingPlatform,
     event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
-    cancel_token: CancellationToken,
+    stream_cancel: CancellationToken,
+    parent_cancel: CancellationToken,
 ) {
     let url = format!("{stream_url}/v3/accounts/{account_id}/transactions/stream");
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
-        let result =
-            run_single_transaction_stream(client, &url, api_token, platform, &cancel_token).await;
+        let result = run_single_transaction_stream(
+            client,
+            &url,
+            api_token,
+            platform,
+            &stream_cancel,
+            &parent_cancel,
+        )
+        .await;
 
+        // Cancelled / PermanentAuth return BEFORE the buffered-message flush below,
+        // intentionally dropping `result.1`. On reconnect-driven cancel this prevents the
+        // old generation from emitting its buffered events onto the new generation's
+        // `event_tx` (which `connect()` has already repointed). Only Network /
+        // HeartbeatTimeout fall through to the flush, since those are within the same
+        // generation (the loop retries with the same `event_tx`).
         match &result.0 {
             StreamError::Cancelled => {
                 debug!(platform = %platform, "Transaction stream cancelled");
@@ -898,7 +948,8 @@ async fn run_transaction_stream(
 
         tokio::select! {
             () = tokio::time::sleep(backoff) => {},
-            () = cancel_token.cancelled() => return,
+            () = stream_cancel.cancelled() => return,
+            () = parent_cancel.cancelled() => return,
         }
 
         backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -919,8 +970,16 @@ async fn run_transaction_stream_internal(
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
-        let result =
-            run_single_transaction_stream(client, &url, api_token, platform, &cancel_token).await;
+        // Registry owns a single lifecycle token here, so both select arms collapse onto it.
+        let result = run_single_transaction_stream(
+            client,
+            &url,
+            api_token,
+            platform,
+            &cancel_token,
+            &cancel_token,
+        )
+        .await;
 
         match &result.0 {
             StreamError::Cancelled => {
@@ -969,12 +1028,16 @@ async fn run_transaction_stream_internal(
 
 /// Run a single transaction stream connection. Returns the error reason and
 /// any messages parsed before the error occurred.
+///
+/// Selects on both `stream_cancel` (per-spawn, fires on respawn) and `parent_cancel`
+/// (top-level, fires on disconnect) so the old generation always terminates.
 async fn run_single_transaction_stream(
     client: &Client,
     url: &str,
     api_token: &str,
     platform: TradingPlatform,
-    cancel_token: &CancellationToken,
+    stream_cancel: &CancellationToken,
+    parent_cancel: &CancellationToken,
 ) -> (StreamError, Vec<WsMessage>) {
     let mut response = match client.get(url).bearer_auth(api_token).send().await {
         Ok(resp) => {
@@ -1016,7 +1079,10 @@ async fn run_single_transaction_stream(
             () = tokio::time::sleep_until(deadline) => {
                 return (StreamError::HeartbeatTimeout, messages);
             },
-            () = cancel_token.cancelled() => {
+            () = stream_cancel.cancelled() => {
+                return (StreamError::Cancelled, messages);
+            },
+            () = parent_cancel.cancelled() => {
                 return (StreamError::Cancelled, messages);
             },
         }
@@ -2296,5 +2362,65 @@ mod tests {
             res.is_ok(),
             "run_candle_poll should return promptly when cancelled"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Transaction stream lifecycle (TEK-601)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn reconnect_cancels_previous_transaction_stream_token() {
+        // Regression for TEK-601: on the old code, `connect()` spawned the transaction
+        // stream with the top-level `cancel_token`, so a reconnect (which re-runs
+        // `connect()`) left the previous task alive and every order event was
+        // delivered N+1 times after N reconnects. The fix gives the transaction stream
+        // its own cancel-and-replace token. This test pins that invariant by asserting
+        // the gen-0 token is cancelled after `reconnect()` and a fresh, live gen-1
+        // token replaces it.
+        //
+        // Endpoints are pointed at an unmounted mock so the spawned stream tasks fail
+        // fast with 404s and never produce data -- the lifecycle assertions are on the
+        // provider's tokens, not the tasks' output.
+        let (_server, base_url) = start_mock_server().await;
+        let creds = OandaCredentials::new("test-token", "test-account")
+            .with_stream_url(&base_url)
+            .with_rest_url(&base_url);
+        let provider = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
+
+        let config = ProviderConfig {
+            platform: TradingPlatform::OandaPractice,
+            symbols: vec!["EUR_USD".to_string()],
+            event_types: vec!["quote".to_string()],
+            credentials: None,
+            tektii_params: None,
+        };
+
+        let _rx_gen0 = provider
+            .connect(config)
+            .await
+            .expect("connect should succeed");
+        let gen0_token = provider.transaction_stream_cancel.read().await.clone();
+        assert!(
+            !gen0_token.is_cancelled(),
+            "gen-0 transaction-stream token should be live after connect"
+        );
+
+        let _rx_gen1 = provider
+            .reconnect()
+            .await
+            .expect("reconnect should succeed");
+        assert!(
+            gen0_token.is_cancelled(),
+            "reconnect must cancel the previous transaction-stream token (TEK-601)"
+        );
+
+        let gen1_token = provider.transaction_stream_cancel.read().await.clone();
+        assert!(
+            !gen1_token.is_cancelled(),
+            "gen-1 transaction-stream token should be live after reconnect"
+        );
+
+        // Cleanly tear down spawned tasks.
+        provider.disconnect().await.expect("disconnect");
     }
 }
