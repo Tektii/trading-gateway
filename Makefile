@@ -1,4 +1,4 @@
-.PHONY: check fmt fmt-fix clippy test deny features openapi
+.PHONY: check fmt fmt-fix clippy test deny features openapi clean cleanup cleanup-all reset
 
 check: fmt clippy test deny ## Full quality gate (matches CI)
 
@@ -28,3 +28,16 @@ features: ## Feature matrix check (each provider solo + all)
 
 openapi: ## Export OpenAPI spec
 	cargo run --bin openapi-export > openapi.json
+
+clean: ## Clean Rust build artifacts only
+	cargo clean
+
+cleanup: ## Interactive cleanup (target, docker, python venvs) - prompts before each step
+	@./scripts/cleanup.sh
+
+cleanup-all: ## Cleanup without prompts (skips aggressive cargo registry cache)
+	@./scripts/cleanup.sh --all
+
+reset: ## Full reset - clean everything, then rebuild in dev mode
+	@./scripts/cleanup.sh --all
+	cargo build --workspace
