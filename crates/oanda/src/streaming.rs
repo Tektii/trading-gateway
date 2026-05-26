@@ -430,6 +430,13 @@ impl WebSocketProvider for OandaWebSocketProvider {
     }
 
     async fn disconnect(&self) -> Result<(), WebSocketError> {
+        // Belt-and-braces: cancel each per-task token in addition to the parent
+        // cancel_token. Stream tasks today select! on both, but cancelling the
+        // per-task tokens explicitly means a future spawn site that forgets to
+        // wire in parent_cancel still terminates on disconnect.
+        self.price_stream_cancel.read().await.cancel();
+        self.candle_poll_cancel.read().await.cancel();
+        self.transaction_stream_cancel.read().await.cancel();
         self.cancel_token.cancel();
         info!(
             platform = %self.platform,
@@ -2422,5 +2429,70 @@ mod tests {
 
         // Cleanly tear down spawned tasks.
         provider.disconnect().await.expect("disconnect");
+    }
+
+    // ------------------------------------------------------------------
+    // Disconnect cancels per-task tokens (TEK-658)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn disconnect_cancels_all_per_task_tokens() {
+        // Regression for TEK-658: `disconnect()` previously cancelled only the
+        // top-level `cancel_token`. Stream tasks happened to exit anyway because
+        // each `select!` block also listened on the parent token, but that
+        // invariant was implicit -- a future spawn site wired only to its
+        // per-task token would leak past `disconnect()`. The fix cancels each
+        // per-task token explicitly. This test pins that contract by snapshotting
+        // the three per-task tokens and asserting all of them are cancelled
+        // after `disconnect()`.
+        let (_server, base_url) = start_mock_server().await;
+        let creds = OandaCredentials::new("test-token", "test-account")
+            .with_stream_url(&base_url)
+            .with_rest_url(&base_url);
+        let provider = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
+
+        let config = ProviderConfig {
+            platform: TradingPlatform::OandaPractice,
+            symbols: vec!["EUR_USD".to_string()],
+            event_types: vec!["quote".to_string()],
+            credentials: None,
+            tektii_params: None,
+        };
+
+        let _rx = provider
+            .connect(config)
+            .await
+            .expect("connect should succeed");
+
+        let price_token = provider.price_stream_cancel.read().await.clone();
+        let candle_token = provider.candle_poll_cancel.read().await.clone();
+        let tx_token = provider.transaction_stream_cancel.read().await.clone();
+        assert!(
+            !price_token.is_cancelled(),
+            "price token live before disconnect"
+        );
+        assert!(
+            !candle_token.is_cancelled(),
+            "candle token live before disconnect"
+        );
+        assert!(
+            !tx_token.is_cancelled(),
+            "transaction token live before disconnect"
+        );
+
+        provider.disconnect().await.expect("disconnect");
+
+        assert!(
+            price_token.is_cancelled(),
+            "disconnect must cancel the price-stream per-task token (TEK-658)"
+        );
+        assert!(
+            candle_token.is_cancelled(),
+            "disconnect must cancel the candle-poll per-task token (TEK-658)"
+        );
+        assert!(
+            tx_token.is_cancelled(),
+            "disconnect must cancel the transaction-stream per-task token (TEK-658)"
+        );
     }
 }
