@@ -26,8 +26,52 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {} # All API calls go through RELEASE_PLEASE_TOKEN
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # ---------------------------------------------------------------------------
+      # Sync Cargo.lock on the Release PR.
+      #
+      # We use release-type `simple` (the `rust` type breaks on workspace members
+      # that inherit `version.workspace = true` — see release-please-config.json
+      # and PR #27). `simple` only string-substitutes the version literal in
+      # Cargo.toml, so Cargo.lock's workspace-member entries lag the bump until the
+      # next `cargo` resolve. These steps regenerate the lockfile on the Release PR
+      # branch so the merged release commit ships a consistent Cargo.lock.
+      #
+      # `cargo update --workspace` relocks only the workspace members (the 10
+      # tektii-* crates), not transitive dependencies, so the diff is exactly the
+      # version bump and nothing else. Pushing with the PAT (not GITHUB_TOKEN) lets
+      # CI re-run on the PR; the push targets the PR branch, never main, so it does
+      # not re-trigger this workflow.
+      # ---------------------------------------------------------------------------
+      - name: Check out the Release PR branch
+        if: ${{ steps.release.outputs.pr }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Set up Rust
+        if: ${{ steps.release.outputs.pr }}
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Regenerate and commit Cargo.lock
+        if: ${{ steps.release.outputs.pr }}
+        run: |
+          cargo update --workspace
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already in sync — nothing to commit."
+            exit 0
+          fi
+          git config user.name "tektii-release-bot"
+          git config user.email "oss@tektii.com"
+          git add Cargo.lock
+          git commit -m "chore: sync Cargo.lock with release version"
+          git push
