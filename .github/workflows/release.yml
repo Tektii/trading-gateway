@@ -105,143 +105,151 @@ jobs:
   # missing the job fails, blocking the release. This is intentional — we
   # never publish an image that hasn't been validated against all adapters.
   # ===========================================================================
-  smoke-test:
-    name: "Smoke Test (${{ matrix.adapter }})"
-    needs: validate
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - adapter: alpaca
-            secret_name: SMOKE_ALPACA
-            symbol: AAPL
-            order_test: "1"
-            order_qty: "1"
-            order_price: "1.00"
-          - adapter: binance
-            secret_name: SMOKE_BINANCE
-            symbol: BTCUSDT
-            order_test: "1"
-            order_qty: "0.001"
-            order_price: "1000.00"
-          - adapter: oanda
-            secret_name: SMOKE_OANDA
-            symbol: EUR_USD
-            order_test: "1"
-            order_qty: "1"
-            order_price: "0.50000"
-          - adapter: saxo
-            secret_name: SMOKE_SAXO
-            symbol: EURUSD:FXSPOT
-            order_test: "0"
-            order_qty: "1"
-            order_price: "0.50000"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull image
-        run: |
-          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.validate.outputs.debian_digest }}"
-          docker pull "$IMAGE_REF"
-          docker tag "$IMAGE_REF" tektii/gateway:smoke
-
-      - name: Install k6
-        run: |
-          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update && sudo apt-get install -y k6=1.0.0
-
-      - name: Write env file
-        env:
-          # Each adapter's secrets are stored as a single JSON secret: SMOKE_ALPACA, SMOKE_BINANCE, etc.
-          # The JSON object contains key=value pairs that become env vars.
-          # Example: {"ALPACA_API_KEY":"pk-xxx","ALPACA_API_SECRET":"sk-xxx"}
-          ADAPTER_SECRET: ${{ secrets[matrix.secret_name] }}
-        run: |
-          if [ -z "$ADAPTER_SECRET" ]; then
-            echo "::error::Secret ${{ matrix.secret_name }} is not configured. All adapter secrets are required for release."
-            exit 1
-          fi
-
-          # Write as individual -e flags to handle values with special characters.
-          echo "$ADAPTER_SECRET" | jq -r 'to_entries[] | "-e\n\(.key)=\(.value)"' > /tmp/adapter-docker-args.txt
-
-      - name: Start gateway
-        run: |
-          # shellcheck disable=SC2046
-          docker run -d \
-            --name gateway-smoke \
-            $(cat /tmp/adapter-docker-args.txt | xargs) \
-            -e GATEWAY_HOST=0.0.0.0 \
-            -e RUST_LOG=warn,tektii_gateway=info \
-            -p 18080:8080 \
-            --read-only \
-            --tmpfs /tmp \
-            --cap-drop ALL \
-            --security-opt no-new-privileges:true \
-            tektii/gateway:smoke
-
-      - name: Wait for ready
-        run: |
-          echo "Waiting for gateway to become ready..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:18080/readyz > /dev/null 2>&1; then
-              echo "Gateway ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::Gateway did not become ready within 60s"
-          docker logs gateway-smoke
-          exit 1
-
-      - name: Run smoke tests
-        run: |
-          k6 run smoke-tests/smoke.js \
-            --env GATEWAY_URL=http://localhost:18080 \
-            --env SMOKE_TEST_SYMBOL=${{ matrix.symbol }} \
-            --env SMOKE_TEST_ORDER=${{ matrix.order_test }} \
-            --env SMOKE_ORDER_QTY=${{ matrix.order_qty }} \
-            --env SMOKE_ORDER_PRICE=${{ matrix.order_price }}
-
-      - name: Upload smoke results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: smoke-results-${{ matrix.adapter }}
-          path: smoke-results.json
-          retention-days: 7
-          if-no-files-found: ignore
-
-      - name: Gateway logs
-        if: failure()
-        run: docker logs gateway-smoke
-
-      - name: Cleanup
-        if: always()
-        run: docker rm -f gateway-smoke 2>/dev/null || true
-
-  # ===========================================================================
-  # 3. Promote the smoke-tested images to their versioned tags.
-  #
-  # `docker buildx imagetools create` retags the multi-arch manifest at the
-  # resolved digest — no rebuild, no platform drift. The release ships
-  # exactly the bits that main built.
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # TEMPORARILY DISABLED — see TEK-661.
+  # The smoke-test job requires per-adapter SMOKE_* secrets and hard-fails the
+  # release when any is missing. Those secrets are not yet configured, which was
+  # blocking the release. The job below is commented out and dropped from the
+  # `publish` job's `needs` so releases can proceed without broker-sandbox smoke
+  # coverage. Re-enable / re-think the gating in TEK-661.
+  # ---------------------------------------------------------------------------
+#   smoke-test:
+#     name: "Smoke Test (${{ matrix.adapter }})"
+#     needs: validate
+#     runs-on: ubuntu-latest
+#     permissions:
+#       contents: read
+#       packages: read
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         include:
+#           - adapter: alpaca
+#             secret_name: SMOKE_ALPACA
+#             symbol: AAPL
+#             order_test: "1"
+#             order_qty: "1"
+#             order_price: "1.00"
+#           - adapter: binance
+#             secret_name: SMOKE_BINANCE
+#             symbol: BTCUSDT
+#             order_test: "1"
+#             order_qty: "0.001"
+#             order_price: "1000.00"
+#           - adapter: oanda
+#             secret_name: SMOKE_OANDA
+#             symbol: EUR_USD
+#             order_test: "1"
+#             order_qty: "1"
+#             order_price: "0.50000"
+#           - adapter: saxo
+#             secret_name: SMOKE_SAXO
+#             symbol: EURUSD:FXSPOT
+#             order_test: "0"
+#             order_qty: "1"
+#             order_price: "0.50000"
+#     steps:
+#       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#
+#       - name: Log in to GHCR
+#         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+#         with:
+#           registry: ${{ env.REGISTRY }}
+#           username: ${{ github.actor }}
+#           password: ${{ secrets.GITHUB_TOKEN }}
+#
+#       - name: Pull image
+#         run: |
+#           IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.validate.outputs.debian_digest }}"
+#           docker pull "$IMAGE_REF"
+#           docker tag "$IMAGE_REF" tektii/gateway:smoke
+#
+#       - name: Install k6
+#         run: |
+#           curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+#           echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+#           sudo apt-get update && sudo apt-get install -y k6=1.0.0
+#
+#       - name: Write env file
+#         env:
+#           # Each adapter's secrets are stored as a single JSON secret: SMOKE_ALPACA, SMOKE_BINANCE, etc.
+#           # The JSON object contains key=value pairs that become env vars.
+#           # Example: {"ALPACA_API_KEY":"pk-xxx","ALPACA_API_SECRET":"sk-xxx"}
+#           ADAPTER_SECRET: ${{ secrets[matrix.secret_name] }}
+#         run: |
+#           if [ -z "$ADAPTER_SECRET" ]; then
+#             echo "::error::Secret ${{ matrix.secret_name }} is not configured. All adapter secrets are required for release."
+#             exit 1
+#           fi
+#
+#           # Write as individual -e flags to handle values with special characters.
+#           echo "$ADAPTER_SECRET" | jq -r 'to_entries[] | "-e\n\(.key)=\(.value)"' > /tmp/adapter-docker-args.txt
+#
+#       - name: Start gateway
+#         run: |
+#           # shellcheck disable=SC2046
+#           docker run -d \
+#             --name gateway-smoke \
+#             $(cat /tmp/adapter-docker-args.txt | xargs) \
+#             -e GATEWAY_HOST=0.0.0.0 \
+#             -e RUST_LOG=warn,tektii_gateway=info \
+#             -p 18080:8080 \
+#             --read-only \
+#             --tmpfs /tmp \
+#             --cap-drop ALL \
+#             --security-opt no-new-privileges:true \
+#             tektii/gateway:smoke
+#
+#       - name: Wait for ready
+#         run: |
+#           echo "Waiting for gateway to become ready..."
+#           for i in $(seq 1 60); do
+#             if curl -sf http://localhost:18080/readyz > /dev/null 2>&1; then
+#               echo "Gateway ready after ${i}s"
+#               exit 0
+#             fi
+#             sleep 1
+#           done
+#           echo "::error::Gateway did not become ready within 60s"
+#           docker logs gateway-smoke
+#           exit 1
+#
+#       - name: Run smoke tests
+#         run: |
+#           k6 run smoke-tests/smoke.js \
+#             --env GATEWAY_URL=http://localhost:18080 \
+#             --env SMOKE_TEST_SYMBOL=${{ matrix.symbol }} \
+#             --env SMOKE_TEST_ORDER=${{ matrix.order_test }} \
+#             --env SMOKE_ORDER_QTY=${{ matrix.order_qty }} \
+#             --env SMOKE_ORDER_PRICE=${{ matrix.order_price }}
+#
+#       - name: Upload smoke results
+#         if: always()
+#         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+#         with:
+#           name: smoke-results-${{ matrix.adapter }}
+#           path: smoke-results.json
+#           retention-days: 7
+#           if-no-files-found: ignore
+#
+#       - name: Gateway logs
+#         if: failure()
+#         run: docker logs gateway-smoke
+#
+#       - name: Cleanup
+#         if: always()
+#         run: docker rm -f gateway-smoke 2>/dev/null || true
+#
+#   # ===========================================================================
+#   # 3. Promote the smoke-tested images to their versioned tags.
+#   #
+#   # `docker buildx imagetools create` retags the multi-arch manifest at the
+#   # resolved digest — no rebuild, no platform drift. The release ships
+#   # exactly the bits that main built.
+#   # ===========================================================================
   publish:
     name: Publish Images
-    needs: [validate, smoke-test]
+    needs: [validate] # smoke-test gating disabled — see TEK-661
     runs-on: ubuntu-latest
     permissions:
       contents: read
