@@ -44,7 +44,7 @@ jobs:
         id: version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION=$(grep -A5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | sed 's/.*"\(.*\)"/\1/')
+          CARGO_VERSION=$(grep -A5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
 
           echo "Tag version:   $TAG_VERSION"
           echo "Cargo version: $CARGO_VERSION"
