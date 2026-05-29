@@ -106,12 +106,12 @@ jobs:
   # never publish an image that hasn't been validated against all adapters.
   # ===========================================================================
   # ---------------------------------------------------------------------------
-  # TEMPORARILY DISABLED — see TEK-661.
+  # TEMPORARILY DISABLED — see TEK-679.
   # The smoke-test job requires per-adapter SMOKE_* secrets and hard-fails the
   # release when any is missing. Those secrets are not yet configured, which was
   # blocking the release. The job below is commented out and dropped from the
   # `publish` job's `needs` so releases can proceed without broker-sandbox smoke
-  # coverage. Re-enable / re-think the gating in TEK-661.
+  # coverage. Re-enable / re-think the gating in TEK-679.
   # ---------------------------------------------------------------------------
 #   smoke-test:
 #     name: "Smoke Test (${{ matrix.adapter }})"
@@ -249,7 +249,7 @@ jobs:
 #   # ===========================================================================
   publish:
     name: Publish Images
-    needs: [validate] # smoke-test gating disabled — see TEK-661
+    needs: [validate] # smoke-test gating disabled — see TEK-679
     runs-on: ubuntu-latest
     permissions:
       contents: read
