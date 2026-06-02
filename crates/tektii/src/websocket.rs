@@ -286,6 +286,14 @@ impl WebSocketProvider for TektiiWebSocketProvider {
         false
     }
 
+    fn end_of_stream_is_completion(&self) -> bool {
+        // The engine closes its stream when a backtest finishes replaying. The
+        // gateway must surface that as a clean `backtest_complete` terminal, not
+        // a broker drop, so connected strategies (e.g. the canary capture) can
+        // finalize and flush their dataset.
+        true
+    }
+
     fn filters_events_upstream(&self) -> bool {
         // Engine validates `SUBSCRIPTIONS` at startup and only emits events for
         // the resolved instrument/timeframe set; the gateway must forward every

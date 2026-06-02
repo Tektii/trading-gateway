@@ -280,6 +280,23 @@ pub trait WebSocketProvider: Send + Sync {
         true
     }
 
+    /// Whether the end of this provider's stream is a clean completion rather
+    /// than a broker drop.
+    ///
+    /// Returns `true` for the Tektii backtest engine: when the engine finishes
+    /// replaying a backtest it closes the stream, and the gateway observes that
+    /// as end-of-stream. In that case the gateway broadcasts a distinct
+    /// `BacktestComplete` terminal instead of `broker_disconnected`, so a
+    /// connected strategy can finalize and flush rather than treat it as a feed
+    /// loss.
+    ///
+    /// Default `false`: for live brokers an unexpected end-of-stream is a
+    /// disconnect, surfaced as `broker_disconnected`. Only meaningful for
+    /// providers that also return `false` from `supports_reconnection`.
+    fn end_of_stream_is_completion(&self) -> bool {
+        false
+    }
+
     /// Whether the upstream is the source of truth for which events to emit.
     ///
     /// Returns `true` for providers that already filter events at the source

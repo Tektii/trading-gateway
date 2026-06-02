@@ -3304,6 +3304,34 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Terminal end-of-backtest signal (tektii/backtest mode only).\n\nSent once when the Tektii engine finishes replaying a backtest and closes\nits stream. Distinct from a `Connection` `BrokerDisconnected` event so a\nconnected strategy (e.g. the canary capture) can tell a clean completion\napart from an unexpected broker drop, finalize, and flush its dataset.\n\nLive brokers never emit this — a real feed loss is still surfaced as\n`broker_disconnected`.",
+            "required": [
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "broker": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Broker/platform name (e.g. \"tektii\")."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "backtest_complete"
+                ]
+              }
+            }
           }
         ],
         "description": "All possible WebSocket messages.\n\nUses serde's internally tagged representation for clean JSON:\n```json\n{\"type\": \"order\", \"event\": \"ORDER_FILLED\", \"order\": {...}}\n{\"type\": \"ping\", \"timestamp\": \"2025-01-01T00:00:00Z\"}\n```\n\n# Client -> Server Messages\n\n- `Pong` - Response to server ping (heartbeat)\n- `EventAck` - Acknowledge processed events (required for simulation, optional for live)\n\n# Server -> Client Messages\n\n- `Ping` - Server heartbeat\n- `Order` - Order state change\n- `Position` - Position state change\n- `Account` - Account state change\n- `Connection` - Connection state change\n- `RateLimit` - Rate limit notification\n- `Error` - Error notification\n\n# Subscription Configuration\n\nNote: There are no Subscribe/Unsubscribe messages. Event subscriptions\nare configured at startup via environment variables (e.g., `SUBSCRIPTIONS`)."

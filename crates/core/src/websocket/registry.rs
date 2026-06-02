@@ -658,7 +658,13 @@ impl ProviderRegistry {
             let price_source_snapshot = price_source.read().await.clone();
 
             // Take the stream and staleness tracker from the provider
-            let (stream_opt, staleness, supports_reconnection, filters_events_upstream) = {
+            let (
+                stream_opt,
+                staleness,
+                supports_reconnection,
+                filters_events_upstream,
+                end_of_stream_is_completion,
+            ) = {
                 let mut shared_guard = shared_providers_clone.write().await;
                 if let Some(p) = shared_guard.get_mut(&platform) {
                     (
@@ -666,9 +672,10 @@ impl ProviderRegistry {
                         Arc::clone(&p.staleness),
                         p.provider.supports_reconnection(),
                         p.filters_events_upstream,
+                        p.provider.end_of_stream_is_completion(),
                     )
                 } else {
-                    (None, Arc::new(StalenessTracker::new()), false, false)
+                    (None, Arc::new(StalenessTracker::new()), false, false, false)
                 }
             };
 
@@ -820,10 +827,41 @@ impl ProviderRegistry {
                 // === Stream closed — reconnect or exit ===
 
                 if !supports_reconnection {
-                    // Notify strategies and exit (e.g., Tektii engine)
-                    let msg = WsMessage::broker_disconnected(platform);
+                    // Notify strategies and exit (e.g., Tektii engine).
+                    //
+                    // In tektii/backtest mode the engine ending its stream is
+                    // treated as end-of-backtest, so forward a distinct
+                    // `backtest_complete` terminal instead of `broker_disconnected`
+                    // — this lets a connected strategy (e.g. the canary capture)
+                    // finalize and flush its dataset rather than exit via a
+                    // feed-loss path. Live providers keep emitting
+                    // `broker_disconnected`.
+                    //
+                    // NOTE: the gateway cannot yet distinguish a clean completion
+                    // from an aborted run — the engine read loop collapses a
+                    // graceful Close, a transport error, and a bare end-of-stream
+                    // into one signal. A truncated run therefore also surfaces as
+                    // `backtest_complete`. Conveying completed-vs-aborted is
+                    // deferred to future engine protocol work (an explicit
+                    // completion message / WS Close code); until then a consumer
+                    // that needs completeness guarantees must validate the
+                    // dataset itself.
+                    let msg = if end_of_stream_is_completion {
+                        info!(
+                            platform = %platform,
+                            "Provider stream ended (end of backtest), notifying strategies and exiting"
+                        );
+                        metrics::counter!(
+                            "gateway_backtest_completions_total",
+                            "platform" => platform.header_value(),
+                        )
+                        .increment(1);
+                        WsMessage::backtest_complete(platform)
+                    } else {
+                        info!(platform = %platform, "Provider does not support reconnection, exiting");
+                        WsMessage::broker_disconnected(platform)
+                    };
                     connection_manager.broadcast(msg).await;
-                    info!(platform = %platform, "Provider does not support reconnection, exiting");
                     break 'outer;
                 }
 

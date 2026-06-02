@@ -180,6 +180,7 @@ impl SubscriptionFilter {
             | WsMessage::DataStaleness { .. }
             | WsMessage::RateLimit { .. }
             | WsMessage::Error { .. }
+            | WsMessage::BacktestComplete { .. }
             | WsMessage::Ping { .. } => true,
         }
     }
@@ -240,6 +241,7 @@ impl SubscriptionFilter {
                 | WsMessage::Error { .. }
                 | WsMessage::Ping { .. }
                 | WsMessage::Pong
+                | WsMessage::BacktestComplete { .. }
         )
     }
 }
