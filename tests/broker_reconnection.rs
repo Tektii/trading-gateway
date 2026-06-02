@@ -359,6 +359,48 @@ async fn end_of_stream_completion_emits_backtest_complete_not_disconnected() {
     );
 }
 
+/// When the provider relays a real, in-band `BacktestComplete` terminal before
+/// its stream closes (the tektii end-of-backtest handshake), the stream-close
+/// path must NOT synthesize a second terminal. The strategy must see exactly
+/// one `BacktestComplete` — relaying the real one then synthesizing a fallback
+/// would double-fire the terminal (TEK-758).
+#[tokio::test]
+async fn in_band_backtest_complete_suppresses_synthesized_terminal() {
+    let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());
+    let mut rx = strategy_connection(&ws_manager, &registry).await;
+
+    let provider = MockWebSocketProvider::new(false).with_end_of_stream_completion(true);
+
+    let (tx, stream) = MockWebSocketProvider::make_event_stream();
+    registry
+        .register_provider(PLATFORM, Box::new(provider), stream, vec![], vec![])
+        .await
+        .unwrap();
+
+    // Engine emits its in-band terminal, then closes the stream after the
+    // flush-ack handshake.
+    tx.send(WsMessage::backtest_complete(PLATFORM).into())
+        .unwrap();
+    drop(tx);
+
+    // Exactly one terminal — the relayed in-band one.
+    let msg = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for terminal")
+        .expect("channel closed");
+    assert!(
+        matches!(msg, WsMessage::BacktestComplete { .. }),
+        "expected the relayed BacktestComplete, got {msg:?}"
+    );
+
+    // No second (synthesized) terminal on stream-close.
+    let second = timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        second.is_err(),
+        "stream-close must not synthesize a second terminal after an in-band one"
+    );
+}
+
 #[tokio::test]
 async fn instruments_marked_stale_on_disconnect_cleared_on_fresh_tick() {
     let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());

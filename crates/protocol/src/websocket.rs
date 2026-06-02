@@ -61,12 +61,36 @@ pub enum ServerMessage {
 
     /// Response to client Ping.
     Pong,
+
+    /// Positive end-of-backtest terminal — the backtest completed cleanly and
+    /// no further market events will be sent on this connection.
+    ///
+    /// Distinct from a bare WebSocket Close frame: it is an explicit "completed"
+    /// signal that the strategy acks once it has flushed any pending work (the
+    /// flush-ack). The engine blocks teardown on that ack, bounded by a timeout,
+    /// so a capture sidecar can drain and flush to GCS before the Cloud Run task
+    /// tears the container down.
+    ///
+    /// Carries an `event_id` so it acks via the normal `ClientMessage::EventAck`
+    /// path, exactly like a market event — the gateway registers it pending and
+    /// the strategy's ack is auto-correlated and relayed back to the engine as
+    /// the flush-ack. This variant must stay byte-compatible with the engine's
+    /// `ServerMessage::BacktestComplete` wire format
+    /// (`{"type":"backtest_complete","event_id":"..."}`).
+    BacktestComplete { event_id: String },
 }
 
 impl ServerMessage {
     /// Create a pong response.
     pub const fn pong() -> Self {
         Self::Pong
+    }
+
+    /// Create a positive end-of-backtest terminal carrying the given event id.
+    pub fn backtest_complete(event_id: impl Into<String>) -> Self {
+        Self::BacktestComplete {
+            event_id: event_id.into(),
+        }
     }
 
     /// Create an error message.
@@ -165,7 +189,8 @@ impl ServerMessage {
             | Self::Trade { event_id, .. }
             | Self::Position { event_id, .. }
             | Self::Account { event_id, .. }
-            | Self::Error { event_id, .. } => Some(event_id),
+            | Self::Error { event_id, .. }
+            | Self::BacktestComplete { event_id } => Some(event_id),
             Self::Pong => None,
         }
     }
@@ -265,6 +290,23 @@ mod tests {
             msg.events_processed(),
             Some(&["evt-1".to_string(), "evt-2".to_string()][..])
         );
+    }
+
+    #[test]
+    fn test_backtest_complete_serialization() {
+        // Must stay byte-compatible with the engine's wire format so the
+        // gateway can parse the terminal the engine emits.
+        let msg = ServerMessage::backtest_complete("evt-42");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"backtest_complete","event_id":"evt-42"}"#);
+    }
+
+    #[test]
+    fn test_backtest_complete_deserialization_carries_event_id() {
+        let json = r#"{"type":"backtest_complete","event_id":"evt-7"}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, ServerMessage::BacktestComplete { .. }));
+        assert_eq!(msg.event_id(), Some("evt-7"));
     }
 
     #[test]

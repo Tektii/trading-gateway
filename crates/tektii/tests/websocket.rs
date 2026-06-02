@@ -420,6 +420,85 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
     server.shutdown().await;
 }
 
+/// The engine's in-band end-of-backtest terminal must be relayed to the strategy
+/// as `WsMessage::BacktestComplete`, and the strategy's resulting ACK (the
+/// flush-ack) must be forwarded back to the engine carrying the terminal's
+/// `event_id`. This is the end-of-backtest flush-ack handshake the canary
+/// capture relies on to flush its dataset before teardown (TEK-758).
+#[tokio::test]
+async fn backtest_complete_relayed_and_flush_ack_forwarded() {
+    let (server, tx, mut rx) = MockWsServer::start().await;
+    let (provider, _broadcast_rx) = create_ws_provider(&server.url());
+
+    let mut event_stream = provider
+        .connect(minimal_provider_config())
+        .await
+        .expect("connect failed");
+
+    // Engine emits the positive end-of-backtest terminal (keeps its WS open,
+    // awaiting the flush-ack).
+    let msg = ServerMessage::backtest_complete("evt-eob");
+    send_server_message(&tx, &msg);
+
+    // The terminal is relayed to the strategy as a distinct BacktestComplete,
+    // not a broker disconnect.
+    let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
+        .await
+        .expect("timeout")
+        .expect("stream closed")
+        .msg;
+    assert!(
+        matches!(ws_msg, WsMessage::BacktestComplete { .. }),
+        "expected BacktestComplete terminal, got {ws_msg:?}"
+    );
+
+    // Like a market event, the terminal paces on the strategy ACK — no engine
+    // ACK before the strategy responds.
+    let no_ack = timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(
+        no_ack.is_err(),
+        "flush-ack should NOT be sent before the strategy ACKs the terminal"
+    );
+
+    // Registry marks the terminal delivered (TEK-270), then the strategy's
+    // flush-ack arrives.
+    let bridge = provider
+        .ack_bridge()
+        .await
+        .expect("ack_bridge available after connect");
+    bridge.mark_sent(vec!["evt-eob".to_string()]).await;
+
+    provider
+        .handle_ack(EventAckMessage {
+            correlation_id: "test-corr".to_string(),
+            events_processed: vec!["evt-eob".to_string()],
+            timestamp: 0,
+        })
+        .await
+        .expect("handle_ack failed");
+
+    // The flush-ack is forwarded to the engine carrying the terminal's event_id.
+    let ack_raw = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for flush-ack")
+        .expect("channel closed");
+
+    let client_msg = parse_client_message(&ack_raw);
+    match client_msg {
+        ClientMessage::EventAck {
+            events_processed, ..
+        } => {
+            assert!(
+                events_processed.contains(&"evt-eob".to_string()),
+                "flush-ack should contain evt-eob, got: {events_processed:?}"
+            );
+        }
+        other => panic!("Expected EventAck, got {other:?}"),
+    }
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn multiple_pending_events_batch_drained() {
     let (server, tx, mut rx) = MockWsServer::start().await;
