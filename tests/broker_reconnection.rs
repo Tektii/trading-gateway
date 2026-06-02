@@ -306,6 +306,59 @@ async fn no_reconnection_support_emits_disconnected_and_exits() {
     );
 }
 
+/// A provider whose end-of-stream is a clean completion (the Tektii
+/// backtest engine) must broadcast a distinct `BacktestComplete` terminal —
+/// NOT `broker_disconnected` — when its stream ends, then exit without
+/// attempting reconnection. This lets a connected strategy (e.g. the canary
+/// capture) tell a finished backtest apart from a broker drop and flush its
+/// dataset.
+#[tokio::test]
+async fn end_of_stream_completion_emits_backtest_complete_not_disconnected() {
+    let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());
+    let mut rx = strategy_connection(&ws_manager, &registry).await;
+
+    let provider = MockWebSocketProvider::new(false).with_end_of_stream_completion(true);
+    let handle = provider.handle();
+
+    let (tx, stream) = MockWebSocketProvider::make_event_stream();
+    registry
+        .register_provider(PLATFORM, Box::new(provider), stream, vec![], vec![])
+        .await
+        .unwrap();
+
+    // Engine finishes the backtest and closes its stream.
+    drop(tx);
+
+    // The strategy receives a clean end-of-backtest terminal, not a disconnect.
+    let msg = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for terminal")
+        .expect("channel closed");
+    match msg {
+        WsMessage::BacktestComplete { broker, .. } => {
+            // `broker` is the registered PLATFORM (AlpacaPaper here), not literally
+            // "tektii" — the mock decouples end-of-stream-completion behaviour from
+            // the Tektii platform so this exercises the registry branch generically.
+            assert_eq!(broker.as_deref(), Some("alpaca-paper"));
+        }
+        WsMessage::Connection {
+            event: ConnectionEventType::BrokerDisconnected,
+            ..
+        } => panic!("regression: clean end-of-backtest surfaced as broker_disconnected"),
+        other => panic!("expected BacktestComplete, got {other:?}"),
+    }
+
+    // No reconnection attempted.
+    assert_eq!(handle.reconnect_call_count(), 0);
+
+    // No further events — the task exits after the terminal.
+    let result = timeout(Duration::from_millis(100), rx.recv()).await;
+    assert!(
+        result.is_err(),
+        "should not receive any more events after the backtest-complete terminal"
+    );
+}
+
 #[tokio::test]
 async fn instruments_marked_stale_on_disconnect_cleared_on_fresh_tick() {
     let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());

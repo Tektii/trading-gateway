@@ -408,6 +408,23 @@ pub enum WsMessage {
         timestamp: DateTime<Utc>,
     },
 
+    /// Terminal end-of-backtest signal (tektii/backtest mode only).
+    ///
+    /// Sent once when the Tektii engine finishes replaying a backtest and closes
+    /// its stream. Distinct from a `Connection` `BrokerDisconnected` event so a
+    /// connected strategy (e.g. the canary capture) can tell a clean completion
+    /// apart from an unexpected broker drop, finalize, and flush its dataset.
+    ///
+    /// Live brokers never emit this — a real feed loss is still surfaced as
+    /// `broker_disconnected`.
+    BacktestComplete {
+        /// Broker/platform name (e.g. "tektii").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        broker: Option<String>,
+        /// Event timestamp.
+        timestamp: DateTime<Utc>,
+    },
+
     /// Internal close signal — not serialized to JSON.
     /// Intercepted in the send loop to emit a WebSocket close frame.
     #[serde(skip)]
@@ -567,6 +584,19 @@ impl WsMessage {
             stale_since: Some(now),
             broker: Some(platform.to_string()),
             timestamp: now,
+        }
+    }
+
+    /// Create a clean end-of-backtest terminal event.
+    ///
+    /// Broadcast by the gateway in tektii/backtest mode when the engine stream
+    /// ends, signalling a normal completion (not a broker drop) so strategies
+    /// can finalize.
+    #[must_use]
+    pub fn backtest_complete(platform: TradingPlatform) -> Self {
+        Self::BacktestComplete {
+            broker: Some(platform.to_string()),
+            timestamp: Utc::now(),
         }
     }
 
@@ -1258,6 +1288,21 @@ mod tests {
         assert!(json.contains(r#""broker":"alpaca-paper""#));
         // No gap_duration_ms for disconnect
         assert!(!json.contains("gap_duration_ms"));
+    }
+
+    #[test]
+    fn test_backtest_complete_serialization() {
+        // Distinct terminal, tagged `backtest_complete`, carries the
+        // broker name and is NOT a connection event.
+        let msg = WsMessage::backtest_complete(TradingPlatform::Tektii);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"backtest_complete""#));
+        assert!(json.contains(r#""broker":"tektii""#));
+        assert!(!json.contains("BROKER_DISCONNECTED"));
+
+        // Round-trips back to the same variant.
+        let parsed: WsMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, WsMessage::BacktestComplete { .. }));
     }
 
     #[test]

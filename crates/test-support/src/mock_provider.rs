@@ -41,6 +41,7 @@ impl MockProviderHandle {
 /// post-registration assertions.
 pub struct MockWebSocketProvider {
     supports_reconnection: bool,
+    end_of_stream_is_completion: bool,
     reconnect_results: Mutex<VecDeque<Result<EventStream, WebSocketError>>>,
     reconnect_call_count: Arc<AtomicU32>,
 }
@@ -51,9 +52,18 @@ impl MockWebSocketProvider {
     pub fn new(supports_reconnection: bool) -> Self {
         Self {
             supports_reconnection,
+            end_of_stream_is_completion: false,
             reconnect_results: Mutex::new(VecDeque::new()),
             reconnect_call_count: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Mark this provider so that end-of-stream is treated as a clean
+    /// completion (e.g. the Tektii backtest engine) rather than a broker drop.
+    #[must_use]
+    pub const fn with_end_of_stream_completion(mut self, value: bool) -> Self {
+        self.end_of_stream_is_completion = value;
+        self
     }
 
     /// Get a handle for post-registration assertions.
@@ -124,5 +134,9 @@ impl WebSocketProvider for MockWebSocketProvider {
 
     fn supports_reconnection(&self) -> bool {
         self.supports_reconnection
+    }
+
+    fn end_of_stream_is_completion(&self) -> bool {
+        self.end_of_stream_is_completion
     }
 }
