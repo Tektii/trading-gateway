@@ -428,7 +428,7 @@ fn spawn_engine_message_processor(
 /// Convert a `ServerMessage` to `WsMessage` for subscription filter checking and broadcasting.
 fn server_message_to_ws_message(
     msg: &ServerMessage,
-    _platform: TradingPlatform,
+    platform: TradingPlatform,
 ) -> Option<WsMessage> {
     match msg {
         ServerMessage::Order { event, order, .. } => {
@@ -492,6 +492,16 @@ fn server_message_to_ws_message(
                 bar,
                 timestamp: Utc::now(),
             })
+        }
+        ServerMessage::BacktestComplete { .. } => {
+            // Relay the engine's positive end-of-backtest terminal to strategies.
+            // Producing a downstream `WsMessage` means the message processor
+            // registers its `event_id` pending and the registry broadcasts it;
+            // the strategy's resulting ACK is then auto-correlated by the
+            // `TektiiAckBridge` and relayed back to the engine as the flush-ack
+            // — the engine blocks teardown on that ack so a capture sidecar can
+            // flush its dataset before the run is torn down.
+            Some(WsMessage::backtest_complete(platform))
         }
         ServerMessage::Error { .. } | ServerMessage::Pong => None,
     }
@@ -591,6 +601,16 @@ fn handle_server_message(msg: &ServerMessage, event_router: &Arc<EventRouter>) {
 
         ServerMessage::Pong => {
             debug!("Received Pong from engine");
+        }
+
+        ServerMessage::BacktestComplete { event_id } => {
+            // No router state to update — the terminal is broadcast directly via
+            // EventStream (like Trade/Account/Candle). The strategy's flush-ack
+            // is relayed back to the engine through the normal ACK path.
+            debug!(
+                event_id = %event_id,
+                "Received end-of-backtest terminal from engine"
+            );
         }
     }
 }

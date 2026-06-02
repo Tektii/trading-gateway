@@ -683,6 +683,14 @@ impl ProviderRegistry {
                 return;
             };
 
+            // Tracks whether the provider relayed an in-band `BacktestComplete`
+            // terminal during this session (tektii mode). When set, the
+            // stream-close path must NOT synthesize a second terminal — the real
+            // one already round-tripped its flush-ack. The synthesized terminal
+            // stays a fallback for providers that signal end-of-backtest only by
+            // closing the stream (older engine, or an aborted run).
+            let mut backtest_terminal_relayed = false;
+
             'outer: loop {
                 // === Inner loop: process events from the current stream ===
                 loop {
@@ -695,6 +703,14 @@ impl ProviderRegistry {
                             if let Some(envelope) = msg {
                                 let ProviderEvent { msg: event, engine_event_id } = envelope;
                                 debug!(platform = %platform, "Broadcasting event: {:?}", event);
+
+                                // Record that the provider relayed a real
+                                // end-of-backtest terminal — suppresses the
+                                // synthesized fallback on the stream-close path
+                                // so the strategy sees exactly one terminal.
+                                if matches!(event, WsMessage::BacktestComplete { .. }) {
+                                    backtest_terminal_relayed = true;
+                                }
 
                                 // Clear staleness and notify strategies on first fresh tick
                                 if let Some((symbol, stale_since)) =
@@ -828,6 +844,28 @@ impl ProviderRegistry {
 
                 if !supports_reconnection {
                     // Notify strategies and exit (e.g., Tektii engine).
+
+                    if backtest_terminal_relayed {
+                        // The provider already relayed a real, in-band
+                        // `backtest_complete` terminal and its flush-ack
+                        // round-tripped to the engine (tektii mode). This
+                        // stream-close is the engine tearing down *after* the
+                        // handshake — emit nothing further so the strategy sees
+                        // exactly one terminal. The completion is still counted.
+                        info!(
+                            platform = %platform,
+                            "Provider stream ended after in-band backtest_complete; exiting"
+                        );
+                        metrics::counter!(
+                            "gateway_backtest_completions_total",
+                            "platform" => platform.header_value(),
+                        )
+                        .increment(1);
+                        break 'outer;
+                    }
+
+                    // No in-band terminal was relayed. Fall back to synthesizing
+                    // a terminal from the bare stream-close.
                     //
                     // In tektii/backtest mode the engine ending its stream is
                     // treated as end-of-backtest, so forward a distinct
@@ -837,15 +875,14 @@ impl ProviderRegistry {
                     // feed-loss path. Live providers keep emitting
                     // `broker_disconnected`.
                     //
-                    // NOTE: the gateway cannot yet distinguish a clean completion
-                    // from an aborted run — the engine read loop collapses a
-                    // graceful Close, a transport error, and a bare end-of-stream
-                    // into one signal. A truncated run therefore also surfaces as
-                    // `backtest_complete`. Conveying completed-vs-aborted is
-                    // deferred to future engine protocol work (an explicit
-                    // completion message / WS Close code); until then a consumer
-                    // that needs completeness guarantees must validate the
-                    // dataset itself.
+                    // NOTE: on this fallback path the gateway cannot distinguish a
+                    // clean completion from an aborted run — without an in-band
+                    // terminal the engine read loop collapses a graceful Close, a
+                    // transport error, and a bare end-of-stream into one signal, so
+                    // a truncated run also surfaces as `backtest_complete`. A
+                    // consumer that needs completeness guarantees must validate the
+                    // dataset itself. (When the engine emits its in-band terminal,
+                    // that positive signal is taken via the branch above instead.)
                     let msg = if end_of_stream_is_completion {
                         info!(
                             platform = %platform,
