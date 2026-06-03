@@ -121,17 +121,12 @@ class Config:
 
 
 class StrategyState(Enum):
-    """Where the strategy is in its single-position lifecycle.
-
-    Using an enum instead of `has_position: bool + pending_order: bool`
-    avoids the ambiguous state where both are set (rejected order races,
-    cancel-before-ack) and makes the transitions explicit.
+    """Single-position lifecycle. Transitions are driven by a successful
+    order submit, not by fill events — see ``_enter_long`` / ``_exit_long``.
     """
 
     FLAT = auto()
-    PENDING_ENTRY = auto()
     LONG = auto()
-    PENDING_EXIT = auto()
 
 
 class Cross(Enum):
@@ -267,7 +262,6 @@ class MaCrossoverStrategy:
         sl, tp = bracket_prices(
             entry_ref, self._cfg.stop_loss_pct, self._cfg.take_profit_pct
         )
-        self._state = StrategyState.PENDING_ENTRY
         log.info(
             "golden cross on %s: submitting BUY qty=%s sl=%s tp=%s",
             self._cfg.symbol, self._cfg.quantity, sl, tp,
@@ -280,13 +274,14 @@ class MaCrossoverStrategy:
                 stop_loss=sl,
                 take_profit=tp,
             )
-            log.info("order accepted id=%s status=%s", handle.id, handle.status)
         except OrderRejectedError as err:
             log.warning("order rejected code=%s message=%s", err.code, err.message)
-            self._state = StrategyState.FLAT
+            return  # rejected: stay FLAT
+        # Submit accepted — go LONG without waiting for a fill.
+        self._state = StrategyState.LONG
+        log.info("order accepted id=%s status=%s -> LONG", handle.id, handle.status)
 
     async def _exit_long(self) -> None:
-        self._state = StrategyState.PENDING_EXIT
         log.info(
             "death cross on %s: submitting SELL qty=%s",
             self._cfg.symbol, self._cfg.quantity,
@@ -297,12 +292,15 @@ class MaCrossoverStrategy:
                 side="sell",
                 quantity=self._cfg.quantity,
             )
-            log.info("order accepted id=%s status=%s", handle.id, handle.status)
         except OrderRejectedError as err:
             log.warning("order rejected code=%s message=%s", err.code, err.message)
-            self._state = StrategyState.LONG
+            return  # rejected: stay LONG
+        # Submit accepted — go FLAT.
+        self._state = StrategyState.FLAT
+        log.info("order accepted id=%s status=%s -> FLAT", handle.id, handle.status)
 
     def on_order(self, event: OrderEvent) -> None:
+        """Reconcile live order events. Not invoked during a backtest."""
         order = event.order
         log.info(
             "order %s id=%s symbol=%s side=%s qty=%s filled=%s status=%s",
@@ -311,22 +309,15 @@ class MaCrossoverStrategy:
         )
         if order.symbol != self._cfg.symbol:
             return
-        # Bracket SL/TP child orders are managed by the gateway — we only
-        # drive our own state from the parent entry/exit orders.
-        if event.event == "ORDER_FILLED":
-            if order.side == "BUY" and self._state == StrategyState.PENDING_ENTRY:
-                self._state = StrategyState.LONG
-            elif order.side == "SELL" and self._state in (
-                StrategyState.PENDING_EXIT, StrategyState.LONG
-            ):
-                # SELL fills also arrive when the bracket SL or TP closes the
-                # position — treat either as "we're flat again."
-                self._state = StrategyState.FLAT
-        elif event.event in ("ORDER_REJECTED", "ORDER_CANCELLED", "ORDER_EXPIRED"):
-            if self._state == StrategyState.PENDING_ENTRY:
-                self._state = StrategyState.FLAT
-            elif self._state == StrategyState.PENDING_EXIT:
-                self._state = StrategyState.LONG
+        # A SELL fill while LONG means the position closed (e.g. a bracket
+        # SL/TP) — go FLAT so the next golden cross can re-enter.
+        if (
+            event.event == "ORDER_FILLED"
+            and order.side == "SELL"
+            and self._state == StrategyState.LONG
+        ):
+            log.info("position closed by fill (likely bracket SL/TP) -> FLAT")
+            self._state = StrategyState.FLAT
 
     async def run(self) -> None:
         log.info(
