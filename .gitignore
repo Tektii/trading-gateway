@@ -25,6 +25,13 @@ gateway-exit-state.json
 # User-specific Claude Code settings
 .claude/settings.local.json
 
+# Local-only Claude workflow skills — they reference Tektii's private Linear,
+# so they must never land in this public repo. The artifacts they produce
+# (commits, PRs) stay TEK-free; the skills themselves stay local.
+.claude/skills/
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+
 # Unix core dumps
 /core
 
