@@ -168,6 +168,12 @@ impl SubscriptionFilter {
             WsMessage::Trade { trade, .. } => {
                 self.matches_simple(platform, &trade.symbol, EventKind::TradeUpdate)
             }
+            // Financing is a per-position cost cash flow, sibling to commission
+            // (which rides Trade); gate it on the same TradeUpdate subscription so a
+            // consumer capturing fills/commission also receives financing.
+            WsMessage::Financing { symbol, .. } => {
+                self.matches_simple(platform, symbol, EventKind::TradeUpdate)
+            }
             WsMessage::Account { .. } => self
                 .account_subscriptions
                 .get(&platform)
@@ -258,6 +264,7 @@ mod tests {
         RateLimitEventType, TradeEventType, WsErrorCode,
     };
     use chrono::Utc;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     fn test_subscription(
@@ -735,6 +742,50 @@ mod tests {
             &WsMessage::Trade {
                 event: TradeEventType::TradeFilled,
                 trade: test_trade("AAPL"),
+                timestamp: Utc::now(),
+            },
+            TradingPlatform::AlpacaPaper
+        ));
+    }
+
+    // =========================================================================
+    // Financing events (gated on the same trade_update subscription)
+    // =========================================================================
+
+    #[test]
+    fn test_financing_events_match_under_trade_update() {
+        let subs = vec![test_subscription(
+            TradingPlatform::AlpacaPaper,
+            "AAPL",
+            vec!["trade_update"],
+        )];
+        let filter = SubscriptionFilter::new(&subs);
+
+        assert!(filter.matches(
+            &WsMessage::Financing {
+                symbol: "AAPL".to_string(),
+                amount: Decimal::from(-5),
+                timestamp: Utc::now(),
+            },
+            TradingPlatform::AlpacaPaper
+        ));
+    }
+
+    #[test]
+    fn test_financing_events_not_matched_without_trade_update() {
+        // Financing rides the trade_update subscription; an order_update-only client
+        // must NOT receive it. Pins the deliberate gating choice.
+        let subs = vec![test_subscription(
+            TradingPlatform::AlpacaPaper,
+            "AAPL",
+            vec!["order_update"],
+        )];
+        let filter = SubscriptionFilter::new(&subs);
+
+        assert!(!filter.matches(
+            &WsMessage::Financing {
+                symbol: "AAPL".to_string(),
+                amount: Decimal::from(-5),
                 timestamp: Utc::now(),
             },
             TradingPlatform::AlpacaPaper

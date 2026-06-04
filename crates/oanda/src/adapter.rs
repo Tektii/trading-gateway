@@ -610,7 +610,12 @@ impl OandaAdapter {
             side,
             quantity,
             price,
-            commission: Decimal::ZERO, // Oanda is spread-based, no explicit commissions
+            // Commission is a per-fill *transaction* field on OANDA, not exposed on the
+            // REST Trade object, so it cannot be sourced here regardless of pricing model.
+            // Verified against a practice account: spread-bet/practice fills report
+            // commission 0 anyway (spread-only). Per-fill commission, when an account
+            // charges it, reaches strategies via the WS Trade event on ORDER_FILL.
+            commission: Decimal::ZERO,
             commission_currency: String::new(),
             is_maker: None,
             timestamp,
