@@ -16,6 +16,23 @@ Each template lives in its own directory with `strategy.py`, `test_strategy.py`,
 `strategy.py` is the per-template README — it lists every environment
 variable, the local-run command, and the docker command.
 
+## Position sizing — `ORDER_QUANTITY` is not a fraction of capital
+
+`ORDER_QUANTITY` (default `0.01`) is a **fixed instrument quantity** — 0.01
+units of the symbol — *not* a fraction of capital. On the engine's default
+~100k starting capital, a small fixed size like `0.01` is a near-zero position,
+so the template defaults produce near-zero returns and a meaningless Sharpe
+until you hand-size `ORDER_QUANTITY` to the instrument's price.
+
+To size by notional or percentage of equity instead, reach for the SDK helper
+(`tektii` >= 1.6.0), which returns a quantity at the current price:
+
+```python
+qty = await gw.quantity_for_notional(SYMBOL, notional="5000")
+# or a share of equity:
+qty = await gw.quantity_for_notional(SYMBOL, equity_fraction="0.10")
+```
+
 ## Running a template locally
 
 Start the gateway with the mock provider — no broker credentials needed:

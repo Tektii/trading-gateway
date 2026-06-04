@@ -15,7 +15,9 @@ Environment variables
 Name                 Default         Description
 ===================  ==============  ==============================================
 SYMBOL               F:EURUSD        Trading symbol, provider-native form (e.g. F:EURUSD)
-ORDER_QUANTITY       0.01            Order size (fractional allowed on forex/crypto)
+ORDER_QUANTITY       0.01            Fixed instrument quantity, NOT a fraction of
+                                     capital — see "Position sizing" below
+                                     (fractional allowed on forex/crypto)
 MA_SHORT             10              Short SMA period, in bars
 MA_LONG              20              Long SMA period, in bars
 TIMEFRAME            1m              Bar resolution used for the warm-up backfill;
@@ -26,6 +28,21 @@ LOG_LEVEL            INFO            Python logging level
 TRADING_GATEWAY_URL   localhost:8080  Gateway base URL (read by the SDK)
 TRADING_GATEWAY_API_KEY       (unset)         API key for remote gateways (read by the SDK)
 ===================  ==============  ==============================================
+
+Position sizing
+---------------
+``ORDER_QUANTITY`` is a **fixed instrument quantity** (e.g. 0.01 units of the
+symbol) — *not* a fraction of capital. On the engine's default ~100k starting
+capital, a small fixed size like 0.01 is a near-zero position, so the template
+defaults produce near-zero returns and a meaningless Sharpe until you hand-size
+``ORDER_QUANTITY`` to the instrument's price.
+
+To size by notional or percentage of equity instead, use the SDK helper
+(``tektii`` >= 1.6.0), which returns a quantity at the current price::
+
+    qty = await gw.quantity_for_notional(SYMBOL, notional="5000")
+    # or a share of equity:
+    qty = await gw.quantity_for_notional(SYMBOL, equity_fraction="0.10")
 
 Local run
 ---------
