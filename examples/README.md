@@ -8,8 +8,13 @@ gateway or the backtest engine.
 
 | Template | Style | Defaults |
 |---|---|---|
-| [`python/ma_crossover`](python/ma_crossover/) | Trend-following (SMA 10 × SMA 20 crossover, optional bracket SL/TP) | `SYMBOL=EUR/USD`, `ORDER_QUANTITY=0.01` |
-| [`python/rsi_momentum`](python/rsi_momentum/) | Mean-reversion (RSI 14, oversold/overbought zone entries, optional bracket SL/TP) | `SYMBOL=EUR/USD`, `ORDER_QUANTITY=0.01` |
+| [`python/ma_crossover`](python/ma_crossover/) | Trend-following (SMA 10 × SMA 20 crossover, optional bracket SL/TP) | `ORDER_QUANTITY=0.01` |
+| [`python/rsi_momentum`](python/rsi_momentum/) | Mean-reversion (RSI 14, oversold/overbought zone entries, optional bracket SL/TP) | `ORDER_QUANTITY=0.01` |
+
+Both templates are **symbol-agnostic** — they trade whatever instrument the
+run is subscribed to, learned from the incoming stream. There is no symbol to
+configure. Each keeps a single set of indicator state, so subscribe it to one
+instrument at a time.
 
 Each template lives in its own directory with `strategy.py`, `test_strategy.py`,
 `pyproject.toml`, and a `Dockerfile`. The module docstring at the top of
@@ -28,9 +33,9 @@ To size by notional or percentage of equity instead, reach for the SDK helper
 (`tektii` >= 1.6.0), which returns a quantity at the current price:
 
 ```python
-qty = await gw.quantity_for_notional(SYMBOL, notional="5000")
+qty = await gw.quantity_for_notional(bar.symbol, notional="5000")
 # or a share of equity:
-qty = await gw.quantity_for_notional(SYMBOL, equity_fraction="0.10")
+qty = await gw.quantity_for_notional(bar.symbol, equity_fraction="0.10")
 ```
 
 ## Running a template locally
@@ -46,7 +51,7 @@ Then run the template of your choice:
 ```bash
 cd examples/python/ma_crossover
 pip install -e .
-SYMBOL=EUR/USD python strategy.py
+python strategy.py
 ```
 
 The SDK reads `TRADING_GATEWAY_URL` (default `http://localhost:8080`) and
@@ -76,7 +81,6 @@ docker build -t tektii-template-ma-crossover:dev .
 # so point the SDK at the Docker host bridge instead.
 docker run --rm \
   -e TRADING_GATEWAY_URL=http://host.docker.internal:8080 \
-  -e SYMBOL=EUR/USD \
   tektii-template-ma-crossover:dev
 ```
 

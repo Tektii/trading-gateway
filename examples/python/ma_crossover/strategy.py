@@ -9,12 +9,16 @@ Designed to be the canonical shape for strategies on the Tektii platform:
 stateful class, pure indicator helpers, SDK-native event dispatch, and a
 small state machine that survives partial fills and broker rejects.
 
+The strategy is **symbol-agnostic**: it trades whatever instrument the run is
+subscribed to, learned from the incoming stream — there is nothing to
+configure and nothing to keep in sync. It keeps a single set of indicator
+state, so subscribe it to one instrument at a time.
+
 Environment variables
 ---------------------
 ===================  ==============  ==============================================
 Name                 Default         Description
 ===================  ==============  ==============================================
-SYMBOL               F:EURUSD        Trading symbol, provider-native form (e.g. F:EURUSD)
 ORDER_QUANTITY       0.01            Fixed instrument quantity, NOT a fraction of
                                      capital — see "Position sizing" below
                                      (fractional allowed on forex/crypto)
@@ -38,16 +42,17 @@ defaults produce near-zero returns and a meaningless Sharpe until you hand-size
 ``ORDER_QUANTITY`` to the instrument's price.
 
 To size by notional or percentage of equity instead, use the SDK helper
-(``tektii`` >= 1.6.0), which returns a quantity at the current price::
+(``tektii`` >= 1.6.0), which returns a quantity at the current price. Size
+against the bar's own symbol inside ``on_candle``::
 
-    qty = await gw.quantity_for_notional(SYMBOL, notional="5000")
+    qty = await gw.quantity_for_notional(bar.symbol, notional="5000")
     # or a share of equity:
-    qty = await gw.quantity_for_notional(SYMBOL, equity_fraction="0.10")
+    qty = await gw.quantity_for_notional(bar.symbol, equity_fraction="0.10")
 
 Local run
 ---------
     pip install -e .
-    SYMBOL=F:EURUSD python strategy.py
+    python strategy.py
 
 Docker
 ------
@@ -92,7 +97,6 @@ log = logging.getLogger("ma_crossover")
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    symbol: str
     quantity: Decimal
     short_window: int
     long_window: int
@@ -108,12 +112,6 @@ class Config:
 
         try:
             cfg = cls(
-                # Provider-native symbol, exactly as subscribed on the engine.
-                # The gateway passes symbols through unchanged on both the
-                # history (REST) and stream (WS) surfaces — no normalisation —
-                # so this one form must drive subscription, warm-up, and the
-                # on_candle filter alike.
-                symbol=os.environ.get("SYMBOL", "F:EURUSD"),
                 quantity=Decimal(os.environ.get("ORDER_QUANTITY", "0.01")),
                 short_window=int(os.environ.get("MA_SHORT", "10")),
                 long_window=int(os.environ.get("MA_LONG", "20")),
@@ -201,9 +199,14 @@ class MaCrossoverStrategy:
         self._long: Deque[Decimal] = deque(maxlen=cfg.long_window)
         self._cross = Cross.UNKNOWN
         self._state = StrategyState.FLAT
+        self._warmed_up = False
 
-    async def warm_up(self) -> None:
-        """Seed the SMA windows from historical bars.
+    async def warm_up(self, symbol: str) -> None:
+        """Seed the SMA windows from historical bars for ``symbol``.
+
+        Runs lazily on the first candle (see ``on_candle``): the strategy is
+        symbol-agnostic, so it only learns which instrument to back-fill once
+        the stream delivers the first bar.
 
         Without this, the strategy discards the first ``long_window`` live
         bars as warm-up. With it, the first live bar can already produce a
@@ -216,7 +219,7 @@ class MaCrossoverStrategy:
         limit = self._cfg.long_window + WARMUP_MARGIN_BARS
         try:
             bars = await self._gw.get_bars(
-                self._cfg.symbol, self._cfg.timeframe, limit=limit
+                symbol, self._cfg.timeframe, limit=limit
             )
         except TektiiError as err:
             log.warning(
@@ -246,8 +249,13 @@ class MaCrossoverStrategy:
 
     async def on_candle(self, event: CandleEvent) -> None:
         bar = event.bar
-        if bar.symbol != self._cfg.symbol:
-            return
+
+        # Symbol-agnostic: trade whatever instrument the run is subscribed to.
+        # The first candle reveals the symbol, so warm-up runs here (once)
+        # rather than before the stream opens.
+        if not self._warmed_up:
+            self._warmed_up = True
+            await self.warm_up(bar.symbol)
 
         close = Decimal(bar.close)
         self._short.append(close)
@@ -271,21 +279,21 @@ class MaCrossoverStrategy:
         self._cross = new_cross
 
         if prev == Cross.BELOW and new_cross == Cross.ABOVE and self._state == StrategyState.FLAT:
-            await self._enter_long(entry_ref=close)
+            await self._enter_long(symbol=bar.symbol, entry_ref=close)
         elif prev == Cross.ABOVE and new_cross == Cross.BELOW and self._state == StrategyState.LONG:
-            await self._exit_long()
+            await self._exit_long(symbol=bar.symbol)
 
-    async def _enter_long(self, *, entry_ref: Decimal) -> None:
+    async def _enter_long(self, *, symbol: str, entry_ref: Decimal) -> None:
         sl, tp = bracket_prices(
             entry_ref, self._cfg.stop_loss_pct, self._cfg.take_profit_pct
         )
         log.info(
             "golden cross on %s: submitting BUY qty=%s sl=%s tp=%s",
-            self._cfg.symbol, self._cfg.quantity, sl, tp,
+            symbol, self._cfg.quantity, sl, tp,
         )
         try:
             handle = await self._gw.submit_order(
-                symbol=self._cfg.symbol,
+                symbol=symbol,
                 side="buy",
                 quantity=self._cfg.quantity,
                 stop_loss=sl,
@@ -298,14 +306,14 @@ class MaCrossoverStrategy:
         self._state = StrategyState.LONG
         log.info("order accepted id=%s status=%s -> LONG", handle.id, handle.status)
 
-    async def _exit_long(self) -> None:
+    async def _exit_long(self, *, symbol: str) -> None:
         log.info(
             "death cross on %s: submitting SELL qty=%s",
-            self._cfg.symbol, self._cfg.quantity,
+            symbol, self._cfg.quantity,
         )
         try:
             handle = await self._gw.submit_order(
-                symbol=self._cfg.symbol,
+                symbol=symbol,
                 side="sell",
                 quantity=self._cfg.quantity,
             )
@@ -324,8 +332,6 @@ class MaCrossoverStrategy:
             event.event, order.id, order.symbol, order.side,
             order.quantity, order.filled_quantity, order.status,
         )
-        if order.symbol != self._cfg.symbol:
-            return
         # A SELL fill while LONG means the position closed (e.g. a bracket
         # SL/TP) — go FLAT so the next golden cross can re-enter.
         if (
@@ -338,8 +344,9 @@ class MaCrossoverStrategy:
 
     async def run(self) -> None:
         log.info(
-            "starting MA crossover symbol=%s short=%d long=%d qty=%s sl_pct=%s tp_pct=%s",
-            self._cfg.symbol, self._cfg.short_window, self._cfg.long_window,
+            "starting MA crossover short=%d long=%d qty=%s sl_pct=%s tp_pct=%s "
+            "(symbol learned from the stream)",
+            self._cfg.short_window, self._cfg.long_window,
             self._cfg.quantity, self._cfg.stop_loss_pct, self._cfg.take_profit_pct,
         )
         async with self._gw.stream() as events:
@@ -386,7 +393,8 @@ async def main() -> None:
 
     async with AsyncTradingGateway() as gw:
         strategy = MaCrossoverStrategy(gw, cfg)
-        await strategy.warm_up()
+        # Warm-up runs lazily on the first candle, once the subscribed symbol
+        # is known — see MaCrossoverStrategy.on_candle.
         run_task = asyncio.create_task(strategy.run(), name="strategy")
         stop_task = asyncio.create_task(stop.wait(), name="stop")
         done, _ = await asyncio.wait(
