@@ -5,6 +5,7 @@ Run with: pip install -e .[test] && pytest -q
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import httpx
@@ -23,6 +24,29 @@ from strategy import (
     bracket_prices,
     classify_zone,
 )
+
+
+def _config(
+    *,
+    period: int = 3,
+    oversold: Decimal = Decimal("30"),
+    overbought: Decimal = Decimal("70"),
+    timeframe: str = "1m",
+    stop_loss_pct: Decimal | None = None,
+    take_profit_pct: Decimal | None = None,
+) -> Config:
+    """A test Config. The template is symbol-agnostic, so there is no symbol
+    to configure — it trades whatever stream it receives.
+    """
+    return Config(
+        quantity=Decimal("0.01"),
+        period=period,
+        oversold=oversold,
+        overbought=overbought,
+        timeframe=timeframe,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+    )
 
 
 def _bar(close: str, *, timestamp: str = "2026-04-20T10:00:00Z") -> dict:
@@ -92,12 +116,64 @@ def test_bracket_prices_handles_none_and_pct() -> None:
     assert tp == Decimal("105.00")
 
 
+def test_config_is_symbol_agnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The template no longer reads a SYMBOL env or carries a symbol field —
+    it trades whatever instrument the run is subscribed to. A stray SYMBOL in
+    the environment must be ignored, not honoured.
+    """
+    monkeypatch.setenv("SYMBOL", "C:BTCUSD")
+    cfg = Config.from_env()
+    assert not hasattr(cfg, "symbol")
+    # The other defaults still load.
+    assert cfg.period == 14
+    assert cfg.oversold == Decimal("30")
+
+
+@pytest.mark.asyncio
+@respx.mock(base_url="http://localhost:8080")
+async def test_trades_on_subscribed_symbol_without_config(
+    respx_mock: respx.MockRouter,
+) -> None:
+    """Regression for the silent no-trade bug: with no symbol configured, the
+    strategy must trade whatever instrument the stream delivers — here a
+    crypto symbol that never matched the old `F:EURUSD` default — and submit
+    the order on that same symbol.
+    """
+    # Warm-up fetches history on the stream's symbol; return none so the
+    # strategy cold-starts off the live bars below.
+    bars_route = respx_mock.get(url__regex=r".*/v1/bars/.*").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    route = respx_mock.post("/v1/orders").mock(
+        return_value=httpx.Response(201, json={"id": "ord_1", "status": "PENDING"}),
+    )
+
+    cfg = _config()
+    async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
+        strat = RsiMomentumStrategy(gw, cfg)
+        # Monotonic decline → RSI = 0 → oversold entry, on a symbol the old
+        # default would have filtered out entirely.
+        for close in ("100", "95", "90", "85"):
+            await strat.on_candle(_candle(close, symbol="C:BTCUSD"))
+
+    assert route.called, "expected a BUY even though no symbol was configured"
+    body = json.loads(route.calls.last.request.content)
+    assert body["side"] == "buy"
+    assert body["symbol"] == "C:BTCUSD", "order must target the stream's symbol"
+    assert strat._state == StrategyState.PENDING_ENTRY
+    # Lazy warm-up must fire exactly once, not on every candle.
+    assert bars_route.call_count == 1
+
+
 @pytest.mark.asyncio
 @respx.mock(base_url="http://localhost:8080")
 async def test_oversold_entry_submits_buy_with_bracket(respx_mock: respx.MockRouter) -> None:
     """A monotonic price decline drives RSI into the oversold zone and
     triggers a BUY with the expected SL/TP computed from the signal bar.
     """
+    respx_mock.get(url__regex=r".*/v1/bars/.*").mock(
+        return_value=httpx.Response(200, json=[])
+    )
     route = respx_mock.post("/v1/orders").mock(
         return_value=httpx.Response(
             201,
@@ -105,23 +181,13 @@ async def test_oversold_entry_submits_buy_with_bracket(respx_mock: respx.MockRou
         )
     )
 
-    cfg = Config(
-        symbol="EUR/USD",
-        quantity=Decimal("0.01"),
-        period=3,
-        oversold=Decimal("30"),
-        overbought=Decimal("70"),
-        timeframe="1m",
-        stop_loss_pct=Decimal("0.02"),
-        take_profit_pct=Decimal("0.05"),
-    )
+    cfg = _config(stop_loss_pct=Decimal("0.02"), take_profit_pct=Decimal("0.05"))
     async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
         strat = RsiMomentumStrategy(gw, cfg)
         for close in ("100", "95", "90", "85"):
             await strat.on_candle(_candle(close))
 
     assert route.called, "expected a POST /v1/orders on oversold entry"
-    import json
     body = json.loads(route.calls.last.request.content)
     assert body["side"] == "buy"
     assert body["symbol"] == "EUR/USD"
@@ -135,20 +201,18 @@ async def test_oversold_entry_submits_buy_with_bracket(respx_mock: respx.MockRou
 @pytest.mark.asyncio
 @respx.mock(base_url="http://localhost:8080")
 async def test_warmup_fires_signal_on_first_live_bar(respx_mock: respx.MockRouter) -> None:
-    """Seed RSI from history so the first live bar can produce an entry.
+    """Warm-up runs lazily on the first candle, seeding the Wilder RSI from
+    history on that candle's symbol so the first live bar can already fire.
 
-    History is a 4-bar rise that leaves the Wilder state in the NEUTRAL
-    zone after warmup. The first live bar is a sharp drop that pulls RSI
-    into OVERSOLD — which fires a BUY on bar #1 instead of waiting
-    `period + 1` live bars.
+    History is a mixed sequence that leaves the Wilder state in the NEUTRAL
+    zone after warmup. The first live bar is a sharp drop that pulls RSI into
+    OVERSOLD — which fires a BUY on bar #1 instead of waiting `period + 1`
+    live bars.
     """
     bars_route = respx_mock.get("/v1/bars/EUR%2FUSD").mock(
         return_value=httpx.Response(
             200,
-            # Monotonic rise: all gains, zero losses → RSI saturates at 100
-            # → zone NEUTRAL only if RSI lands above oversold and below
-            # overbought. Rising gives RSI=100 (OVERBOUGHT). Use a mixed
-            # sequence ending NEUTRAL instead.
+            # Alternating gains/losses leave RSI ~mid-band → NEUTRAL.
             json=[_bar(c) for c in ("100", "101", "100", "101")],
         )
     )
@@ -156,29 +220,15 @@ async def test_warmup_fires_signal_on_first_live_bar(respx_mock: respx.MockRoute
         return_value=httpx.Response(201, json={"id": "ord_1", "status": "PENDING"}),
     )
 
-    cfg = Config(
-        symbol="EUR/USD",
-        quantity=Decimal("0.01"),
-        period=3,
-        oversold=Decimal("30"),
-        overbought=Decimal("70"),
-        timeframe="1m",
-        stop_loss_pct=None,
-        take_profit_pct=None,
-    )
+    cfg = _config()
     async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
         strat = RsiMomentumStrategy(gw, cfg)
-        await strat.warm_up()
 
-        # After warmup: RSI computed; zone should be NEUTRAL (RSI ~50
-        # from alternating gains/losses).
-        assert bars_route.called
-        assert strat._zone == Zone.NEUTRAL
-        assert strat._state == StrategyState.FLAT
-
-        # First live bar: a sharp drop takes RSI into OVERSOLD → BUY.
+        # First live bar both triggers warm-up (history fetch, ending NEUTRAL)
+        # and processes a sharp drop (close=10) → RSI into OVERSOLD → BUY.
         await strat.on_candle(_candle("10"))
 
+    assert bars_route.called, "expected lazy warm-up to fetch history on the first candle"
     assert orders_route.called, "expected BUY on the very first live bar"
     assert strat._state == StrategyState.PENDING_ENTRY
 
@@ -195,19 +245,10 @@ async def test_warmup_falls_back_cleanly_on_fetch_failure(
         return_value=httpx.Response(500, json={"code": "ERR", "message": "boom"})
     )
 
-    cfg = Config(
-        symbol="EUR/USD",
-        quantity=Decimal("0.01"),
-        period=3,
-        oversold=Decimal("30"),
-        overbought=Decimal("70"),
-        timeframe="1m",
-        stop_loss_pct=None,
-        take_profit_pct=None,
-    )
+    cfg = _config()
     async with AsyncTradingGateway(base_url="http://localhost:8080") as gw:
         strat = RsiMomentumStrategy(gw, cfg)
-        await strat.warm_up()  # must not raise
+        await strat.warm_up("EUR/USD")  # must not raise
 
     assert strat._zone == Zone.UNKNOWN
     assert strat._state == StrategyState.FLAT
