@@ -3136,6 +3136,37 @@
           },
           {
             "type": "object",
+            "description": "Financing (overnight swap / carry) cash flow.\n\nEmitted when the broker books financing against a position — e.g. a daily\ncarry charge or carry settled when a position is closed. Lets a consumer\ncapture the financing/swap residual per symbol.\n\n`amount` is the financing cash flow in the **account's home currency**\n(negative = charged to the account). Position units are intentionally\nabsent: not every broker reports them on a financing event, so a consumer\nthat needs units joins them from its own position tracking.",
+            "required": [
+              "symbol",
+              "amount",
+              "timestamp",
+              "type"
+            ],
+            "properties": {
+              "amount": {
+                "type": "string",
+                "description": "Financing amount in the account home currency (negative = a charge)."
+              },
+              "symbol": {
+                "type": "string",
+                "description": "Instrument the financing applies to."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Event timestamp."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "financing"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Connection state change.",
             "required": [
               "event",

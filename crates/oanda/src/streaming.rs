@@ -34,7 +34,7 @@ use super::types::{
 };
 use crate::credentials::OandaCredentials;
 use tektii_gateway_core::models::{
-    Bar, Order, OrderStatus, OrderType, Quote, RejectReason, Side, TimeInForce, Timeframe,
+    Bar, Order, OrderStatus, OrderType, Quote, RejectReason, Side, TimeInForce, Timeframe, Trade,
     TradingPlatform,
 };
 use tektii_gateway_core::websocket::error::WebSocketError;
@@ -1191,8 +1191,9 @@ fn transaction_to_messages(
             transaction_new_order_to_messages(tx, platform)
         }
         "MARKET_ORDER_REJECT" => transaction_reject_to_messages(tx, platform),
+        "DAILY_FINANCING" => transaction_financing_to_messages(tx, platform),
         // Ignored transaction types: STOP_LOSS_ORDER, TAKE_PROFIT_ORDER,
-        // TRAILING_STOP_LOSS_ORDER, DAILY_FINANCING, etc.
+        // TRAILING_STOP_LOSS_ORDER, etc.
         other => {
             debug!(
                 platform = %platform,
@@ -1205,7 +1206,18 @@ fn transaction_to_messages(
     }
 }
 
-/// ORDER_FILL -> Filled order event.
+/// ORDER_FILL -> Filled order event, plus a Trade carrying commission and an
+/// optional Financing for carry settled on the fill.
+///
+/// Emits, in order:
+/// 1. `Order { OrderFilled }` -- the order state change (unchanged).
+/// 2. `Trade { TradeFilled }` -- symmetric with the engine leg, carrying the
+///    per-fill `commission` so the canary can pair the same shape live-vs-backtest.
+/// 3. `Financing` -- only when the fill books non-zero `financing` (closing an
+///    overnight position settles accrued carry on the fill).
+///
+/// `commission_currency` is left empty: OANDA does not carry the account home
+/// currency on the transaction line (amounts are denominated in it).
 fn transaction_fill_to_messages(
     tx: &OandaTransactionStreamLine,
     _platform: TradingPlatform,
@@ -1230,10 +1242,12 @@ fn transaction_fill_to_messages(
         .or(tx.id.as_deref())
         .unwrap_or("unknown");
 
+    let timestamp = parse_transaction_time(tx.time.as_deref());
+
     let order = Order {
         id: order_id.to_string(),
         client_order_id: None,
-        symbol,
+        symbol: symbol.clone(),
         side,
         order_type: OrderType::Market,
         quantity,
@@ -1260,12 +1274,91 @@ fn transaction_fill_to_messages(
         updated_at: Utc::now(),
     };
 
-    vec![WsMessage::Order {
-        event: OrderEventType::OrderFilled,
-        order,
-        parent_order_id: None,
-        timestamp: Utc::now(),
-    }]
+    let commission = tx
+        .commission
+        .as_deref()
+        .and_then(|c| Decimal::from_str(c).ok())
+        .unwrap_or(Decimal::ZERO);
+
+    let trade = Trade {
+        // The fill transaction id identifies the execution; fall back to the order id.
+        id: tx
+            .id
+            .as_deref()
+            .or(tx.order_id.as_deref())
+            .unwrap_or("unknown")
+            .to_string(),
+        order_id: order_id.to_string(),
+        symbol: symbol.clone(),
+        side,
+        quantity,
+        price: fill_price.unwrap_or(Decimal::ZERO),
+        commission,
+        // Home currency is not carried on the transaction line (see fn docs).
+        commission_currency: String::new(),
+        is_maker: None,
+        timestamp,
+    };
+
+    let mut messages = vec![
+        WsMessage::Order {
+            event: OrderEventType::OrderFilled,
+            order,
+            parent_order_id: None,
+            timestamp: Utc::now(),
+        },
+        WsMessage::trade(trade),
+    ];
+
+    // Carry settled on this fill, if any, as a Financing cash flow.
+    if let Some(amount) = tx
+        .financing
+        .as_deref()
+        .and_then(|f| Decimal::from_str(f).ok())
+        && !amount.is_zero()
+    {
+        messages.push(WsMessage::Financing {
+            symbol,
+            amount,
+            timestamp,
+        });
+    }
+
+    messages
+}
+
+/// DAILY_FINANCING -> one Financing message per instrument.
+///
+/// OANDA books overnight carry once daily (21:00 UTC) as a single transaction with
+/// a per-instrument `positionFinancings[]` breakdown. Each entry becomes a
+/// `WsMessage::Financing` stamped with the transaction time. Entries that do not
+/// parse are skipped. Position units are intentionally not forwarded -- OANDA does
+/// not carry them on this transaction.
+fn transaction_financing_to_messages(
+    tx: &OandaTransactionStreamLine,
+    _platform: TradingPlatform,
+) -> Vec<WsMessage> {
+    let timestamp = parse_transaction_time(tx.time.as_deref());
+
+    tx.position_financings
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|pf| {
+            let amount = Decimal::from_str(&pf.financing).ok()?;
+            Some(WsMessage::Financing {
+                symbol: pf.instrument.clone(),
+                amount,
+                timestamp,
+            })
+        })
+        .collect()
+}
+
+/// Parse an OANDA RFC-3339 transaction time, falling back to now if absent/unparseable.
+fn parse_transaction_time(time: Option<&str>) -> DateTime<Utc> {
+    time.and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
 }
 
 /// ORDER_CANCEL -> Cancelled order event.
@@ -1455,6 +1548,7 @@ fn transaction_reject_to_messages(
 mod tests {
     use super::*;
     use crate::types::OandaPriceBucket;
+    use tektii_gateway_core::websocket::messages::TradeEventType;
     use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
     /// Helper to create a test transaction stream line with sensible defaults.
@@ -1469,6 +1563,9 @@ mod tests {
             order_id: None,
             reason: None,
             reject_reason: None,
+            commission: None,
+            financing: None,
+            position_financings: None,
             last_transaction_id: None,
         }
     }
@@ -1579,7 +1676,8 @@ mod tests {
         };
 
         let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
-        assert_eq!(msgs.len(), 1);
+        // ORDER_FILL now emits Order + Trade (commission/financing both 0 here).
+        assert_eq!(msgs.len(), 2);
 
         match &msgs[0] {
             WsMessage::Order { event, order, .. } => {
@@ -1608,7 +1706,8 @@ mod tests {
         };
 
         let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
-        assert_eq!(msgs.len(), 1);
+        // Order + Trade.
+        assert_eq!(msgs.len(), 2);
 
         match &msgs[0] {
             WsMessage::Order { order, .. } => {
@@ -1719,11 +1818,12 @@ mod tests {
 
     #[test]
     fn transaction_ignored_types_produce_no_messages() {
+        // DAILY_FINANCING is no longer ignored -- it now emits Financing messages
+        // (see transaction_daily_financing_emits_per_position).
         for tx_type in &[
             "STOP_LOSS_ORDER",
             "TAKE_PROFIT_ORDER",
             "TRAILING_STOP_LOSS_ORDER",
-            "DAILY_FINANCING",
         ] {
             let tx = test_tx("9999", tx_type);
 
@@ -1732,6 +1832,192 @@ mod tests {
                 msgs.is_empty(),
                 "Transaction type '{tx_type}' should produce no messages"
             );
+        }
+    }
+
+    #[test]
+    fn transaction_fill_emits_order_and_trade_with_commission() {
+        // A core-pricing fill with a non-zero commission. The OANDA leg must emit a
+        // Trade carrying the commission, symmetric with the engine leg.
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("10000".to_string()),
+            price: Some("1.08525".to_string()),
+            time: Some("2024-01-15T10:30:00Z".to_string()),
+            order_id: Some("6357".to_string()),
+            commission: Some("2.5000".to_string()),
+            ..test_tx("6360", "ORDER_FILL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        // Order + Trade (financing is 0 -> no Financing message).
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(
+            &msgs[0],
+            WsMessage::Order {
+                event: OrderEventType::OrderFilled,
+                ..
+            }
+        ));
+        match &msgs[1] {
+            WsMessage::Trade { event, trade, .. } => {
+                assert_eq!(*event, TradeEventType::TradeFilled);
+                assert_eq!(trade.symbol, "EUR_USD");
+                assert_eq!(trade.side, Side::Buy);
+                assert_eq!(trade.quantity, Decimal::from(10000));
+                assert_eq!(trade.price, Decimal::from_str("1.08525").unwrap());
+                assert_eq!(trade.commission, Decimal::from_str("2.5000").unwrap());
+                // Home currency is not carried on the transaction line.
+                assert_eq!(trade.commission_currency, "");
+                assert_eq!(trade.order_id, "6357");
+            }
+            other => panic!("Expected Trade event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_fill_zero_commission_still_emits_trade() {
+        // OANDA spread-bet/practice fills report commission 0. The Trade must still be
+        // emitted (commission 0) so the canary's commission dimension is scoreable
+        // live-vs-backtest instead of structurally absent.
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("1".to_string()),
+            price: Some("1.16163".to_string()),
+            commission: Some("0.0000".to_string()),
+            financing: Some("0.0000".to_string()),
+            ..test_tx("1468470", "ORDER_FILL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 2, "zero financing must not add a Financing msg");
+        match &msgs[1] {
+            WsMessage::Trade { trade, .. } => {
+                assert_eq!(trade.commission, Decimal::ZERO);
+            }
+            other => panic!("Expected Trade event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_fill_with_financing_emits_financing() {
+        // Closing an overnight position settles accrued carry on the fill; forward it
+        // as a Financing message alongside the Order and Trade.
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("-10000".to_string()),
+            price: Some("1.08525".to_string()),
+            commission: Some("0.0000".to_string()),
+            financing: Some("-0.7500".to_string()),
+            ..test_tx("6360", "ORDER_FILL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 3, "Order + Trade + Financing");
+        match &msgs[2] {
+            WsMessage::Financing { symbol, amount, .. } => {
+                assert_eq!(symbol, "EUR_USD");
+                assert_eq!(*amount, Decimal::from_str("-0.7500").unwrap());
+            }
+            other => panic!("Expected Financing event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_daily_financing_emits_per_position() {
+        let tx = OandaTransactionStreamLine {
+            time: Some("2026-06-01T21:00:00.000000000Z".to_string()),
+            financing: Some("-3.3873".to_string()),
+            position_financings: Some(vec![
+                crate::types::OandaPositionFinancing {
+                    instrument: "EUR_USD".to_string(),
+                    financing: "-4.5873".to_string(),
+                },
+                crate::types::OandaPositionFinancing {
+                    instrument: "GBP_USD".to_string(),
+                    financing: "1.2000".to_string(),
+                },
+            ]),
+            ..test_tx("1467691", "DAILY_FINANCING")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 2, "one Financing message per position");
+        let expected_ts = DateTime::parse_from_rfc3339("2026-06-01T21:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        match &msgs[0] {
+            WsMessage::Financing {
+                symbol,
+                amount,
+                timestamp,
+            } => {
+                assert_eq!(symbol, "EUR_USD");
+                assert_eq!(*amount, Decimal::from_str("-4.5873").unwrap());
+                assert_eq!(*timestamp, expected_ts, "uses the transaction time");
+            }
+            other => panic!("Expected Financing event, got {other:?}"),
+        }
+        match &msgs[1] {
+            WsMessage::Financing { symbol, amount, .. } => {
+                assert_eq!(symbol, "GBP_USD");
+                assert_eq!(*amount, Decimal::from_str("1.2000").unwrap());
+            }
+            other => panic!("Expected Financing event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_daily_financing_skips_unparseable_entry() {
+        // The documented contract: a positionFinancings entry whose amount does not
+        // parse is skipped, the well-formed siblings still emit.
+        let tx = OandaTransactionStreamLine {
+            time: Some("2026-06-01T21:00:00Z".to_string()),
+            position_financings: Some(vec![
+                crate::types::OandaPositionFinancing {
+                    instrument: "EUR_USD".to_string(),
+                    financing: "-4.5873".to_string(),
+                },
+                crate::types::OandaPositionFinancing {
+                    instrument: "GBP_USD".to_string(),
+                    financing: "not-a-number".to_string(),
+                },
+            ]),
+            ..test_tx("1467691", "DAILY_FINANCING")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 1, "the unparseable entry is skipped");
+        match &msgs[0] {
+            WsMessage::Financing { symbol, .. } => assert_eq!(symbol, "EUR_USD"),
+            other => panic!("Expected Financing event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_financing_falls_back_to_now_without_time() {
+        // No transaction time on the line => the message is stamped with ~now, not the
+        // Unix epoch (the documented fallback in parse_transaction_time).
+        let before = Utc::now();
+        let tx = OandaTransactionStreamLine {
+            // test_tx leaves `time: None`.
+            position_financings: Some(vec![crate::types::OandaPositionFinancing {
+                instrument: "EUR_USD".to_string(),
+                financing: "-1.0".to_string(),
+            }]),
+            ..test_tx("1", "DAILY_FINANCING")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 1);
+        match &msgs[0] {
+            WsMessage::Financing { timestamp, .. } => {
+                assert!(
+                    *timestamp >= before,
+                    "should fall back to ~now: {timestamp}"
+                );
+            }
+            other => panic!("Expected Financing event, got {other:?}"),
         }
     }
 
@@ -1747,8 +2033,8 @@ mod tests {
         let mut messages = Vec::new();
         process_transaction_buffer(&mut buffer, TradingPlatform::OandaPractice, &mut messages);
 
-        // Heartbeat produces no messages, ORDER_FILL produces one.
-        assert_eq!(messages.len(), 1);
+        // Heartbeat produces no messages; ORDER_FILL produces Order + Trade.
+        assert_eq!(messages.len(), 2);
         assert!(buffer.is_empty(), "Buffer should be fully consumed");
     }
 

@@ -500,9 +500,37 @@ pub struct OandaTransactionStreamLine {
     /// Rejection reason (present in reject transactions).
     #[serde(default)]
     pub reject_reason: Option<String>,
+    /// Commission charged for an `ORDER_FILL`, in the account home currency.
+    /// OANDA spread-bet/practice accounts are spread-only, so this is "0.0000",
+    /// but the gateway forwards whatever the broker reports.
+    #[serde(default)]
+    pub commission: Option<String>,
+    /// Financing (carry) cash flow in the account home currency. Present on an
+    /// `ORDER_FILL` (close-settlement of accrued carry) and as the account-level
+    /// total on a `DAILY_FINANCING`.
+    #[serde(default)]
+    pub financing: Option<String>,
+    /// Per-instrument financing breakdown on a `DAILY_FINANCING` transaction.
+    #[serde(default)]
+    pub position_financings: Option<Vec<OandaPositionFinancing>>,
     /// Last transaction ID (present on heartbeats).
     #[serde(default, rename = "lastTransactionID")]
     pub last_transaction_id: Option<String>,
+}
+
+/// One instrument's financing entry within a `DAILY_FINANCING` transaction.
+///
+/// OANDA's `positionFinancings[]` carries the per-instrument financing total but
+/// **no position units** — only the fields the gateway forwards are modelled here;
+/// the rest of the entry (per-trade breakdown, conversion factors) is ignored.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OandaPositionFinancing {
+    /// Instrument (e.g., "EUR_USD").
+    pub instrument: String,
+    /// Financing amount for this instrument, in the account home currency
+    /// (negative = a charge).
+    pub financing: String,
 }
 
 /// Heartbeat from the pricing stream.
@@ -1002,5 +1030,51 @@ mod tests {
         assert!(tx.price.is_none());
         assert!(tx.time.is_none());
         assert!(tx.order_id.is_none());
+    }
+
+    #[test]
+    fn deserialize_order_fill_commission_financing() {
+        // Trimmed from a real OANDA practice ORDER_FILL transaction line.
+        let json = r#"{
+            "type": "ORDER_FILL",
+            "id": "1468470",
+            "orderID": "1468469",
+            "instrument": "EUR_USD",
+            "units": "1",
+            "price": "1.16163",
+            "financing": "-0.5000",
+            "commission": "0.0000"
+        }"#;
+        let tx: OandaTransactionStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.commission.as_deref(), Some("0.0000"));
+        assert_eq!(tx.financing.as_deref(), Some("-0.5000"));
+        // A fill line carries no positionFinancings.
+        assert!(tx.position_financings.is_none());
+    }
+
+    #[test]
+    fn deserialize_daily_financing_position_financings() {
+        // Trimmed from a real OANDA practice DAILY_FINANCING transaction line; the
+        // openTradeFinancings array is present on the wire but intentionally not parsed.
+        let json = r#"{
+            "type": "DAILY_FINANCING",
+            "id": "1467691",
+            "time": "2026-06-01T21:00:00.000000000Z",
+            "financing": "-4.5873",
+            "positionFinancings": [
+                { "instrument": "EUR_USD", "financing": "-4.5873", "openTradeFinancings": [] },
+                { "instrument": "GBP_USD", "financing": "1.2000" }
+            ]
+        }"#;
+        let tx: OandaTransactionStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(tx.financing.as_deref(), Some("-4.5873"));
+        let pf = tx
+            .position_financings
+            .expect("positionFinancings should be present");
+        assert_eq!(pf.len(), 2);
+        assert_eq!(pf[0].instrument, "EUR_USD");
+        assert_eq!(pf[0].financing, "-4.5873");
+        assert_eq!(pf[1].instrument, "GBP_USD");
+        assert_eq!(pf[1].financing, "1.2000");
     }
 }

@@ -345,6 +345,25 @@ pub enum WsMessage {
         timestamp: DateTime<Utc>,
     },
 
+    /// Financing (overnight swap / carry) cash flow.
+    ///
+    /// Emitted when the broker books financing against a position — e.g. a daily
+    /// carry charge or carry settled when a position is closed. Lets a consumer
+    /// capture the financing/swap residual per symbol.
+    ///
+    /// `amount` is the financing cash flow in the **account's home currency**
+    /// (negative = charged to the account). Position units are intentionally
+    /// absent: not every broker reports them on a financing event, so a consumer
+    /// that needs units joins them from its own position tracking.
+    Financing {
+        /// Instrument the financing applies to.
+        symbol: String,
+        /// Financing amount in the account home currency (negative = a charge).
+        amount: Decimal,
+        /// Event timestamp.
+        timestamp: DateTime<Utc>,
+    },
+
     /// Connection state change.
     Connection {
         /// Type of connection event.
@@ -1144,6 +1163,7 @@ impl EventAckMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     // === Event tests ===
 
@@ -1426,5 +1446,39 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("stale_since"));
         assert!(!json.contains("broker"));
+    }
+
+    // === Financing tests ===
+
+    #[test]
+    fn test_financing_serialization() {
+        let msg = WsMessage::Financing {
+            symbol: "EUR_USD".to_string(),
+            amount: Decimal::from_str("-4.5873").unwrap(),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"financing""#));
+        assert!(json.contains(r#""symbol":"EUR_USD""#));
+        // `serde-with-str` => Decimal is serialized as a string.
+        assert!(json.contains(r#""amount":"-4.5873""#));
+    }
+
+    #[test]
+    fn test_financing_roundtrip() {
+        let msg = WsMessage::Financing {
+            symbol: "GBP_USD".to_string(),
+            amount: Decimal::from_str("1.2345").unwrap(),
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: WsMessage = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            WsMessage::Financing { symbol, amount, .. } => {
+                assert_eq!(symbol, "GBP_USD");
+                assert_eq!(amount, Decimal::from_str("1.2345").unwrap());
+            }
+            other => panic!("Expected Financing variant, got {other:?}"),
+        }
     }
 }
