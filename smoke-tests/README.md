@@ -112,4 +112,4 @@ The gateway requires `GATEWAY_PROVIDER` plus provider-specific credentials. `GAT
 
 ## CI
 
-Smoke tests gate every release. On tag push (`v*.*.*`), the release workflow builds the image then runs these tests against all four adapter sandboxes. All must pass before images are published and the GitHub Release is created. See `.github/workflows/release.yml`.
+This suite is a **local / manual tool** — it is not wired into any CI workflow and does **not** gate releases. The release workflow (`.github/workflows/release.yml`) publishes versioned images by retagging the digests already built and published on the main merge; it deliberately does not run broker-sandbox smoke tests. Run the suite yourself against a gateway pointed at a broker sandbox when you want to sanity-check an adapter end to end. Broader provider conformance is tracked as a separate increment.
