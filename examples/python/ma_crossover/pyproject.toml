@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Tektii platform reference strategy: SMA crossover trend-following."
 requires-python = ">=3.11"
 dependencies = [
-    "tektii>=1.5.1,<2",
+    "tektii>=1.6.0,<2",
 ]
 
 [project.optional-dependencies]
