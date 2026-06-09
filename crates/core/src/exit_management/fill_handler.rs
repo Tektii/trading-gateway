@@ -619,14 +619,20 @@ impl ExitHandler {
             ExitLegType::TakeProfit => (OrderType::Limit, None, Some(entry.trigger_price)),
         };
 
+        // Seed the wire client_order_id from the parent's client-assigned id when
+        // it carried one, so the exit id is deterministic and identical across
+        // legs regardless of the per-leg server-assigned `primary_order_id`. Fall
+        // back to the server id when the parent had no (or an empty) client id.
+        let id_seed = entry
+            .parent_client_order_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&entry.primary_order_id);
         let suffix = entry.order_type.client_order_suffix();
         let client_order_id = if existing_order_count == 0 {
-            format!("{}-{}", entry.primary_order_id, suffix)
+            format!("{id_seed}-{suffix}")
         } else {
-            format!(
-                "{}-{}-{}",
-                entry.primary_order_id, suffix, existing_order_count
-            )
+            format!("{id_seed}-{suffix}-{existing_order_count}")
         };
 
         OrderRequest {
@@ -776,6 +782,7 @@ mod tests {
     fn test_build_exit_order_sets_client_order_id_for_stop_loss() {
         let entry = ExitEntry::new(ExitEntryParams {
             primary_order_id: "primary-order-123".to_string(),
+            parent_client_order_id: None,
             order_type: ExitLegType::StopLoss,
             symbol: "BTC/USDT".to_string(),
             side: Side::Sell,
@@ -798,6 +805,7 @@ mod tests {
     fn test_build_exit_order_sets_client_order_id_for_take_profit() {
         let entry = ExitEntry::new(ExitEntryParams {
             primary_order_id: "primary-order-456".to_string(),
+            parent_client_order_id: None,
             order_type: ExitLegType::TakeProfit,
             symbol: "BTC/USDT".to_string(),
             side: Side::Sell,
@@ -820,6 +828,7 @@ mod tests {
     fn test_build_exit_order_client_order_id_is_deterministic() {
         let entry = ExitEntry::new(ExitEntryParams {
             primary_order_id: "order-789".to_string(),
+            parent_client_order_id: None,
             order_type: ExitLegType::StopLoss,
             symbol: "ETH/USDT".to_string(),
             side: Side::Sell,
@@ -842,6 +851,7 @@ mod tests {
     fn test_build_exit_order_partial_fills_get_unique_client_order_ids() {
         let entry = ExitEntry::new(ExitEntryParams {
             primary_order_id: "order-999".to_string(),
+            parent_client_order_id: None,
             order_type: ExitLegType::StopLoss,
             symbol: "BTC/USDT".to_string(),
             side: Side::Sell,
@@ -877,6 +887,157 @@ mod tests {
         assert_ne!(first.client_order_id, third.client_order_id);
     }
 
+    #[test]
+    fn test_build_exit_order_seeds_client_order_id_from_parent_client_id() {
+        // Parent carried a client-assigned id; the synthesized exit must derive
+        // its wire client_order_id from that, NOT from the server-assigned
+        // primary_order_id, so the id matches across legs.
+        let entry = ExitEntry::new(ExitEntryParams {
+            primary_order_id: "server-assigned-987".to_string(),
+            parent_client_order_id: Some("canary-1-phase-2-3".to_string()),
+            order_type: ExitLegType::TakeProfit,
+            symbol: "EUR/USD".to_string(),
+            side: Side::Sell,
+            trigger_price: dec!(1.2),
+            limit_price: None,
+            quantity: dec!(1000),
+            platform: TradingPlatform::OandaLive,
+        });
+
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1000), 0);
+
+        assert_eq!(
+            order.client_order_id,
+            Some("canary-1-phase-2-3-tp".to_string()),
+            "Exit id must derive from the parent's client_order_id, not the server order id"
+        );
+    }
+
+    #[test]
+    fn test_build_exit_order_parent_client_id_independent_of_server_id() {
+        // Two legs with different server order ids but the same parent client id
+        // must produce the same exit client_order_id.
+        let leg_a = ExitEntry::new(ExitEntryParams {
+            primary_order_id: "live-server-id".to_string(),
+            parent_client_order_id: Some("canary-7-phase-0-1".to_string()),
+            order_type: ExitLegType::StopLoss,
+            symbol: "EUR/USD".to_string(),
+            side: Side::Sell,
+            trigger_price: dec!(1.1),
+            limit_price: None,
+            quantity: dec!(500),
+            platform: TradingPlatform::OandaLive,
+        });
+        let leg_b = ExitEntry::new(ExitEntryParams {
+            primary_order_id: "backtest-server-id".to_string(),
+            parent_client_order_id: Some("canary-7-phase-0-1".to_string()),
+            order_type: ExitLegType::StopLoss,
+            symbol: "EUR/USD".to_string(),
+            side: Side::Sell,
+            trigger_price: dec!(1.1),
+            limit_price: None,
+            quantity: dec!(500),
+            platform: TradingPlatform::Tektii,
+        });
+
+        let order_a = ExitHandler::build_exit_order_request(&leg_a, dec!(500), 0);
+        let order_b = ExitHandler::build_exit_order_request(&leg_b, dec!(500), 0);
+
+        assert_eq!(
+            order_a.client_order_id,
+            Some("canary-7-phase-0-1-sl".to_string())
+        );
+        assert_eq!(
+            order_a.client_order_id, order_b.client_order_id,
+            "Exit id must be identical across legs when the parent client id matches"
+        );
+    }
+
+    #[test]
+    fn test_build_exit_order_falls_back_to_server_id_without_parent_client_id() {
+        // No parent client id -> preserve today's server-id-based behaviour.
+        let entry = ExitEntry::new(ExitEntryParams {
+            primary_order_id: "server-only-555".to_string(),
+            parent_client_order_id: None,
+            order_type: ExitLegType::StopLoss,
+            symbol: "BTC/USDT".to_string(),
+            side: Side::Sell,
+            trigger_price: dec!(50000),
+            limit_price: None,
+            quantity: dec!(1),
+            platform: TradingPlatform::BinanceSpotLive,
+        });
+
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0);
+
+        assert_eq!(
+            order.client_order_id,
+            Some("server-only-555-sl".to_string()),
+            "Without a parent client id, the exit id falls back to the server order id"
+        );
+    }
+
+    #[test]
+    fn test_build_exit_order_empty_parent_client_id_falls_back_to_server_id() {
+        // An empty client_order_id is treated as absent, so it must not produce a
+        // degenerate "-sl" seed -- fall back to the server order id instead.
+        let entry = ExitEntry::new(ExitEntryParams {
+            primary_order_id: "server-fallback-42".to_string(),
+            parent_client_order_id: Some(String::new()),
+            order_type: ExitLegType::StopLoss,
+            symbol: "BTC/USDT".to_string(),
+            side: Side::Sell,
+            trigger_price: dec!(50000),
+            limit_price: None,
+            quantity: dec!(1),
+            platform: TradingPlatform::BinanceSpotLive,
+        });
+
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0);
+
+        assert_eq!(
+            order.client_order_id,
+            Some("server-fallback-42-sl".to_string()),
+            "Empty parent client id must fall back to the server order id, not yield '-sl'"
+        );
+    }
+
+    #[test]
+    fn test_build_exit_order_parent_client_id_preserves_partial_fill_suffix() {
+        // Partial-fill uniqueness suffixing must still hold when seeded from the
+        // parent client id.
+        let entry = ExitEntry::new(ExitEntryParams {
+            primary_order_id: "server-id-irrelevant".to_string(),
+            parent_client_order_id: Some("canary-3-phase-1-0".to_string()),
+            order_type: ExitLegType::StopLoss,
+            symbol: "BTC/USDT".to_string(),
+            side: Side::Sell,
+            trigger_price: dec!(50000),
+            limit_price: None,
+            quantity: dec!(1),
+            platform: TradingPlatform::BinanceSpotLive,
+        });
+
+        let first = ExitHandler::build_exit_order_request(&entry, dec!(0.5), 0);
+        let second = ExitHandler::build_exit_order_request(&entry, dec!(0.3), 1);
+        let third = ExitHandler::build_exit_order_request(&entry, dec!(0.2), 2);
+
+        assert_eq!(
+            first.client_order_id,
+            Some("canary-3-phase-1-0-sl".to_string())
+        );
+        assert_eq!(
+            second.client_order_id,
+            Some("canary-3-phase-1-0-sl-1".to_string())
+        );
+        assert_eq!(
+            third.client_order_id,
+            Some("canary-3-phase-1-0-sl-2".to_string())
+        );
+        assert_ne!(first.client_order_id, second.client_order_id);
+        assert_ne!(second.client_order_id, third.client_order_id);
+    }
+
     // =========================================================================
     // update_entry_to_failed: actual_orders preservation
     // =========================================================================
@@ -897,6 +1058,7 @@ mod tests {
     ) -> ExitEntry {
         let mut entry = ExitEntry::new(ExitEntryParams {
             primary_order_id: primary_order_id.to_string(),
+            parent_client_order_id: None,
             order_type,
             symbol: symbol.to_string(),
             side: Side::Sell,
