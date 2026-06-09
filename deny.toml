@@ -5,6 +5,9 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = [
     # Transitive dependency of utoipa-axum; no alternative available yet
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but no replacement exists for utoipa-axum" },
+    # Transitive dependency of validator (via validator_derive); validator is already
+    # at its latest release and still pulls this in, so there is no upgrade path yet.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained but reaches us only transitively through validator_derive, which has no fixed release" },
 ]
 
 [bans]
