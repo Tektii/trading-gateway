@@ -510,6 +510,13 @@ pub struct OandaTransactionStreamLine {
     /// total on a `DAILY_FINANCING`.
     #[serde(default)]
     pub financing: Option<String>,
+    /// Account cash balance after this transaction, in the account home currency.
+    /// OANDA carries `accountBalance` on an `ORDER_FILL` payload; it is the
+    /// point-in-time balance booked by this fill, so it is naturally ordered
+    /// against the fill (unlike a separate account-summary fetch, which can race
+    /// ahead of a later fill). Used to populate the per-fill `Account` snapshot.
+    #[serde(default)]
+    pub account_balance: Option<String>,
     /// Per-instrument financing breakdown on a `DAILY_FINANCING` transaction.
     #[serde(default)]
     pub position_financings: Option<Vec<OandaPositionFinancing>>,

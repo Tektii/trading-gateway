@@ -30,16 +30,17 @@ use tracing::{debug, error, info, warn};
 
 use super::adapter::OandaAdapter;
 use super::types::{
-    OandaCandle, OandaCandlesResponse, OandaPriceStreamMessage, OandaTransactionStreamLine,
+    OandaAccountResponse, OandaCandle, OandaCandlesResponse, OandaPriceStreamMessage,
+    OandaTransactionStreamLine,
 };
 use crate::credentials::OandaCredentials;
 use tektii_gateway_core::models::{
-    Bar, Order, OrderStatus, OrderType, Quote, RejectReason, Side, TimeInForce, Timeframe, Trade,
-    TradingPlatform,
+    Account, Bar, Order, OrderStatus, OrderType, Quote, RejectReason, Side, TimeInForce, Timeframe,
+    Trade, TradingPlatform,
 };
 use tektii_gateway_core::websocket::error::WebSocketError;
 use tektii_gateway_core::websocket::messages::{
-    EventAckMessage, InternalTradingEvent, OrderEventType, WsMessage,
+    AccountEventType, EventAckMessage, InternalTradingEvent, OrderEventType, WsMessage,
 };
 use tektii_gateway_core::websocket::provider::{
     EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
@@ -71,6 +72,12 @@ const CANDLE_POLL_OFFSET_SECS: i64 = 3;
 
 /// Heartbeat timeout -- if no data arrives within this window, reconnect.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on the per-fill account-summary fetch. The fetch is awaited inside
+/// the transaction stream's chunk loop, so an unbounded hang (the shared client has
+/// no default timeout) would stall heartbeat-timeout detection and reconnect/disconnect
+/// cancellation. Kept below `HEARTBEAT_TIMEOUT` so a stalled fetch cannot defer a
+/// reconnect by more than one fetch window; on timeout the snapshot is simply skipped.
+const ACCOUNT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum reconnection backoff.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Initial reconnection backoff.
@@ -285,6 +292,7 @@ impl OandaWebSocketProvider {
         let event_tx = self.event_tx.clone();
         let client = self.client.clone();
         let stream_url = self.stream_url.clone();
+        let rest_url = self.rest_url.clone();
         let api_token = Arc::clone(&self.api_token);
         let account_id = self.account_id.clone();
         let platform = self.platform;
@@ -293,6 +301,7 @@ impl OandaWebSocketProvider {
             run_transaction_stream(
                 &client,
                 &stream_url,
+                &rest_url,
                 api_token.expose_secret(),
                 &account_id,
                 platform,
@@ -887,6 +896,7 @@ async fn run_candle_poll(
 async fn run_transaction_stream(
     client: &Client,
     stream_url: &str,
+    rest_url: &str,
     api_token: &str,
     account_id: &str,
     platform: TradingPlatform,
@@ -895,6 +905,15 @@ async fn run_transaction_stream(
     parent_cancel: CancellationToken,
 ) {
     let url = format!("{stream_url}/v3/accounts/{account_id}/transactions/stream");
+    // The strategy-facing stream enriches each fill with an account snapshot
+    // (summary lives on the REST host, not the stream host).
+    let account_fetcher = AccountFetcher {
+        client,
+        rest_url,
+        api_token,
+        account_id,
+        platform,
+    };
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
@@ -903,6 +922,7 @@ async fn run_transaction_stream(
             &url,
             api_token,
             platform,
+            Some(&account_fetcher),
             &stream_cancel,
             &parent_cancel,
         )
@@ -978,11 +998,14 @@ async fn run_transaction_stream_internal(
 
     loop {
         // Registry owns a single lifecycle token here, so both select arms collapse onto it.
+        // No account enrichment: the EventRouter consumer synthesises positions from
+        // order events and never forwards account frames to strategies.
         let result = run_single_transaction_stream(
             client,
             &url,
             api_token,
             platform,
+            None,
             &cancel_token,
             &cancel_token,
         )
@@ -1043,6 +1066,7 @@ async fn run_single_transaction_stream(
     url: &str,
     api_token: &str,
     platform: TradingPlatform,
+    account_fetcher: Option<&AccountFetcher<'_>>,
     stream_cancel: &CancellationToken,
     parent_cancel: &CancellationToken,
 ) -> (StreamError, Vec<WsMessage>) {
@@ -1073,7 +1097,7 @@ async fn run_single_transaction_stream(
                     Ok(Some(data)) => {
                         deadline = Instant::now() + HEARTBEAT_TIMEOUT;
                         buffer.extend_from_slice(&data);
-                        process_transaction_buffer(&mut buffer, platform, &mut messages);
+                        process_transaction_buffer(&mut buffer, platform, &mut messages, account_fetcher).await;
                     },
                     Ok(None) => {
                         return (StreamError::Network("Stream ended (EOF)".to_string()), messages);
@@ -1097,10 +1121,18 @@ async fn run_single_transaction_stream(
 }
 
 /// Process complete NDJSON lines from the buffer and collect order events.
-fn process_transaction_buffer(
+///
+/// When `account_fetcher` is set (the strategy-facing stream), each `ORDER_FILL`
+/// is followed by one `WsMessage::Account` snapshot, fetched and appended inline so
+/// it is ordered immediately after the fill's own frames -- the canary attributes an
+/// account snapshot to the fill that precedes it on the wire. The internal
+/// EventRouter stream passes `None`: it synthesises positions from order events and
+/// never forwards account frames, so enriching it would be a wasted fetch.
+async fn process_transaction_buffer(
     buffer: &mut BytesMut,
     platform: TradingPlatform,
     messages: &mut Vec<WsMessage>,
+    account_fetcher: Option<&AccountFetcher<'_>>,
 ) {
     while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
         let line = buffer.split_to(pos + 1);
@@ -1117,6 +1149,18 @@ fn process_transaction_buffer(
             Ok(line) => {
                 let events = transaction_to_messages(&line, platform);
                 messages.extend(events);
+
+                // Emit a per-fill account snapshot, ordered right after the fill.
+                if line.transaction_type == "ORDER_FILL"
+                    && let Some(fetcher) = account_fetcher
+                    && let Some(account) = fetcher.account_snapshot_for_fill(&line).await
+                {
+                    messages.push(WsMessage::Account {
+                        event: AccountEventType::BalanceUpdated,
+                        account,
+                        timestamp: parse_transaction_time(line.time.as_deref()),
+                    });
+                }
             }
             Err(e) => {
                 warn!(
@@ -1128,6 +1172,136 @@ fn process_transaction_buffer(
             }
         }
     }
+}
+
+/// Fetches the OANDA account summary to enrich a per-fill account snapshot.
+///
+/// The streaming task has no `OandaAdapter` handle, so it does its own raw summary
+/// fetch the same way [`poll_candles`] fetches candles. The summary->[`Account`]
+/// mapping mirrors `OandaAdapter::get_account`.
+struct AccountFetcher<'a> {
+    client: &'a Client,
+    rest_url: &'a str,
+    api_token: &'a str,
+    account_id: &'a str,
+    platform: TradingPlatform,
+}
+
+impl AccountFetcher<'_> {
+    /// Fetch the account summary and map it to a core [`Account`].
+    ///
+    /// Returns `None` on any error (network, non-2xx, decode). A missing snapshot is
+    /// preferable to one carrying bogus zeros for margin/equity: the canary attributes
+    /// each snapshot to the fill that precedes it on the wire, so a dropped snapshot
+    /// leaves a gap rather than mispairing later fills.
+    async fn fetch(&self) -> Option<Account> {
+        let url = format!("{}/v3/accounts/{}/summary", self.rest_url, self.account_id);
+        let response = match self
+            .client
+            .get(&url)
+            .bearer_auth(self.api_token)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(
+                    platform = %self.platform,
+                    error = %e,
+                    "Account summary fetch failed -- skipping account snapshot"
+                );
+                return None;
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            warn!(
+                platform = %self.platform,
+                %status,
+                "Account summary fetch returned non-success -- skipping account snapshot"
+            );
+            return None;
+        }
+
+        let parsed: OandaAccountResponse = match response.json().await {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                warn!(
+                    platform = %self.platform,
+                    error = %e,
+                    "Account summary decode failed -- skipping account snapshot"
+                );
+                return None;
+            }
+        };
+
+        let acct = parsed.account;
+        // Unlike `adapter::get_account` -- which must return an `Account` for the REST
+        // route and so defaults unparseable fields to zero -- the streaming path can skip
+        // the snapshot. A non-numeric field would otherwise emit a bogus zero for
+        // equity/margin, so any parse failure is treated as a missing snapshot.
+        let (Ok(balance), Ok(equity), Ok(margin_used), Ok(margin_available), Ok(unrealized_pnl)) = (
+            Decimal::from_str(&acct.balance),
+            Decimal::from_str(&acct.nav),
+            Decimal::from_str(&acct.margin_used),
+            Decimal::from_str(&acct.margin_available),
+            Decimal::from_str(&acct.unrealized_pl),
+        ) else {
+            warn!(
+                platform = %self.platform,
+                "Account summary had an unparseable numeric field -- skipping account snapshot"
+            );
+            return None;
+        };
+
+        Some(Account {
+            balance,
+            equity,
+            margin_used,
+            margin_available,
+            unrealized_pnl,
+            currency: acct.currency,
+        })
+    }
+
+    /// Build the per-fill account snapshot: the fetched summary with `balance`
+    /// overridden by the fill's `accountBalance`. `None` if the fetch failed or did
+    /// not complete within [`ACCOUNT_FETCH_TIMEOUT`] -- the bound keeps a hung summary
+    /// endpoint from stalling the transaction stream's heartbeat/cancellation arms.
+    async fn account_snapshot_for_fill(
+        &self,
+        fill: &OandaTransactionStreamLine,
+    ) -> Option<Account> {
+        let account = match tokio::time::timeout(ACCOUNT_FETCH_TIMEOUT, self.fetch()).await {
+            Ok(account) => account?,
+            Err(_elapsed) => {
+                warn!(
+                    platform = %self.platform,
+                    timeout_secs = ACCOUNT_FETCH_TIMEOUT.as_secs(),
+                    "Account summary fetch timed out -- skipping account snapshot"
+                );
+                return None;
+            }
+        };
+        Some(merge_fill_account(account, fill.account_balance.as_deref()))
+    }
+}
+
+/// Merge a fetched account summary with the balance carried on the fill.
+///
+/// `balance` is taken from the fill's `accountBalance` when present -- it is the
+/// point-in-time balance booked by this fill and ordered against it, whereas the
+/// fetched summary can race ahead of a subsequent fill. `equity` (OANDA NAV) and the
+/// margin/unrealized fields come from the summary: there is no per-fill source for
+/// them, and OANDA's NAV is the authoritative equity. After the override `equity` may
+/// not exactly equal `balance + unrealized_pnl`; the canary scores each dimension
+/// independently, so this two-source merge is acceptable.
+fn merge_fill_account(mut account: Account, fill_balance: Option<&str>) -> Account {
+    if let Some(balance) = fill_balance.and_then(|b| Decimal::from_str(b).ok()) {
+        account.balance = balance;
+    }
+    account
 }
 
 // ============================================================================
@@ -1565,6 +1739,7 @@ mod tests {
             reject_reason: None,
             commission: None,
             financing: None,
+            account_balance: None,
             position_financings: None,
             last_transaction_id: None,
         }
@@ -2021,8 +2196,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ndjson_buffer_processing() {
+    #[tokio::test]
+    async fn ndjson_buffer_processing() {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(
             br#"{"type":"HEARTBEAT","time":"2024-01-15T10:30:05.000000000Z","lastTransactionID":"6360"}
@@ -2030,33 +2205,52 @@ mod tests {
 "#,
         );
 
+        // No fetcher (None): heartbeat produces no messages; ORDER_FILL produces
+        // Order + Trade, with no account snapshot appended.
         let mut messages = Vec::new();
-        process_transaction_buffer(&mut buffer, TradingPlatform::OandaPractice, &mut messages);
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &mut messages,
+            None,
+        )
+        .await;
 
-        // Heartbeat produces no messages; ORDER_FILL produces Order + Trade.
         assert_eq!(messages.len(), 2);
         assert!(buffer.is_empty(), "Buffer should be fully consumed");
     }
 
-    #[test]
-    fn ndjson_partial_line_stays_in_buffer() {
+    #[tokio::test]
+    async fn ndjson_partial_line_stays_in_buffer() {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(br#"{"type":"HEARTBEAT","time":"2024-01-"#);
 
         let mut messages = Vec::new();
-        process_transaction_buffer(&mut buffer, TradingPlatform::OandaPractice, &mut messages);
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &mut messages,
+            None,
+        )
+        .await;
 
         assert!(messages.is_empty());
         assert!(!buffer.is_empty(), "Partial line should remain in buffer");
     }
 
-    #[test]
-    fn ndjson_malformed_line_skipped() {
+    #[tokio::test]
+    async fn ndjson_malformed_line_skipped() {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(b"not valid json\n");
 
         let mut messages = Vec::new();
-        process_transaction_buffer(&mut buffer, TradingPlatform::OandaPractice, &mut messages);
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &mut messages,
+            None,
+        )
+        .await;
 
         assert!(
             messages.is_empty(),
@@ -2065,6 +2259,383 @@ mod tests {
         assert!(
             buffer.is_empty(),
             "Malformed line should be consumed from buffer"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Per-fill account snapshots
+    // ------------------------------------------------------------------------
+
+    /// Build an OANDA account-summary response body.
+    fn account_summary_value(
+        balance: &str,
+        nav: &str,
+        margin_used: &str,
+        margin_available: &str,
+        unrealized_pl: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "account": {
+                "balance": balance,
+                "NAV": nav,
+                "marginUsed": margin_used,
+                "marginAvailable": margin_available,
+                "unrealizedPL": unrealized_pl,
+                "hedgingEnabled": false,
+                "currency": "USD"
+            }
+        })
+    }
+
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn merge_fill_account_overrides_balance_from_fill() {
+        let fetched = Account {
+            balance: dec("100000.0000"),
+            equity: dec("100250.5000"),
+            margin_used: dec("2500.0000"),
+            margin_available: dec("97750.5000"),
+            unrealized_pnl: dec("250.5000"),
+            currency: "USD".to_string(),
+        };
+
+        let merged = merge_fill_account(fetched, Some("100123.4500"));
+
+        // Balance comes from the fill; everything else stays from the summary.
+        assert_eq!(merged.balance, dec("100123.4500"));
+        assert_eq!(merged.equity, dec("100250.5000"));
+        assert_eq!(merged.margin_used, dec("2500.0000"));
+        assert_eq!(merged.margin_available, dec("97750.5000"));
+        assert_eq!(merged.unrealized_pnl, dec("250.5000"));
+        assert_eq!(merged.currency, "USD");
+    }
+
+    #[test]
+    fn merge_fill_account_falls_back_to_summary_balance() {
+        let fetched = Account {
+            balance: dec("100000.0000"),
+            equity: dec("100250.5000"),
+            margin_used: dec("2500.0000"),
+            margin_available: dec("97750.5000"),
+            unrealized_pnl: dec("250.5000"),
+            currency: "USD".to_string(),
+        };
+
+        // Fill omits accountBalance, or carries an unparseable value -> keep summary.
+        assert_eq!(
+            merge_fill_account(fetched.clone(), None).balance,
+            dec("100000.0000")
+        );
+        assert_eq!(
+            merge_fill_account(fetched, Some("not-a-number")).balance,
+            dec("100000.0000")
+        );
+    }
+
+    #[tokio::test]
+    async fn account_fetcher_maps_summary() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            200,
+            account_summary_value(
+                "100000.0000",
+                "100250.5000",
+                "2500.0000",
+                "97750.5000",
+                "250.5000",
+            ),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        let account = fetcher
+            .fetch()
+            .await
+            .expect("summary should map to Account");
+        assert_eq!(account.balance, dec("100000.0000"));
+        assert_eq!(account.equity, dec("100250.5000"));
+        assert_eq!(account.margin_used, dec("2500.0000"));
+        assert_eq!(account.margin_available, dec("97750.5000"));
+        assert_eq!(account.unrealized_pnl, dec("250.5000"));
+        assert_eq!(account.currency, "USD");
+    }
+
+    #[tokio::test]
+    async fn account_fetcher_returns_none_on_server_error() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            500,
+            serde_json::json!({ "errorMessage": "boom" }),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        assert!(
+            fetcher.fetch().await.is_none(),
+            "a 500 must yield no snapshot, not a bogus zero-filled one"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_fetcher_returns_none_on_decode_error() {
+        // A 200 whose body does not match the expected schema (e.g. OANDA drift) must
+        // yield no snapshot rather than a partially/zero-filled Account.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            200,
+            serde_json::json!({ "unexpected": true }),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        assert!(
+            fetcher.fetch().await.is_none(),
+            "an unparseable 200 body must yield no snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_fetcher_returns_none_on_non_numeric_field() {
+        // A 200 that deserializes but carries a non-numeric monetary field must yield no
+        // snapshot, rather than zeroing that field (which would feed a bogus equity).
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            200,
+            account_summary_value(
+                "100000.0000",
+                "not-a-number",
+                "2500.0000",
+                "97750.5000",
+                "250.5000",
+            ),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        assert!(
+            fetcher.fetch().await.is_none(),
+            "a non-numeric NAV must yield no snapshot, not a zeroed equity"
+        );
+    }
+
+    #[tokio::test]
+    async fn order_fill_emits_account_snapshot_ordered_after_fill() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            200,
+            account_summary_value(
+                "999999.9999",
+                "100250.5000",
+                "2500.0000",
+                "97750.5000",
+                "250.5000",
+            ),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"6357","accountBalance":"100123.4500","time":"2024-01-15T10:30:00Z"}
+"#,
+        );
+
+        let mut messages = Vec::new();
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &mut messages,
+            Some(&fetcher),
+        )
+        .await;
+
+        // Order, Trade, then the account snapshot -- in that order.
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0], WsMessage::Order { .. }));
+        assert!(matches!(messages[1], WsMessage::Trade { .. }));
+        match &messages[2] {
+            WsMessage::Account {
+                event,
+                account,
+                timestamp,
+            } => {
+                assert_eq!(*event, AccountEventType::BalanceUpdated);
+                // Balance from the fill's accountBalance, NOT the summary's balance.
+                assert_eq!(account.balance, dec("100123.4500"));
+                // Equity/margin/unrealized from the summary.
+                assert_eq!(account.equity, dec("100250.5000"));
+                assert_eq!(account.margin_used, dec("2500.0000"));
+                assert_eq!(account.margin_available, dec("97750.5000"));
+                assert_eq!(account.unrealized_pnl, dec("250.5000"));
+                // Stamped with the fill's transaction time, ordered against the fill.
+                assert_eq!(
+                    *timestamp,
+                    parse_transaction_time(Some("2024-01-15T10:30:00Z"))
+                );
+            }
+            other => panic!("Expected Account snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_fills_in_one_chunk_each_get_their_own_snapshot_in_order() {
+        // The canary attributes an account snapshot to the fill that precedes it on
+        // the wire, so two fills in a single chunk must yield [F1, A1, F2, A2] -- each
+        // Account ordered immediately after its own fill, not both appended at the end.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            200,
+            account_summary_value("0.0", "100250.5000", "2500.0000", "97750.5000", "250.5000"),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"1","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"11","accountBalance":"100100.0000"}
+{"type":"ORDER_FILL","id":"2","instrument":"EUR_USD","units":"-5000","price":"1.08600","orderId":"12","accountBalance":"100200.0000"}
+"#,
+        );
+
+        let mut messages = Vec::new();
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &mut messages,
+            Some(&fetcher),
+        )
+        .await;
+
+        // [Order, Trade, Account] x2, interleaved per fill.
+        assert_eq!(messages.len(), 6);
+        assert!(matches!(messages[0], WsMessage::Order { .. }));
+        assert!(matches!(messages[1], WsMessage::Trade { .. }));
+        assert!(matches!(messages[3], WsMessage::Order { .. }));
+        assert!(matches!(messages[4], WsMessage::Trade { .. }));
+
+        // First snapshot carries the first fill's balance; second carries the second's.
+        match &messages[2] {
+            WsMessage::Account { account, .. } => assert_eq!(account.balance, dec("100100.0000")),
+            other => panic!("Expected first Account snapshot at index 2, got {other:?}"),
+        }
+        match &messages[5] {
+            WsMessage::Account { account, .. } => assert_eq!(account.balance, dec("100200.0000")),
+            other => panic!("Expected second Account snapshot at index 5, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn order_fill_emits_no_account_snapshot_when_fetch_fails() {
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            500,
+            serde_json::json!({ "errorMessage": "boom" }),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+        };
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"6357","accountBalance":"100123.4500"}
+"#,
+        );
+
+        let mut messages = Vec::new();
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &mut messages,
+            Some(&fetcher),
+        )
+        .await;
+
+        // Fill frames still emitted; no account snapshot when the summary fetch fails.
+        assert_eq!(messages.len(), 2);
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, WsMessage::Account { .. })),
+            "no account snapshot should be emitted on fetch failure"
         );
     }
 
