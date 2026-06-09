@@ -29,8 +29,8 @@ pub use types::{
     CancelledExitInfo, ErrorCategory, ExitBackupRegistration, ExitEntry, ExitEntryInfo,
     ExitEntryParams, ExitEntryStatus, ExitEntryStatusInfo, ExitHandlerConfig, ExitLegType,
     ExitOrderType, FailedExitInfo, PlaceOrderError, PlacementOutcome, PlacementResult,
-    RegisteredExitLegs, SiblingCancellation, generate_placeholder_id, opposite_side,
-    parse_placeholder_id, parse_side, side_to_str,
+    RegisteredExitLegs, generate_placeholder_id, opposite_side, parse_placeholder_id, parse_side,
+    side_to_str,
 };
 
 pub use coverage::{ExitCoverage, build_coverage, calculate_active_coverage};

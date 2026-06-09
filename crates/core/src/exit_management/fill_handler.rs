@@ -1,5 +1,8 @@
 //! Fill handling and order placement for exit orders.
 
+use std::collections::HashSet;
+use std::time::Instant;
+
 use chrono::Utc;
 use rust_decimal::Decimal;
 use smallvec::smallvec;
@@ -9,12 +12,21 @@ use crate::adapter::TradingAdapter;
 use crate::error::GatewayError;
 use crate::models::OrderRequest;
 
+use super::handler::BufferedFill;
 use super::{
     ActualOrder, ActualOrderStatus, ErrorCategory, ExitEntry, ExitEntryStatus, ExitLegType,
     PlaceOrderError, PlacementResult, calculate_active_coverage,
 };
 
 use super::ExitHandler;
+
+/// How long a fill that matched no pending exits is kept for replay. The
+/// window it must survive is one submit round-trip; 30s is generous.
+const UNMATCHED_FILL_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cap on buffered unmatched fills (every fill of a non-bracket order lands
+/// here briefly); the oldest entry is evicted when full.
+const MAX_UNMATCHED_FILLS: usize = 256;
 
 /// Parse available quantity from an insufficient balance error message.
 ///
@@ -82,20 +94,47 @@ impl ExitHandler {
         position_qty: Option<Decimal>,
         adapter: &dyn TradingAdapter,
     ) -> Vec<PlacementResult> {
-        let placeholder_ids = self.get_placeholders_for_primary(primary_order_id);
+        let _fill_guard = self.fill_processing_lock.lock().await;
 
-        if placeholder_ids.is_empty() {
-            debug!(primary_order_id, "No pending exit entries for this order");
-            return Vec::new();
-        }
-
-        // Validate quantities
+        // Validate quantities before any branch — the exit-leg path below is
+        // destructive and must not run on malformed events.
         if filled_qty <= Decimal::ZERO || total_qty <= Decimal::ZERO {
             warn!(
                 primary_order_id,
                 %filled_qty, %total_qty, "Ignoring fill with invalid quantities"
             );
             return Vec::new();
+        }
+
+        let mut placeholder_ids = self.get_placeholders_for_primary(primary_order_id);
+
+        if placeholder_ids.is_empty() {
+            // Not a registered parent. It may be one of our own exit legs
+            // filling — resolve the OCO pair off the fill event itself rather
+            // than waiting for the position-close event.
+            if self
+                .handle_exit_leg_fill(primary_order_id, filled_qty >= total_qty, adapter)
+                .await
+            {
+                return Vec::new();
+            }
+
+            // Otherwise the fill may have beaten exit registration (the
+            // submit path registers only after the broker's submit response).
+            // Buffer it for replay by `process_buffered_fill`.
+            self.buffer_unmatched_fill(primary_order_id, filled_qty, total_qty, position_qty);
+
+            // Registration may have landed between the lookup above and the
+            // buffer insert — in which case the submit task's replay already
+            // ran against an empty buffer. Reclaim the fill and process it
+            // inline; `remove` is atomic, so exactly one task wins.
+            if self.has_pending_for_primary(primary_order_id)
+                && self.unmatched_fills.remove(primary_order_id).is_some()
+            {
+                placeholder_ids = self.get_placeholders_for_primary(primary_order_id);
+            } else {
+                return Vec::new();
+            }
         }
 
         let is_partial_fill = filled_qty < total_qty;
@@ -137,6 +176,187 @@ impl ExitHandler {
         );
 
         results
+    }
+
+    /// Replay a fill that arrived before its order's exits were registered.
+    ///
+    /// Called by the submit path immediately after registering pending exits.
+    /// Returns the placement results, or empty when no fill was buffered.
+    pub async fn process_buffered_fill(
+        &self,
+        primary_order_id: &str,
+        adapter: &dyn TradingAdapter,
+    ) -> Vec<PlacementResult> {
+        let Some((_, fill)) = self.unmatched_fills.remove(primary_order_id) else {
+            return Vec::new();
+        };
+
+        info!(
+            primary_order_id,
+            "Replaying fill that arrived before exit registration"
+        );
+        self.handle_fill_internal(
+            primary_order_id,
+            fill.filled_qty,
+            fill.total_qty,
+            fill.position_qty,
+            adapter,
+        )
+        .await
+    }
+
+    /// Buffer a fill that matched no pending exits, in case its registration
+    /// is still in flight. Expired fills are swept lazily; the buffer is
+    /// capped by evicting the oldest entry.
+    fn buffer_unmatched_fill(
+        &self,
+        primary_order_id: &str,
+        filled_qty: Decimal,
+        total_qty: Decimal,
+        position_qty: Option<Decimal>,
+    ) {
+        self.sweep_unmatched_fills();
+
+        if self.unmatched_fills.len() >= MAX_UNMATCHED_FILLS {
+            let oldest = self
+                .unmatched_fills
+                .iter()
+                .min_by_key(|entry| entry.value().buffered_at)
+                .map(|entry| entry.key().clone());
+            if let Some(key) = oldest {
+                self.unmatched_fills.remove(&key);
+            }
+        }
+
+        debug!(primary_order_id, "Buffering fill with no pending exits");
+        self.unmatched_fills.insert(
+            primary_order_id.to_string(),
+            BufferedFill {
+                filled_qty,
+                total_qty,
+                position_qty,
+                buffered_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Drop buffered fills older than the TTL.
+    fn sweep_unmatched_fills(&self) {
+        self.unmatched_fills
+            .retain(|_, fill| fill.buffered_at.elapsed() <= UNMATCHED_FILL_TTL);
+    }
+
+    /// Resolve the OCO pair when one of our placed exit legs fills.
+    ///
+    /// On a full fill, the filled leg's entry is dropped and the sibling
+    /// leg's resting orders are cancelled at the provider. Partial exit fills
+    /// leave both legs resting (the position-close path remains the backstop).
+    ///
+    /// Returns whether `order_id` was recognized as a placed exit leg.
+    async fn handle_exit_leg_fill(
+        &self,
+        order_id: &str,
+        is_full_fill: bool,
+        adapter: &dyn TradingAdapter,
+    ) -> bool {
+        let Some((placeholder_id, sibling_id, primary_order_id)) =
+            self.find_entry_by_actual_order(order_id)
+        else {
+            return false;
+        };
+
+        if !is_full_fill {
+            debug!(
+                order_id,
+                placeholder_id, "Exit leg partially filled — leaving OCO pair resting"
+            );
+            return true;
+        }
+
+        info!(
+            order_id,
+            placeholder_id, "Exit leg filled — resolving OCO pair"
+        );
+
+        // The filled leg's job is done.
+        self.remove_pending_entry(&placeholder_id, &primary_order_id);
+
+        if let Some(sibling_id) = sibling_id {
+            self.cancel_exit_leg_orders(&sibling_id, &primary_order_id, adapter)
+                .await;
+        }
+        true
+    }
+
+    /// Find the pending entry owning `order_id` as one of its actual orders.
+    ///
+    /// Returns `(placeholder_id, sibling_id, primary_order_id)`.
+    fn find_entry_by_actual_order(
+        &self,
+        order_id: &str,
+    ) -> Option<(String, Option<String>, String)> {
+        self.pending_by_placeholder.iter().find_map(|entry| {
+            let e = entry.value();
+            Self::get_actual_orders_from_entry(e)
+                .iter()
+                .any(|actual| actual.order_id == order_id)
+                .then(|| {
+                    (
+                        e.placeholder_id.clone(),
+                        e.sibling_id.clone(),
+                        e.primary_order_id.clone(),
+                    )
+                })
+        })
+    }
+
+    /// Remove a pending entry from both maps.
+    fn remove_pending_entry(&self, placeholder_id: &str, primary_order_id: &str) {
+        self.pending_by_placeholder.remove(placeholder_id);
+        let to_remove: HashSet<String> = std::iter::once(placeholder_id.to_string()).collect();
+        self.remove_batch_from_secondary_index(primary_order_id, &to_remove);
+    }
+
+    /// Cancel a sibling exit leg's resting orders at the provider.
+    ///
+    /// The entry is dropped only when every active order was cancelled; on
+    /// any failure it stays tracked so the position-close path can retry.
+    async fn cancel_exit_leg_orders(
+        &self,
+        placeholder_id: &str,
+        primary_order_id: &str,
+        adapter: &dyn TradingAdapter,
+    ) {
+        let Some(entry) = self.get_entry(placeholder_id) else {
+            return;
+        };
+
+        let mut all_cancelled = true;
+        for actual in Self::get_actual_orders_from_entry(&entry) {
+            if !actual.is_active() {
+                continue;
+            }
+            match adapter.cancel_order(&actual.order_id).await {
+                Ok(_) => info!(
+                    placeholder_id,
+                    order_id = %actual.order_id,
+                    "Cancelled sibling exit leg after OCO fill"
+                ),
+                Err(e) => {
+                    all_cancelled = false;
+                    warn!(
+                        placeholder_id,
+                        order_id = %actual.order_id,
+                        error = %e,
+                        "Failed to cancel sibling exit leg — entry retained for position-close cleanup"
+                    );
+                }
+            }
+        }
+
+        if all_cancelled {
+            self.remove_pending_entry(placeholder_id, primary_order_id);
+        }
     }
 
     /// Validate an exit entry is eligible for fill processing.
@@ -296,14 +516,7 @@ impl ExitHandler {
                 } else {
                     None
                 };
-                self.handle_successful_placement(
-                    placeholder_id,
-                    &entry,
-                    placed_order,
-                    partial_fill,
-                    adapter,
-                )
-                .await
+                self.handle_successful_placement(placeholder_id, &entry, placed_order, partial_fill)
             }
             Err((err, retry_count)) => {
                 self.handle_placement_error(placeholder_id, &entry, err, retry_count)
@@ -312,18 +525,21 @@ impl ExitHandler {
         }
     }
 
-    /// Handle a successful order placement: update entry state and cancel siblings.
+    /// Handle a successful order placement by updating the entry state.
+    ///
+    /// The sibling leg is left untouched: SL and TP must rest simultaneously,
+    /// and the surviving leg is cancelled by `cancel_for_position_close` when
+    /// the position exits.
     ///
     /// `partial_fill` is `Some((filled_qty, total_qty))` for partial fills, `None` for full fills.
-    async fn handle_successful_placement(
+    fn handle_successful_placement(
         &self,
         placeholder_id: &str,
         entry: &ExitEntry,
         placed_order: crate::models::Order,
         partial_fill: Option<(Decimal, Decimal)>,
-        adapter: &dyn TradingAdapter,
     ) -> PlacementResult {
-        let order_id = placed_order.id.clone();
+        let order_id = &placed_order.id;
         let placed_qty = placed_order.quantity;
 
         info!(
@@ -343,37 +559,9 @@ impl ExitHandler {
         };
 
         if let Some((filled_qty, total_qty)) = partial_fill {
-            self.update_entry_partial_fill(
-                placeholder_id,
-                new_order.clone(),
-                filled_qty,
-                total_qty,
-            );
+            self.update_entry_partial_fill(placeholder_id, new_order, filled_qty, total_qty);
         } else {
-            self.update_entry_to_placed(placeholder_id, new_order.clone());
-        }
-
-        // Handle sibling cancellation (OCO behavior)
-        if let Some(sibling_id) = &entry.sibling_id {
-            let sibling_cancellation = self
-                .cancel_sibling_proportionally(sibling_id, placed_qty, adapter)
-                .await;
-
-            if let Some(cancellation) = &sibling_cancellation {
-                debug!(
-                    placeholder_id,
-                    sibling_id,
-                    cancelled_qty = %cancellation.qty_cancelled,
-                    "Cancelled sibling order"
-                );
-            }
-
-            return PlacementResult::success_with_sibling(
-                placeholder_id.to_string(),
-                entry.order_type,
-                placed_order.clone(),
-                sibling_cancellation,
-            );
+            self.update_entry_to_placed(placeholder_id, new_order);
         }
 
         PlacementResult::success(placeholder_id.to_string(), entry.order_type, placed_order)

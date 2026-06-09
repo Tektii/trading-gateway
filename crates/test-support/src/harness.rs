@@ -32,9 +32,11 @@ use tektii_gateway_core::api::routes::create_gateway_router;
 use tektii_gateway_core::api::state::GatewayState;
 use tektii_gateway_core::config::ReconnectionConfig;
 use tektii_gateway_core::correlation::CorrelationStore;
-use tektii_gateway_core::exit_management::ExitHandlerRegistry;
+use tektii_gateway_core::events::router::EventRouter;
+use tektii_gateway_core::exit_management::{ExitHandler, ExitHandlerRegistry, ExitHandling};
 use tektii_gateway_core::metrics::{MetricsHandle, metrics_handler};
 use tektii_gateway_core::models::TradingPlatform;
+use tektii_gateway_core::state::StateManager;
 use tektii_gateway_core::subscription::filter::SubscriptionFilter;
 use tektii_gateway_core::websocket::connection::WsConnectionManager;
 use tektii_gateway_core::websocket::messages::WsMessage;
@@ -133,6 +135,26 @@ pub async fn spawn_test_gateway(adapter: MockTradingAdapter) -> TestGateway {
 /// Like [`spawn_test_gateway`], but accepts an `Arc<MockTradingAdapter>` so the caller
 /// can retain a clone for post-test assertions (e.g., checking `cancelled_orders()`).
 pub async fn spawn_test_gateway_with_adapter(adapter: Arc<MockTradingAdapter>) -> TestGateway {
+    spawn_gateway(adapter, false).await
+}
+
+/// Spawn a full gateway with exit management wired the way production wires it.
+///
+/// Like [`spawn_test_gateway_with_adapter`], but also registers an [`ExitHandler`]
+/// for the adapter's platform and an [`EventRouter`] in the provider registry, so
+/// SL/TP attached to submitted orders are registered as pending exits and injected
+/// fill events route to the exit handler (which places synthesized exit orders
+/// through the adapter).
+pub async fn spawn_test_gateway_with_exit_management(
+    adapter: Arc<MockTradingAdapter>,
+) -> TestGateway {
+    spawn_gateway(adapter, true).await
+}
+
+async fn spawn_gateway(
+    adapter: Arc<MockTradingAdapter>,
+    with_exit_management: bool,
+) -> TestGateway {
     let platform = adapter.platform();
     let adapter: Arc<dyn TradingAdapter> = adapter;
 
@@ -153,6 +175,27 @@ pub async fn spawn_test_gateway_with_adapter(adapter: Arc<MockTradingAdapter>) -
     ));
 
     let exit_handler_registry = Arc::new(ExitHandlerRegistry::new());
+
+    if with_exit_management {
+        let state_manager = Arc::new(StateManager::new());
+        let exit_handler = Arc::new(ExitHandler::with_defaults(
+            Arc::clone(&state_manager),
+            platform,
+        ));
+        exit_handler_registry.register(platform, Arc::clone(&exit_handler));
+
+        let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(64);
+        let event_router = Arc::new(EventRouter::new(
+            state_manager,
+            exit_handler as Arc<dyn ExitHandling>,
+            broadcast_tx,
+            platform,
+        ));
+        provider_registry
+            .register_event_router(platform, event_router, Arc::clone(&adapter))
+            .await
+            .expect("register_event_router should succeed");
+    }
 
     // Build gateway state
     let state = GatewayState::new(
