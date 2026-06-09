@@ -440,6 +440,9 @@ pub enum CancelExitResultInternal {
 pub struct ExitEntryParams {
     /// ID of the primary order this exit order is attached to.
     pub primary_order_id: String,
+    /// The parent order's client-assigned ID, if any. Seeds the synthesized
+    /// exit's wire id -- see [`ExitEntry::parent_client_order_id`].
+    pub parent_client_order_id: Option<String>,
     /// Whether this is a stop-loss or take-profit order.
     pub order_type: ExitLegType,
     /// Trading symbol (e.g., "BTC/USD", "AAPL").
@@ -467,6 +470,12 @@ pub struct ExitEntry {
     pub placeholder_id: String,
     /// ID of the primary order this exit order is attached to.
     pub primary_order_id: String,
+    /// The parent order's client-assigned ID, if it carried one.
+    ///
+    /// Seeds the synthesized exit's wire `client_order_id` when present, so the
+    /// id is deterministic and identical across legs regardless of the per-leg
+    /// server-assigned `primary_order_id`. Falls back to `primary_order_id`.
+    pub parent_client_order_id: Option<String>,
     /// Whether this is a stop-loss or take-profit order.
     pub order_type: ExitLegType,
     /// Trading symbol (e.g., "BTC/USD", "AAPL").
@@ -504,6 +513,7 @@ impl std::fmt::Debug for ExitEntry {
         f.debug_struct("ExitEntry")
             .field("placeholder_id", &self.placeholder_id)
             .field("primary_order_id", &self.primary_order_id)
+            .field("parent_client_order_id", &self.parent_client_order_id)
             .field("order_type", &self.order_type)
             .field("symbol", &self.symbol)
             .field("side", &self.side)
@@ -533,6 +543,7 @@ impl ExitEntry {
         Self {
             placeholder_id,
             primary_order_id: params.primary_order_id,
+            parent_client_order_id: params.parent_client_order_id,
             order_type: params.order_type,
             symbol: params.symbol,
             side: params.side,

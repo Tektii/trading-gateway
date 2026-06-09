@@ -431,6 +431,7 @@ async fn failed_exit_entries_rebroadcast_on_reconnect() {
     let entry = ExitEntry {
         placeholder_id: "exit:sl:order-fail".into(),
         primary_order_id: "order-fail".into(),
+        parent_client_order_id: None,
         order_type: ExitLegType::StopLoss,
         symbol: "BTCUSD".into(),
         side: Side::Sell,

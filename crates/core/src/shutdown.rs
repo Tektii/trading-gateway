@@ -289,6 +289,7 @@ mod tests {
         for i in 0..n {
             let entry = ExitEntry::new(ExitEntryParams {
                 primary_order_id: format!("order-{i}"),
+                parent_client_order_id: None,
                 order_type: ExitLegType::StopLoss,
                 symbol: format!("SYM{i}"),
                 side: Side::Sell,

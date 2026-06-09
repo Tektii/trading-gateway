@@ -80,6 +80,7 @@ fn registry_with_pending(n: usize) -> Arc<ExitHandlerRegistry> {
     for i in 0..n {
         let entry = tektii_gateway_core::exit_management::types::ExitEntry::new(ExitEntryParams {
             primary_order_id: format!("order-{i}"),
+            parent_client_order_id: None,
             order_type: ExitLegType::StopLoss,
             symbol: format!("SYM{i}"),
             side: Side::Sell,

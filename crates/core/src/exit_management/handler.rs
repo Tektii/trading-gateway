@@ -396,6 +396,7 @@ impl ExitHandler {
         if let Some(sl_price) = order.stop_loss {
             let entry = ExitEntry::new(ExitEntryParams {
                 primary_order_id: primary_order_id.to_string(),
+                parent_client_order_id: order.client_order_id.clone(),
                 order_type: ExitLegType::StopLoss,
                 symbol: order.symbol.clone(),
                 side: exit_side,
@@ -417,6 +418,7 @@ impl ExitHandler {
         if let Some(tp_price) = order.take_profit {
             let entry = ExitEntry::new(ExitEntryParams {
                 primary_order_id: primary_order_id.to_string(),
+                parent_client_order_id: order.client_order_id.clone(),
                 order_type: ExitLegType::TakeProfit,
                 symbol: order.symbol.clone(),
                 side: exit_side,
@@ -695,6 +697,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_register_carries_parent_client_order_id_into_entries() {
+        let handler = create_test_handler();
+        let mut order = create_test_order_request(
+            "BTCUSD",
+            dec!(1),
+            Side::Buy,
+            Some(dec!(95)),
+            Some(dec!(110)),
+        );
+        order.client_order_id = Some("canary-9-phase-0-2".to_string());
+
+        // The server-assigned primary id is deliberately different from the
+        // parent's client id.
+        let result = handler.register("server-id-xyz", &order).unwrap();
+
+        let sl_entry = handler.get_entry(&result.stop_loss_id.unwrap()).unwrap();
+        let tp_entry = handler.get_entry(&result.take_profit_id.unwrap()).unwrap();
+
+        assert_eq!(
+            sl_entry.parent_client_order_id,
+            Some("canary-9-phase-0-2".to_string())
+        );
+        assert_eq!(
+            tp_entry.parent_client_order_id,
+            Some("canary-9-phase-0-2".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_without_client_order_id_leaves_parent_client_id_none() {
+        let handler = create_test_handler();
+        let order = create_test_order_request("BTCUSD", dec!(1), Side::Buy, Some(dec!(95)), None);
+
+        let result = handler.register("order-1", &order).unwrap();
+        let sl_entry = handler.get_entry(&result.stop_loss_id.unwrap()).unwrap();
+
+        assert_eq!(sl_entry.parent_client_order_id, None);
+    }
+
+    #[tokio::test]
     async fn test_register_both_sl_and_tp_links_siblings() {
         let handler = create_test_handler();
         let order = create_test_order_request(
@@ -765,6 +807,7 @@ mod tests {
     ) -> ExitEntry {
         let mut entry = ExitEntry::new(ExitEntryParams {
             primary_order_id: primary_order_id.to_string(),
+            parent_client_order_id: None,
             order_type,
             symbol: symbol.to_string(),
             side: Side::Sell,
