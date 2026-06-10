@@ -32,6 +32,27 @@ pub async fn mount_json(
         .await;
 }
 
+/// Mount a JSON response that is delayed by `delay` before being sent
+/// (e.g., for testing fetch-timeout handling).
+pub async fn mount_json_with_delay(
+    server: &MockServer,
+    http_method: &str,
+    url_path: &str,
+    status: u16,
+    body: serde_json::Value,
+    delay: std::time::Duration,
+) {
+    Mock::given(method(http_method))
+        .and(path(url_path))
+        .respond_with(
+            ResponseTemplate::new(status)
+                .set_body_json(body)
+                .set_delay(delay),
+        )
+        .mount(server)
+        .await;
+}
+
 /// Mount an empty response (e.g., 204 No Content for DELETE).
 pub async fn mount_empty(server: &MockServer, http_method: &str, url_path: &str, status: u16) {
     Mock::given(method(http_method))
