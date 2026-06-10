@@ -719,80 +719,6 @@ impl ExitHandlerConfig {
 }
 
 // =============================================================================
-// Sibling Cancellation
-// =============================================================================
-
-/// Result of attempting to cancel/reduce a sibling order.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct SiblingCancellation {
-    /// Placeholder ID of the sibling that was cancelled/reduced.
-    pub sibling_placeholder_id: String,
-    /// All actual order IDs that were cancelled at the provider.
-    pub actual_order_ids: Vec<String>,
-    /// Quantity that was cancelled/reduced.
-    pub qty_cancelled: Decimal,
-    /// Whether the sibling had been placed at the provider.
-    pub was_placed: bool,
-    /// Whether all cancellations succeeded.
-    pub cancel_success: bool,
-    /// Error messages if any cancellations failed.
-    pub errors: Vec<String>,
-}
-
-impl SiblingCancellation {
-    /// Create a cancellation result for a sibling that was placed at the provider (single order).
-    #[allow(dead_code)]
-    pub fn placed(
-        sibling_id: impl Into<String>,
-        actual_order_id: impl Into<String>,
-        qty: Decimal,
-        result: Result<(), crate::error::GatewayError>,
-    ) -> Self {
-        Self {
-            sibling_placeholder_id: sibling_id.into(),
-            actual_order_ids: vec![actual_order_id.into()],
-            qty_cancelled: qty,
-            was_placed: true,
-            cancel_success: result.is_ok(),
-            errors: result
-                .err()
-                .map(|e| vec![e.to_string()])
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Create a cancellation result for multiple placed orders.
-    pub fn placed_multiple(
-        sibling_id: impl Into<String>,
-        cancelled_order_ids: Vec<String>,
-        qty: Decimal,
-        errors: Vec<String>,
-    ) -> Self {
-        Self {
-            sibling_placeholder_id: sibling_id.into(),
-            actual_order_ids: cancelled_order_ids,
-            qty_cancelled: qty,
-            was_placed: true,
-            cancel_success: errors.is_empty(),
-            errors,
-        }
-    }
-
-    /// Create a cancellation result for a sibling that was still pending.
-    pub fn pending(sibling_id: impl Into<String>, qty: Decimal) -> Self {
-        Self {
-            sibling_placeholder_id: sibling_id.into(),
-            actual_order_ids: Vec::new(),
-            qty_cancelled: qty,
-            was_placed: false,
-            cancel_success: true,
-            errors: Vec::new(),
-        }
-    }
-}
-
-// =============================================================================
 // Placement Result Types
 // =============================================================================
 
@@ -805,8 +731,6 @@ pub struct PlacementResult {
     pub order_type: ExitLegType,
     /// Outcome of the placement attempt.
     pub outcome: PlacementOutcome,
-    /// Result of sibling cancellation, if applicable.
-    pub sibling_cancellation: Option<SiblingCancellation>,
 }
 
 /// Outcome of an exit order placement attempt.
@@ -866,26 +790,6 @@ impl PlacementResult {
                 actual_order_id: order.id.clone(),
                 order: Box::new(order),
             },
-            sibling_cancellation: None,
-        }
-    }
-
-    /// Create a successful placement result with sibling cancellation info.
-    #[must_use]
-    pub fn success_with_sibling(
-        placeholder_id: String,
-        order_type: ExitLegType,
-        order: crate::models::Order,
-        sibling_cancellation: Option<SiblingCancellation>,
-    ) -> Self {
-        Self {
-            placeholder_id,
-            order_type,
-            outcome: PlacementOutcome::Success {
-                actual_order_id: order.id.clone(),
-                order: Box::new(order),
-            },
-            sibling_cancellation,
         }
     }
 
@@ -901,7 +805,6 @@ impl PlacementResult {
             placeholder_id,
             order_type,
             outcome: PlacementOutcome::Failed { error, retry_count },
-            sibling_cancellation: None,
         }
     }
 
@@ -912,7 +815,6 @@ impl PlacementResult {
             placeholder_id,
             order_type,
             outcome: PlacementOutcome::AlreadyProcessed,
-            sibling_cancellation: None,
         }
     }
 
@@ -923,7 +825,6 @@ impl PlacementResult {
             placeholder_id,
             order_type,
             outcome: PlacementOutcome::Deferred { reason },
-            sibling_cancellation: None,
         }
     }
 
@@ -955,13 +856,6 @@ impl PlacementResult {
             } => Some(actual_order_id),
             _ => None,
         }
-    }
-
-    /// Get the sibling cancellation result, if any.
-    #[must_use]
-    #[allow(dead_code)]
-    pub const fn sibling_cancellation(&self) -> Option<&SiblingCancellation> {
-        self.sibling_cancellation.as_ref()
     }
 }
 

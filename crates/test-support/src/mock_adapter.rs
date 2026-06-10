@@ -26,6 +26,7 @@ use crate::models::{test_account, test_order_handle};
 /// Thread-safe via internal `Mutex`.
 pub struct MockTradingAdapter {
     platform: TradingPlatform,
+    bracket_strategy: BracketStrategy,
     orders: Mutex<HashMap<String, Order>>,
     positions: Mutex<Vec<Position>>,
     get_orders_error: Mutex<Option<GatewayError>>,
@@ -50,6 +51,7 @@ impl MockTradingAdapter {
     pub fn new(platform: TradingPlatform) -> Self {
         Self {
             platform,
+            bracket_strategy: BracketStrategy::None,
             orders: Mutex::new(HashMap::new()),
             positions: Mutex::new(Vec::new()),
             get_orders_error: Mutex::new(None),
@@ -100,6 +102,13 @@ impl MockTradingAdapter {
     #[must_use]
     pub fn with_get_positions_error(self, error: GatewayError) -> Self {
         *self.get_positions_error.lock().expect("lock") = Some(error);
+        self
+    }
+
+    /// Set the strategy returned by `bracket_strategy()` (defaults to `None`).
+    #[must_use]
+    pub const fn with_bracket_strategy(mut self, strategy: BracketStrategy) -> Self {
+        self.bracket_strategy = strategy;
         self
     }
 
@@ -227,7 +236,7 @@ impl ProviderCapabilities for MockTradingAdapter {
     }
 
     fn bracket_strategy(&self, _order: &OrderRequest) -> BracketStrategy {
-        BracketStrategy::None
+        self.bracket_strategy
     }
 
     fn capabilities(&self) -> Capabilities {

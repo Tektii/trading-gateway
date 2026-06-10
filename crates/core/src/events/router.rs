@@ -3319,7 +3319,6 @@ mod tests {
             outcome: PlacementOutcome::Deferred {
                 reason: "Circuit breaker open — exit placement suspended".to_string(),
             },
-            sibling_cancellation: None,
         }];
 
         router

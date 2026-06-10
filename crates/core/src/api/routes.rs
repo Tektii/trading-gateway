@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
 };
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -140,6 +140,8 @@ pub async fn submit_order(
 
     let mut handle = result?;
 
+    register_pending_exits(&state, &request, &handle.id).await;
+
     metrics::counter!(
         "gateway_orders_submitted_total",
         "platform" => platform.header_value(),
@@ -161,6 +163,84 @@ pub async fn submit_order(
     );
 
     Ok((axum::http::StatusCode::CREATED, Json(handle)))
+}
+
+/// Register attached SL/TP as pending exits when the platform relies on the
+/// gateway to synthesize them (`PendingSlTp`).
+///
+/// Native-bracket/OCO platforms skip registration — the broker manages the
+/// exits itself. Registration failures are logged rather than returned: the
+/// parent order is already live at the broker, so the submission must still
+/// report success. A fill that raced ahead of registration is replayed from
+/// the exit handler's unmatched-fill buffer.
+async fn register_pending_exits(state: &GatewayState, request: &OrderRequest, order_id: &str) {
+    use crate::adapter::BracketStrategy;
+
+    if request.stop_loss.is_none() && request.take_profit.is_none() {
+        return;
+    }
+
+    let adapter = state.adapter();
+    if adapter.capabilities().bracket_strategy(request) != BracketStrategy::PendingSlTp {
+        return;
+    }
+
+    let platform = state.platform();
+    let Some(exit_handler) = state.exit_handler_registry().get(&platform) else {
+        error!(
+            order_id,
+            %platform,
+            "No exit handler registered for platform — SL/TP will not be placed"
+        );
+        return;
+    };
+
+    // A broker that dedupes a retried submit can hand back an order id that is
+    // already registered; re-registering would double the exit quantity.
+    if exit_handler.has_pending_for_primary(order_id) {
+        info!(order_id, "Pending exits already registered — skipping");
+        return;
+    }
+
+    match exit_handler.register(order_id, request) {
+        Ok(legs) => {
+            info!(
+                order_id,
+                stop_loss_registered = legs.stop_loss_id.is_some(),
+                take_profit_registered = legs.take_profit_id.is_some(),
+                "Registered pending SL/TP exits"
+            );
+
+            // The fill may have arrived on the event stream before this
+            // registration; if so it was buffered — replay it now. Unlike
+            // fills processed on the event-router task, replay failures are
+            // log-only: the route has no broadcaster to push
+            // PositionUnprotected to the strategy.
+            let replayed = exit_handler
+                .process_buffered_fill(order_id, adapter.as_ref())
+                .await;
+            let failed = replayed.iter().filter(|r| r.is_failed()).count();
+            if failed > 0 {
+                error!(
+                    order_id,
+                    failed, "Replayed buffered fill but some exit placements failed"
+                );
+            } else if !replayed.is_empty() {
+                info!(
+                    order_id,
+                    placed = replayed.len(),
+                    "Replayed buffered fill for newly registered exits"
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                order_id,
+                error = %e,
+                "Failed to register pending SL/TP exits — position may be unprotected"
+            );
+        }
+    }
 }
 
 /// Get order by ID.

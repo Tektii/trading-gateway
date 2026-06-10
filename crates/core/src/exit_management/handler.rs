@@ -86,10 +86,30 @@ pub trait ExitHandling: Send + Sync {
 // ExitHandler Struct
 // =============================================================================
 
+/// A fill that arrived before its order's exits were registered.
+///
+/// Submission registers exits only after the broker's submit response, so a
+/// fast fill can beat registration on the WebSocket stream. Such fills are
+/// buffered here and replayed by `process_buffered_fill` right after
+/// registration.
+#[derive(Debug, Clone)]
+pub(super) struct BufferedFill {
+    pub(super) filled_qty: Decimal,
+    pub(super) total_qty: Decimal,
+    pub(super) position_qty: Option<Decimal>,
+    pub(super) buffered_at: std::time::Instant,
+}
+
 /// Each adapter has its own `ExitHandler`, isolating exit order state per provider.
 pub struct ExitHandler {
     pub(super) pending_by_placeholder: DashMap<String, ExitEntry>,
     pub(super) pending_by_primary: DashMap<String, Vec<String>>,
+    pub(super) unmatched_fills: DashMap<String, BufferedFill>,
+    /// Serializes fill processing. Fills normally arrive on the event-router
+    /// task, but `process_buffered_fill` runs on the submit task; interleaved
+    /// processing of successive fills for the same parent could double-place
+    /// exits.
+    pub(super) fill_processing_lock: tokio::sync::Mutex<()>,
     #[allow(dead_code)]
     state_manager: Arc<StateManager>,
     pub(super) config: ExitHandlerConfig,
@@ -126,6 +146,8 @@ impl ExitHandler {
         Self {
             pending_by_placeholder: DashMap::new(),
             pending_by_primary: DashMap::new(),
+            unmatched_fills: DashMap::new(),
+            fill_processing_lock: tokio::sync::Mutex::new(()),
             state_manager,
             config,
             circuit_breaker: RwLock::new(circuit_breaker),
@@ -297,10 +319,14 @@ impl ExitHandler {
 
     /// Insert an exit entry directly.
     ///
-    /// In production code, entries are created via `register_exit_orders`.
+    /// In production code, entries are created via `register`.
     /// Made `pub` under `test-utils` for integration test setup.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn insert_entry(&self, entry: ExitEntry) {
+        self.insert_entry_inner(entry);
+    }
+
+    fn insert_entry_inner(&self, entry: ExitEntry) {
         let placeholder_id = entry.placeholder_id.clone();
         let primary_order_id = entry.primary_order_id.clone();
 
@@ -309,11 +335,6 @@ impl ExitHandler {
         self.add_to_secondary_index(&primary_order_id, &placeholder_id);
     }
 
-    #[cfg(not(any(test, feature = "test-utils")))]
-    #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
-    pub(crate) fn insert_entry(&self, _entry: ExitEntry) {}
-
-    #[cfg(any(test, feature = "test-utils"))]
     fn add_to_secondary_index(&self, primary_order_id: &str, placeholder_id: &str) {
         self.pending_by_primary
             .entry(primary_order_id.to_string())
@@ -407,7 +428,7 @@ impl ExitHandler {
             });
 
             let placeholder_id = entry.placeholder_id.clone();
-            self.insert_entry(entry);
+            self.insert_entry_inner(entry);
             result.stop_loss_id = Some(placeholder_id.clone());
             debug!(
                 primary_order_id,
@@ -429,7 +450,7 @@ impl ExitHandler {
             });
 
             let placeholder_id = entry.placeholder_id.clone();
-            self.insert_entry(entry);
+            self.insert_entry_inner(entry);
             result.take_profit_id = Some(placeholder_id.clone());
             debug!(
                 primary_order_id,

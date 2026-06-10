@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use chrono::Utc;
-use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 
 use crate::adapter::TradingAdapter;
@@ -12,7 +11,6 @@ use crate::error::GatewayError;
 
 use super::{
     ActualOrder, CancelExitResultInternal, CancellationReason, CancelledExitInfo, ExitEntryStatus,
-    SiblingCancellation,
 };
 
 use super::ExitHandler;
@@ -368,84 +366,5 @@ impl ExitHandler {
         let cleaned_count = expired_placeholders.len();
         info!(cleaned_count, "TTL cleanup complete");
         cleaned_count
-    }
-
-    /// Cancel sibling order proportionally (OCO behavior).
-    ///
-    /// When one leg is placed, the sibling should be reduced by the same amount.
-    /// Uses optimistic concurrency control via version checking to prevent TOCTOU races.
-    pub(super) async fn cancel_sibling_proportionally(
-        &self,
-        sibling_id: &str,
-        qty_to_cancel: Decimal,
-        adapter: &dyn TradingAdapter,
-    ) -> Option<SiblingCancellation> {
-        // Capture entry and its version atomically
-        let (sibling_entry, expected_version) = match self.pending_by_placeholder.get(sibling_id) {
-            Some(entry) => (entry.value().clone(), entry.version()),
-            None => return None,
-        };
-
-        // Get sibling's actual orders
-        let actual_orders = Self::get_actual_orders_from_entry(&sibling_entry);
-
-        if actual_orders.is_empty() {
-            // Sibling not yet placed - just reduce pending quantity
-            if let Some(mut entry) = self.pending_by_placeholder.get_mut(sibling_id) {
-                // Verify version hasn't changed (optimistic concurrency control)
-                if entry.version() != expected_version {
-                    tracing::warn!(
-                        sibling_id = %sibling_id,
-                        expected_version = %expected_version,
-                        actual_version = %entry.version(),
-                        "Sibling entry was modified concurrently, skipping update"
-                    );
-                    return None;
-                }
-
-                let new_qty = (entry.quantity - qty_to_cancel).max(Decimal::ZERO);
-                if new_qty < self.config.min_exit_order_qty {
-                    // Cancel entirely if below threshold
-                    entry.set_status(ExitEntryStatus::Cancelled {
-                        cancelled_at: Utc::now(),
-                        reason: CancellationReason::SiblingFilled,
-                    });
-                } else {
-                    entry.quantity = new_qty;
-                    entry.increment_version();
-                }
-            }
-            return Some(SiblingCancellation::pending(sibling_id, qty_to_cancel));
-        }
-
-        // Sibling has placed orders - cancel them at provider
-        let mut cancelled_order_ids = Vec::new();
-        let mut errors = Vec::new();
-
-        for actual_order in &actual_orders {
-            match adapter.cancel_order(&actual_order.order_id).await {
-                Ok(_) => {
-                    cancelled_order_ids.push(actual_order.order_id.clone());
-                }
-                Err(e) => {
-                    errors.push(format!("{}: {}", actual_order.order_id, e));
-                }
-            }
-        }
-
-        // Update sibling status
-        if let Some(mut entry) = self.pending_by_placeholder.get_mut(sibling_id) {
-            entry.set_status(ExitEntryStatus::Cancelled {
-                cancelled_at: Utc::now(),
-                reason: CancellationReason::SiblingFilled,
-            });
-        }
-
-        Some(SiblingCancellation::placed_multiple(
-            sibling_id,
-            cancelled_order_ids,
-            qty_to_cancel,
-            errors,
-        ))
     }
 }
