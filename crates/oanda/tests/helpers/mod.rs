@@ -94,6 +94,29 @@ pub fn oanda_pending_order_json(overrides: &Value) -> Value {
     base
 }
 
+/// Oanda IOC limit miss response: the order is created and synchronously
+/// cancelled in the same request, so the response carries both an
+/// `orderCreateTransaction` and an `orderCancelTransaction`.
+pub fn oanda_ioc_cancel_json() -> Value {
+    json!({
+        "orderCreateTransaction": {
+            "id": "1981",
+            "type": "LIMIT_ORDER",
+            "instrument": "EUR_USD",
+            "units": "10000",
+            "timeInForce": "IOC",
+            "time": "2024-01-15T10:30:00.000000000Z"
+        },
+        "orderCancelTransaction": {
+            "id": "1982",
+            "type": "ORDER_CANCEL",
+            "orderID": "1981",
+            "reason": "TIME_IN_FORCE_EXPIRED",
+            "time": "2024-01-15T10:30:00.000000000Z"
+        }
+    })
+}
+
 /// Oanda order rejection response.
 pub fn oanda_reject_json(reason: &str) -> Value {
     json!({
