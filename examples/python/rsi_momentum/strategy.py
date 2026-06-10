@@ -19,9 +19,9 @@ Environment variables
 ===================  ==============  ==============================================
 Name                 Default         Description
 ===================  ==============  ==============================================
-ORDER_QUANTITY       0.01            Fixed instrument quantity, NOT a fraction of
-                                     capital — see "Position sizing" below
-                                     (fractional allowed on forex/crypto)
+ORDER_EQUITY_FRACTION 0.10           Position size as a fraction of account equity
+                                     (0.10 = 10%). Sized at the signal-bar price
+                                     each entry — see "Position sizing" below
 RSI_PERIOD           14              RSI lookback, in bars (Wilder's smoothing)
 RSI_OVERSOLD         30              Enter long when RSI crosses below this
 RSI_OVERBOUGHT       70              Exit long when RSI crosses above this
@@ -36,19 +36,27 @@ TRADING_GATEWAY_API_KEY       (unset)         API key for remote gateways (read 
 
 Position sizing
 ---------------
-``ORDER_QUANTITY`` is a **fixed instrument quantity** (e.g. 0.01 units of the
-symbol) — *not* a fraction of capital. On the engine's default ~100k starting
-capital, a small fixed size like 0.01 is a near-zero position, so the template
-defaults produce near-zero returns and a meaningless Sharpe until you hand-size
-``ORDER_QUANTITY`` to the instrument's price.
+Each entry trades a **fraction of account equity** — ``ORDER_EQUITY_FRACTION``
+(default 0.10 = 10%). The size scales with the account, so the same fraction
+trades a sensible position at any capital and on any instrument.
 
-To size by notional or percentage of equity instead, use the SDK helper
-(``tektii`` >= 1.6.0), which returns a quantity at the current price. Size
-against the bar's own symbol inside ``on_candle``::
+The SDK helper ``gw.quantity_for_notional`` (``tektii`` >= 1.6.0) does the
+maths: it reads account equity and divides by a reference price. Pass the bar
+close as ``price`` to use it directly and skip a separate quote request::
 
-    qty = await gw.quantity_for_notional(bar.symbol, notional="5000")
-    # or a share of equity:
-    qty = await gw.quantity_for_notional(bar.symbol, equity_fraction="0.10")
+    qty = await gw.quantity_for_notional(
+        bar.symbol, equity_fraction="0.10", price=bar.close
+    )
+
+To trade a fixed cash amount instead, pass ``notional="5000"`` in place of
+``equity_fraction``.
+
+Because the size depends on the entry price, the position quantity is stored on
+entry and sold in full on the overbought exit.
+
+The helper returns a full-precision quantity. The mock provider used in
+backtests accepts it as-is; real brokers (Alpaca, Binance, Oanda) require it
+rounded to the instrument's lot size before submitting.
 
 Local run
 ---------
@@ -96,7 +104,7 @@ log = logging.getLogger("rsi_momentum")
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    quantity: Decimal
+    equity_fraction: Decimal
     period: int
     oversold: Decimal
     overbought: Decimal
@@ -112,7 +120,7 @@ class Config:
 
         try:
             cfg = cls(
-                quantity=Decimal(os.environ.get("ORDER_QUANTITY", "0.01")),
+                equity_fraction=Decimal(os.environ.get("ORDER_EQUITY_FRACTION", "0.10")),
                 period=int(os.environ.get("RSI_PERIOD", "14")),
                 oversold=Decimal(os.environ.get("RSI_OVERSOLD", "30")),
                 overbought=Decimal(os.environ.get("RSI_OVERBOUGHT", "70")),
@@ -122,6 +130,8 @@ class Config:
             )
         except (ValueError, ArithmeticError) as err:
             raise SystemExit(f"Invalid configuration: {err}") from err
+        if cfg.equity_fraction <= 0:
+            raise SystemExit("ORDER_EQUITY_FRACTION must be positive")
         if cfg.period <= 1:
             raise SystemExit("RSI_PERIOD must be > 1")
         if not (Decimal(0) < cfg.oversold < cfg.overbought < Decimal(100)):
@@ -271,6 +281,9 @@ class RsiMomentumStrategy:
         self._zone = Zone.UNKNOWN
         self._state = StrategyState.FLAT
         self._warmed_up = False
+        # Quantity of the open position, set on a clean entry submit and sold
+        # in full on exit. None while flat.
+        self._position_qty: Decimal | None = None
 
     async def warm_up(self, symbol: str) -> None:
         """Seed the Wilder RSI state from historical bars for ``symbol``.
@@ -355,38 +368,65 @@ class RsiMomentumStrategy:
             await self._exit_long(symbol=bar.symbol, rsi=rsi)
 
     async def _enter_long(self, *, symbol: str, entry_ref: Decimal, rsi: Decimal) -> None:
+        # Sizing divides equity by the price, so a non-positive price has no
+        # valid size. Skip the entry.
+        if entry_ref <= 0:
+            log.warning(
+                "non-positive reference price %s on %s, skipping entry",
+                entry_ref, symbol,
+            )
+            return
+        # Size the order as a fraction of account equity. Passing the bar close
+        # as ``price`` avoids a separate quote request. If sizing fails (e.g.
+        # the account fetch errors), skip this entry instead of crashing.
+        try:
+            quantity = await self._gw.quantity_for_notional(
+                symbol, equity_fraction=self._cfg.equity_fraction, price=entry_ref
+            )
+        except TektiiError as err:
+            log.warning("position sizing failed, skipping entry: %s", err)
+            return  # could not size: stay FLAT
         sl, tp = bracket_prices(
             entry_ref, self._cfg.stop_loss_pct, self._cfg.take_profit_pct
         )
         self._state = StrategyState.PENDING_ENTRY
         log.info(
             "oversold on %s rsi=%s: submitting BUY qty=%s sl=%s tp=%s",
-            symbol, rsi, self._cfg.quantity, sl, tp,
+            symbol, rsi, quantity, sl, tp,
         )
         try:
             handle = await self._gw.submit_order(
                 symbol=symbol,
                 side="buy",
-                quantity=self._cfg.quantity,
+                quantity=quantity,
                 stop_loss=sl,
                 take_profit=tp,
             )
+            # Submit accepted — record the quantity so the exit can sell the
+            # whole position.
+            self._position_qty = quantity
             log.info("order accepted id=%s status=%s", handle.id, handle.status)
         except OrderRejectedError as err:
             log.warning("order rejected code=%s message=%s", err.code, err.message)
             self._state = StrategyState.FLAT
 
     async def _exit_long(self, *, symbol: str, rsi: Decimal) -> None:
+        quantity = self._position_qty
+        # A LONG position always has a recorded quantity; guard against selling
+        # an unknown size.
+        if quantity is None:
+            log.error("exit requested on %s with no tracked quantity; staying LONG", symbol)
+            return
         self._state = StrategyState.PENDING_EXIT
         log.info(
             "overbought on %s rsi=%s: submitting SELL qty=%s",
-            symbol, rsi, self._cfg.quantity,
+            symbol, rsi, quantity,
         )
         try:
             handle = await self._gw.submit_order(
                 symbol=symbol,
                 side="sell",
-                quantity=self._cfg.quantity,
+                quantity=quantity,
             )
             log.info("order accepted id=%s status=%s", handle.id, handle.status)
         except OrderRejectedError as err:
@@ -411,18 +451,20 @@ class RsiMomentumStrategy:
                 # SELL fills also arrive when the bracket SL or TP closes
                 # the position — treat either as "we're flat again."
                 self._state = StrategyState.FLAT
+                self._position_qty = None
         elif event.event in ("ORDER_REJECTED", "ORDER_CANCELLED", "ORDER_EXPIRED"):
             if self._state == StrategyState.PENDING_ENTRY:
                 self._state = StrategyState.FLAT
+                self._position_qty = None
             elif self._state == StrategyState.PENDING_EXIT:
                 self._state = StrategyState.LONG
 
     async def run(self) -> None:
         log.info(
-            "starting RSI momentum period=%d oversold=%s overbought=%s qty=%s "
-            "(symbol learned from the stream)",
+            "starting RSI momentum period=%d oversold=%s overbought=%s "
+            "equity_fraction=%s (symbol learned from the stream)",
             self._cfg.period, self._cfg.oversold,
-            self._cfg.overbought, self._cfg.quantity,
+            self._cfg.overbought, self._cfg.equity_fraction,
         )
         async with self._gw.stream() as events:
             async for event in events:
