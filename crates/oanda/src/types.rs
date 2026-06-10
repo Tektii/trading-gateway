@@ -85,7 +85,8 @@ pub struct OandaOrder {
     #[serde(default)]
     pub trailing_stop_loss_on_fill: Option<OandaTrailingStopLossOnFill>,
     /// Trade ID this order is attached to (for dependent orders like SL/TP).
-    #[serde(default)]
+    /// Wire spelling is `tradeID` (capital ID).
+    #[serde(default, rename = "tradeID")]
     pub trade_id: Option<String>,
     /// Client extensions.
     #[serde(default)]
@@ -134,11 +135,12 @@ pub struct OandaTransaction {
     /// Transaction time (RFC 3339).
     #[serde(default)]
     pub time: Option<String>,
-    /// Related order ID.
-    #[serde(default)]
+    /// Related order ID. OANDA spells the wire field `orderID` (capital ID),
+    /// so it needs an explicit rename rather than the container camelCase.
+    #[serde(default, rename = "orderID")]
     pub order_id: Option<String>,
-    /// Trade that was opened or closed.
-    #[serde(default)]
+    /// Trade that was opened or closed. Wire spelling is `tradeID`.
+    #[serde(default, rename = "tradeID")]
     pub trade_id: Option<String>,
     /// Reason for this transaction.
     #[serde(default)]
@@ -500,8 +502,9 @@ pub struct OandaTransactionStreamLine {
     /// Transaction time (RFC 3339).
     #[serde(default)]
     pub time: Option<String>,
-    /// Related order ID.
-    #[serde(default)]
+    /// Related order ID. OANDA spells the wire field `orderID` (capital ID),
+    /// so it needs an explicit rename rather than the container camelCase.
+    #[serde(default, rename = "orderID")]
     pub order_id: Option<String>,
     /// Client-assigned ID of the related order, when it carries client
     /// extensions. OANDA spells the wire field `clientOrderID` (capital ID),
@@ -626,7 +629,7 @@ mod tests {
             "type": "STOP_LOSS",
             "state": "PENDING",
             "createTime": "2024-01-15T10:30:00.000000000Z",
-            "tradeId": "99",
+            "tradeID": "99",
             "price": "1.08000"
         }"#;
         let order: OandaOrder = serde_json::from_str(json).unwrap();
@@ -654,8 +657,8 @@ mod tests {
                 "units": "10000",
                 "price": "1.08525",
                 "time": "2024-01-15T10:30:00.000000000Z",
-                "orderId": "6357",
-                "tradeId": "6358"
+                "orderID": "6357",
+                "tradeID": "6358"
             }
         }"#;
         let resp: OandaCreateOrderResponse = serde_json::from_str(json).unwrap();
@@ -664,6 +667,8 @@ mod tests {
         assert!(resp.order_reject_transaction.is_none());
         let fill = resp.order_fill_transaction.unwrap();
         assert_eq!(fill.price.as_deref(), Some("1.08525"));
+        assert_eq!(fill.order_id.as_deref(), Some("6357"));
+        assert_eq!(fill.trade_id.as_deref(), Some("6358"));
     }
 
     #[test]
@@ -891,8 +896,8 @@ mod tests {
             "units": "10000",
             "price": "1.08525",
             "time": "2024-01-15T10:30:00.000000000Z",
-            "orderId": "6357",
-            "tradeId": "6358"
+            "orderID": "6357",
+            "tradeID": "6358"
         }"#;
         let tx: OandaTransaction = serde_json::from_str(json).unwrap();
         assert_eq!(tx.id, "6360");
@@ -953,13 +958,14 @@ mod tests {
             "units": "10000",
             "price": "1.08525",
             "time": "2024-01-15T10:30:00.000000000Z",
-            "orderId": "6357",
+            "orderID": "6357",
             "reason": "MARKET_ORDER"
         }"#,
         )
         .unwrap();
         assert_eq!(tx.id.as_deref(), Some("6360"));
         assert_eq!(tx.transaction_type, "ORDER_FILL");
+        assert_eq!(tx.order_id.as_deref(), Some("6357"));
         assert_eq!(tx.instrument.as_deref(), Some("EUR_USD"));
         assert_eq!(tx.units.as_deref(), Some("10000"));
         assert_eq!(tx.price.as_deref(), Some("1.08525"));
@@ -972,7 +978,7 @@ mod tests {
             "id": "6365",
             "type": "ORDER_CANCEL",
             "instrument": "EUR_USD",
-            "orderId": "6356",
+            "orderID": "6356",
             "time": "2024-01-15T11:00:00.000000000Z",
             "reason": "CLIENT_REQUEST"
         }"#;

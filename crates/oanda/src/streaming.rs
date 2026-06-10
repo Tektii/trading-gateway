@@ -1899,7 +1899,7 @@ mod tests {
             WsMessage::Order { order, .. } => {
                 assert_eq!(order.side, Side::Sell);
                 assert_eq!(order.quantity, Decimal::from(5000));
-                // No orderId => use transaction id.
+                // No orderID => use transaction id.
                 assert_eq!(order.id, "6361");
             }
             other => panic!("Expected Order event, got {other:?}"),
@@ -1950,7 +1950,7 @@ mod tests {
     #[test]
     fn transaction_stream_line_parses_client_order_id() {
         // OANDA spells the wire field `clientOrderID` (capital ID).
-        let line = r#"{"type":"ORDER_FILL","id":"6401","orderId":"6400","clientOrderID":"strat-42-tp","instrument":"EUR_USD","units":"-10000","price":"1.09500"}"#;
+        let line = r#"{"type":"ORDER_FILL","id":"6401","orderID":"6400","clientOrderID":"strat-42-tp","instrument":"EUR_USD","units":"-10000","price":"1.09500"}"#;
         let tx: OandaTransactionStreamLine = serde_json::from_str(line).unwrap();
         assert_eq!(tx.client_order_id.as_deref(), Some("strat-42-tp"));
     }
@@ -2281,7 +2281,7 @@ mod tests {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(
             br#"{"type":"HEARTBEAT","time":"2024-01-15T10:30:05.000000000Z","lastTransactionID":"6360"}
-{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"6357"}
+{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
 "#,
         );
 
@@ -2620,7 +2620,7 @@ mod tests {
 
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(
-            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"6357","accountBalance":"100123.4500","time":"2024-01-15T10:30:00Z"}
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357","accountBalance":"100123.4500","time":"2024-01-15T10:30:00Z"}
 "#,
         );
 
@@ -2688,8 +2688,8 @@ mod tests {
 
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(
-            br#"{"type":"ORDER_FILL","id":"1","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"11","accountBalance":"100100.0000"}
-{"type":"ORDER_FILL","id":"2","instrument":"EUR_USD","units":"-5000","price":"1.08600","orderId":"12","accountBalance":"100200.0000"}
+            br#"{"type":"ORDER_FILL","id":"1","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"11","accountBalance":"100100.0000"}
+{"type":"ORDER_FILL","id":"2","instrument":"EUR_USD","units":"-5000","price":"1.08600","orderID":"12","accountBalance":"100200.0000"}
 "#,
         );
 
@@ -2744,7 +2744,7 @@ mod tests {
 
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(
-            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderId":"6357","accountBalance":"100123.4500"}
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357","accountBalance":"100123.4500"}
 "#,
         );
 

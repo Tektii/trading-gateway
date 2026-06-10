@@ -1069,8 +1069,12 @@ impl TradingAdapter for OandaAdapter {
             // client_order_id so a strategy can match it to the order it placed.
             self.emit_rest_fill(request, fill).await;
             self.emit_rest_fill_account_snapshot(fill).await;
+            // Handle id = the fill's `orderID` (the create transaction id),
+            // matching the id `emit_rest_fill` publishes, so the handle and
+            // the strategy-visible fill event always agree. Fall back to the
+            // fill transaction id only if the wire omits `orderID`.
             (
-                fill.id.clone(),
+                fill.order_id.clone().unwrap_or_else(|| fill.id.clone()),
                 tektii_gateway_core::models::OrderStatus::Filled,
             )
         } else if let Some(ref cancel) = resp.order_cancel_transaction {
