@@ -8,8 +8,8 @@ gateway or the backtest engine.
 
 | Template | Style | Defaults |
 |---|---|---|
-| [`python/ma_crossover`](python/ma_crossover/) | Trend-following (SMA 10 × SMA 20 crossover, optional bracket SL/TP) | `ORDER_QUANTITY=0.01` |
-| [`python/rsi_momentum`](python/rsi_momentum/) | Mean-reversion (RSI 14, oversold/overbought zone entries, optional bracket SL/TP) | `ORDER_QUANTITY=0.01` |
+| [`python/ma_crossover`](python/ma_crossover/) | Trend-following (SMA 10 × SMA 20 crossover, optional bracket SL/TP) | `ORDER_EQUITY_FRACTION=0.10` |
+| [`python/rsi_momentum`](python/rsi_momentum/) | Mean-reversion (RSI 14, oversold/overbought zone entries, optional bracket SL/TP) | `ORDER_EQUITY_FRACTION=0.10` |
 
 Both templates are **symbol-agnostic** — they trade whatever instrument the
 run is subscribed to, learned from the incoming stream. There is no symbol to
@@ -21,22 +21,13 @@ Each template lives in its own directory with `strategy.py`, `test_strategy.py`,
 `strategy.py` is the per-template README — it lists every environment
 variable, the local-run command, and the docker command.
 
-## Position sizing — `ORDER_QUANTITY` is not a fraction of capital
+## Position sizing
 
-`ORDER_QUANTITY` (default `0.01`) is a **fixed instrument quantity** — 0.01
-units of the symbol — *not* a fraction of capital. On the engine's default
-~100k starting capital, a small fixed size like `0.01` is a near-zero position,
-so the template defaults produce near-zero returns and a meaningless Sharpe
-until you hand-size `ORDER_QUANTITY` to the instrument's price.
-
-To size by notional or percentage of equity instead, reach for the SDK helper
-(`tektii` >= 1.6.0), which returns a quantity at the current price:
-
-```python
-qty = await gw.quantity_for_notional(bar.symbol, notional="5000")
-# or a share of equity:
-qty = await gw.quantity_for_notional(bar.symbol, equity_fraction="0.10")
-```
+Both templates size each entry as a **fraction of account equity**
+(`ORDER_EQUITY_FRACTION`, default `0.10` = 10%), so the defaults trade a
+sensible position at any capital and on any instrument. Full sizing details,
+including the SDK helper that converts equity fraction or notional to a
+quantity, live in each template's `strategy.py` docstring.
 
 ## Running a template locally
 
