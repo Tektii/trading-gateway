@@ -53,6 +53,44 @@ async fn submit_market_order_fill() {
 }
 
 #[tokio::test]
+async fn submit_market_order_fill_uses_wire_order_id() {
+    // OANDA spells the wire field `orderID` (capital ID). The handle and the
+    // emitted fill event must both carry that order id — which is the create
+    // transaction id — not the ORDER_FILL transaction id.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"orderID": "455"})),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "455", "handle carries the wire order id");
+    assert_eq!(handle.status, OrderStatus::Filled);
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = event.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderFilled);
+    assert_eq!(order.id, "455", "fill event carries the wire order id");
+}
+
+#[tokio::test]
 async fn submit_market_order_fill_emits_account_snapshot() {
     // A synchronous REST fill must be followed by exactly one account
     // snapshot on the strategy stream: balance from the fill's own
