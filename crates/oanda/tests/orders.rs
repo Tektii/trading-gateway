@@ -385,6 +385,226 @@ async fn submit_fill_takes_precedence_over_cancel() {
 }
 
 #[tokio::test]
+async fn submit_partial_ioc_fill_reports_partial_then_cancel() {
+    // OANDA reports a partially filled IOC as a fill transaction carrying the
+    // filled units plus a cancel transaction for the dead remainder, in the
+    // same create response. Strategies must see the real quantities — a
+    // partial fill event followed by a terminal cancel — never a full fill.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    let mut body = oanda_market_fill_json(&json!({"units": "6000", "orderID": "455"}));
+    body["orderCancelTransaction"] = json!({
+        "id": "457",
+        "type": "ORDER_CANCEL",
+        "orderID": "455",
+        "reason": "TIME_IN_FORCE_EXPIRED",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    });
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        body,
+    )
+    .await;
+    // Healthy summary so the account snapshot actually emits — pinning that it
+    // follows the order frames (partial fill, then cancel) rather than
+    // interleaving them.
+    mount_json(
+        &server,
+        "GET",
+        "/v3/accounts/test-account-123/summary",
+        200,
+        oanda_account_json(),
+    )
+    .await;
+
+    let request = OrderRequest {
+        limit_price: Some(dec!(1.10000)),
+        time_in_force: TimeInForce::Ioc,
+        client_order_id: Some("client-ioc-2".to_string()),
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Limit, dec!(10000))
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "455");
+    assert_eq!(handle.status, OrderStatus::PartiallyFilled);
+
+    let first = rx.try_recv().expect("partial fill event published");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = first.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderPartiallyFilled);
+    assert_eq!(order.status, OrderStatus::PartiallyFilled);
+    assert_eq!(order.id, "455");
+    assert_eq!(order.client_order_id.as_deref(), Some("client-ioc-2"));
+    assert_eq!(order.filled_quantity, dec!(6000));
+    assert_eq!(order.remaining_quantity, dec!(4000));
+    assert_eq!(order.average_fill_price, Some(dec!(1.10000)));
+
+    let second = rx.try_recv().expect("terminal cancel event published");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = second.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderCancelled);
+    assert_eq!(order.status, OrderStatus::Cancelled);
+    assert_eq!(order.id, "455");
+    assert_eq!(order.client_order_id.as_deref(), Some("client-ioc-2"));
+    assert_eq!(order.filled_quantity, dec!(6000));
+    assert_eq!(order.remaining_quantity, dec!(4000));
+    assert_eq!(order.average_fill_price, Some(dec!(1.10000)));
+
+    let third = rx.try_recv().expect("account snapshot follows the cancel");
+    let WsMessage::Account { event, .. } = third.msg else {
+        panic!("expected an account event after the order frames");
+    };
+    assert_eq!(event, AccountEventType::BalanceUpdated);
+
+    assert!(rx.try_recv().is_err(), "exactly three events expected");
+}
+
+#[tokio::test]
+async fn submit_fill_missing_units_falls_back_to_full_fill() {
+    // Defensive path: a fill transaction without a `units` field (not observed
+    // from OANDA in practice) keeps the pre-existing full-fill report.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"units": null})),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.status, OrderStatus::Filled);
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = event.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderFilled);
+    assert_eq!(order.filled_quantity, dec!(10000));
+    assert_eq!(order.remaining_quantity, Decimal::ZERO);
+}
+
+#[tokio::test]
+async fn submit_partial_ioc_fill_sell_side_uses_abs_units() {
+    // Sell fills carry negative units on the wire; reported quantities are
+    // unsigned.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    let mut body = oanda_market_fill_json(&json!({"units": "-6000", "orderID": "455"}));
+    body["orderCancelTransaction"] = json!({
+        "id": "457",
+        "type": "ORDER_CANCEL",
+        "orderID": "455",
+        "reason": "TIME_IN_FORCE_EXPIRED",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    });
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        body,
+    )
+    .await;
+
+    let request = OrderRequest {
+        limit_price: Some(dec!(1.10000)),
+        time_in_force: TimeInForce::Ioc,
+        ..forex_order("EUR_USD", Side::Sell, OrderType::Limit, dec!(10000))
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.status, OrderStatus::PartiallyFilled);
+
+    let first = rx.try_recv().expect("partial fill event published");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = first.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderPartiallyFilled);
+    assert_eq!(order.filled_quantity, dec!(6000));
+    assert_eq!(order.remaining_quantity, dec!(4000));
+}
+
+#[tokio::test]
+async fn submit_partial_fill_without_cancel_emits_partial_only() {
+    // Defensive path: a partial fill with no accompanying cancel transaction
+    // (not observed from OANDA in practice). The real quantities are reported
+    // and the order stays non-terminal — no fabricated cancel event.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"units": "6000"})),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.status, OrderStatus::PartiallyFilled);
+
+    let event = rx.try_recv().expect("partial fill event published");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = event.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderPartiallyFilled);
+    assert_eq!(order.status, OrderStatus::PartiallyFilled);
+    assert_eq!(order.filled_quantity, dec!(6000));
+    assert_eq!(order.remaining_quantity, dec!(4000));
+
+    assert!(rx.try_recv().is_err(), "exactly one event expected");
+}
+
+#[tokio::test]
 async fn submit_cancel_without_create_falls_back_to_cancel_id() {
     // Defensive path: a cancel transaction with no create transaction. Not
     // observed from Oanda in practice, but the handle must still be terminal.

@@ -182,11 +182,14 @@ impl OandaAdapter {
 
     /// Publish an immediate-fill `Order` event from the synchronous REST order
     /// response onto the provider's outbound event stream (if connected),
-    /// preserving the caller's `client_order_id`.
+    /// preserving the caller's `client_order_id`. A `filled_quantity` short of
+    /// the requested quantity (a partially filled IOC) is published as
+    /// `OrderPartiallyFilled` with the real remaining quantity.
     async fn emit_rest_fill(
         &self,
         request: &tektii_gateway_core::models::OrderRequest,
         fill: &OandaTransaction,
+        filled_quantity: Decimal,
     ) {
         let guard = self.provider_event_tx.read().await;
         let Some(tx) = guard.as_ref() else {
@@ -194,10 +197,15 @@ impl OandaAdapter {
             return;
         };
 
-        let average_fill_price = fill
-            .price
-            .as_deref()
-            .and_then(|p| Decimal::from_str(p).ok());
+        let (event, status) = if filled_quantity < request.quantity {
+            (
+                OrderEventType::OrderPartiallyFilled,
+                OrderStatus::PartiallyFilled,
+            )
+        } else {
+            (OrderEventType::OrderFilled, OrderStatus::Filled)
+        };
+        let average_fill_price = parse_price(fill.price.as_deref());
         let order = Order {
             id: fill.order_id.clone().unwrap_or_else(|| fill.id.clone()),
             client_order_id: request.client_order_id.clone(),
@@ -205,8 +213,8 @@ impl OandaAdapter {
             side: request.side,
             order_type: request.order_type,
             quantity: request.quantity,
-            filled_quantity: request.quantity,
-            remaining_quantity: Decimal::ZERO,
+            filled_quantity,
+            remaining_quantity: request.quantity - filled_quantity,
             limit_price: request.limit_price,
             stop_price: request.stop_price,
             stop_loss: None,
@@ -214,7 +222,7 @@ impl OandaAdapter {
             trailing_distance: None,
             trailing_type: None,
             average_fill_price,
-            status: OrderStatus::Filled,
+            status,
             reject_reason: None,
             position_id: None,
             reduce_only: None,
@@ -230,7 +238,7 @@ impl OandaAdapter {
 
         if tx
             .send(ProviderEvent::live(WsMessage::Order {
-                event: OrderEventType::OrderFilled,
+                event,
                 order,
                 parent_order_id: None,
                 timestamp: Utc::now(),
@@ -296,11 +304,15 @@ impl OandaAdapter {
     /// preserving the caller's `client_order_id`. Oanda cancels a missed
     /// IOC/FOK order inside the create request itself and its transaction
     /// stream omits the `ORDER_CANCEL`, so the REST response is the only
-    /// cancel signal strategies can receive.
+    /// cancel signal strategies can receive. A non-zero `filled_quantity`
+    /// (a partially filled IOC whose remainder was cancelled) carries the
+    /// order's final fill state on the terminal event.
     async fn emit_rest_cancel(
         &self,
         request: &tektii_gateway_core::models::OrderRequest,
         order_id: &str,
+        filled_quantity: Decimal,
+        average_fill_price: Option<Decimal>,
     ) {
         let guard = self.provider_event_tx.read().await;
         let Some(tx) = guard.as_ref() else {
@@ -315,15 +327,15 @@ impl OandaAdapter {
             side: request.side,
             order_type: request.order_type,
             quantity: request.quantity,
-            filled_quantity: Decimal::ZERO,
-            remaining_quantity: request.quantity,
+            filled_quantity,
+            remaining_quantity: request.quantity - filled_quantity,
             limit_price: request.limit_price,
             stop_price: request.stop_price,
             stop_loss: None,
             take_profit: None,
             trailing_distance: None,
             trailing_type: None,
-            average_fill_price: None,
+            average_fill_price,
             status: OrderStatus::Cancelled,
             reject_reason: None,
             position_id: None,
@@ -855,6 +867,11 @@ impl OandaAdapter {
     }
 }
 
+/// Parse a wire price string into a `Decimal`, `None` on absence or garbage.
+fn parse_price(price: Option<&str>) -> Option<Decimal> {
+    price.and_then(|p| Decimal::from_str(p).ok())
+}
+
 /// Map an Oanda reject reason string to a canonical reject code.
 ///
 /// Known Oanda reasons are mapped to `reject_codes::*` constants.
@@ -1067,16 +1084,40 @@ impl TradingAdapter for OandaAdapter {
             // streaming. Publish it onto the provider's event stream — the same
             // path candles/quotes take to clients — stamped with the caller's
             // client_order_id so a strategy can match it to the order it placed.
-            self.emit_rest_fill(request, fill).await;
-            self.emit_rest_fill_account_snapshot(fill).await;
+            //
+            // The fill transaction's `units` carries the actually-filled
+            // quantity (signed; negative = sell). A partially filled IOC
+            // arrives as this fill plus a cancel transaction for the dead
+            // remainder — publish the partial fill, then the terminal cancel,
+            // mirroring the wire. Missing/unparseable units fall back to the
+            // requested quantity (a full fill).
+            let filled_quantity = fill
+                .units
+                .as_deref()
+                .and_then(|u| Decimal::from_str(u).ok())
+                .map_or(request.quantity, |u| u.abs().min(request.quantity));
             // Handle id = the fill's `orderID` (the create transaction id),
             // matching the id `emit_rest_fill` publishes, so the handle and
             // the strategy-visible fill event always agree. Fall back to the
             // fill transaction id only if the wire omits `orderID`.
-            (
-                fill.order_id.clone().unwrap_or_else(|| fill.id.clone()),
-                tektii_gateway_core::models::OrderStatus::Filled,
-            )
+            let order_id = fill.order_id.clone().unwrap_or_else(|| fill.id.clone());
+            self.emit_rest_fill(request, fill, filled_quantity).await;
+            let status = if filled_quantity < request.quantity {
+                if resp.order_cancel_transaction.is_some() {
+                    self.emit_rest_cancel(
+                        request,
+                        &order_id,
+                        filled_quantity,
+                        parse_price(fill.price.as_deref()),
+                    )
+                    .await;
+                }
+                tektii_gateway_core::models::OrderStatus::PartiallyFilled
+            } else {
+                tektii_gateway_core::models::OrderStatus::Filled
+            };
+            self.emit_rest_fill_account_snapshot(fill).await;
+            (order_id, status)
         } else if let Some(ref cancel) = resp.order_cancel_transaction {
             // Order created and synchronously cancelled in the same request
             // (e.g. an IOC limit that missed). As with the fill above, the
@@ -1086,7 +1127,8 @@ impl TradingAdapter for OandaAdapter {
                 .order_create_transaction
                 .as_ref()
                 .map_or_else(|| cancel.id.clone(), |create| create.id.clone());
-            self.emit_rest_cancel(request, &order_id).await;
+            self.emit_rest_cancel(request, &order_id, Decimal::ZERO, None)
+                .await;
             (
                 order_id,
                 tektii_gateway_core::models::OrderStatus::Cancelled,
