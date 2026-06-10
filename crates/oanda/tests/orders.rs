@@ -121,6 +121,110 @@ async fn submit_order_with_bracket() {
 }
 
 #[tokio::test]
+async fn submit_bracket_stamps_leg_client_ids() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"id": "461"})),
+    )
+    .await;
+
+    let request = OrderRequest {
+        stop_loss: Some(dec!(1.08000)),
+        take_profit: Some(dec!(1.12000)),
+        client_order_id: Some("strat-42".to_string()),
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000))
+    };
+    adapter.submit_order(&request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    let order = &body["order"];
+    assert_eq!(order["clientExtensions"]["id"], "strat-42");
+    assert_eq!(
+        order["stopLossOnFill"]["clientExtensions"]["id"],
+        "strat-42-sl"
+    );
+    assert_eq!(
+        order["takeProfitOnFill"]["clientExtensions"]["id"],
+        "strat-42-tp"
+    );
+}
+
+#[tokio::test]
+async fn submit_bracket_without_client_id_omits_leg_client_extensions() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"id": "462"})),
+    )
+    .await;
+
+    let request = OrderRequest {
+        stop_loss: Some(dec!(1.08000)),
+        take_profit: Some(dec!(1.12000)),
+        client_order_id: None,
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000))
+    };
+    adapter.submit_order(&request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    let order = &body["order"];
+    // The legs themselves must still be present — only clientExtensions is omitted.
+    assert_eq!(order["stopLossOnFill"]["price"], "1.08000");
+    assert_eq!(order["takeProfitOnFill"]["price"], "1.12000");
+    assert!(order["stopLossOnFill"].get("clientExtensions").is_none());
+    assert!(order["takeProfitOnFill"].get("clientExtensions").is_none());
+}
+
+#[tokio::test]
+async fn submit_bracket_with_empty_client_id_omits_leg_client_extensions() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"id": "463"})),
+    )
+    .await;
+
+    let request = OrderRequest {
+        stop_loss: Some(dec!(1.08000)),
+        take_profit: Some(dec!(1.12000)),
+        client_order_id: Some(String::new()),
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000))
+    };
+    adapter.submit_order(&request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    let order = &body["order"];
+    assert_eq!(order["stopLossOnFill"]["price"], "1.08000");
+    assert_eq!(order["takeProfitOnFill"]["price"], "1.12000");
+    assert!(order["stopLossOnFill"].get("clientExtensions").is_none());
+    assert!(order["takeProfitOnFill"].get("clientExtensions").is_none());
+    // An empty client id must not be sent on the parent either.
+    assert!(order.get("clientExtensions").is_none());
+}
+
+#[tokio::test]
 async fn submit_order_with_client_order_id() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);

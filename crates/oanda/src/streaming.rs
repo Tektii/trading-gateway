@@ -1420,7 +1420,7 @@ fn transaction_fill_to_messages(
 
     let order = Order {
         id: order_id.to_string(),
-        client_order_id: None,
+        client_order_id: tx.client_order_id.clone(),
         symbol: symbol.clone(),
         side,
         order_type: OrderType::Market,
@@ -1554,7 +1554,7 @@ fn transaction_cancel_to_messages(
 
     let order = Order {
         id: order_id.to_string(),
-        client_order_id: None,
+        client_order_id: tx.client_order_id.clone(),
         symbol,
         side: Side::Buy,
         order_type: OrderType::Limit,
@@ -1735,6 +1735,7 @@ mod tests {
             price: None,
             time: None,
             order_id: None,
+            client_order_id: None,
             reason: None,
             reject_reason: None,
             commission: None,
@@ -1890,6 +1891,75 @@ mod tests {
                 assert_eq!(order.quantity, Decimal::from(5000));
                 // No orderId => use transaction id.
                 assert_eq!(order.id, "6361");
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_fill_carries_client_order_id() {
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("-10000".to_string()),
+            price: Some("1.09500".to_string()),
+            order_id: Some("6400".to_string()),
+            client_order_id: Some("strat-42-tp".to_string()),
+            ..test_tx("6401", "ORDER_FILL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+
+        match &msgs[0] {
+            WsMessage::Order { order, .. } => {
+                assert_eq!(order.client_order_id, Some("strat-42-tp".to_string()));
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_fill_without_client_order_id_stays_none() {
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("10000".to_string()),
+            price: Some("1.08525".to_string()),
+            order_id: Some("6357".to_string()),
+            ..test_tx("6360", "ORDER_FILL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+
+        match &msgs[0] {
+            WsMessage::Order { order, .. } => {
+                assert_eq!(order.client_order_id, None);
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_stream_line_parses_client_order_id() {
+        // OANDA spells the wire field `clientOrderID` (capital ID).
+        let line = r#"{"type":"ORDER_FILL","id":"6401","orderId":"6400","clientOrderID":"strat-42-tp","instrument":"EUR_USD","units":"-10000","price":"1.09500"}"#;
+        let tx: OandaTransactionStreamLine = serde_json::from_str(line).unwrap();
+        assert_eq!(tx.client_order_id.as_deref(), Some("strat-42-tp"));
+    }
+
+    #[test]
+    fn transaction_cancel_carries_client_order_id() {
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            order_id: Some("6402".to_string()),
+            client_order_id: Some("strat-42-sl".to_string()),
+            reason: Some("LINKED_TRADE_CLOSED".to_string()),
+            ..test_tx("6403", "ORDER_CANCEL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+
+        match &msgs[0] {
+            WsMessage::Order { order, .. } => {
+                assert_eq!(order.client_order_id, Some("strat-42-sl".to_string()));
             }
             other => panic!("Expected Order event, got {other:?}"),
         }
