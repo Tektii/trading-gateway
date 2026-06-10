@@ -1,8 +1,8 @@
 mod helpers;
 
 use helpers::{
-    oanda_ioc_cancel_json, oanda_market_fill_json, oanda_order_json, oanda_pending_order_json,
-    oanda_reject_json, test_adapter,
+    oanda_account_json, oanda_ioc_cancel_json, oanda_market_fill_json, oanda_order_json,
+    oanda_pending_order_json, oanda_reject_json, test_adapter,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -12,7 +12,7 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{
     ModifyOrderRequest, OrderQueryParams, OrderRequest, OrderStatus, OrderType, Side, TimeInForce,
 };
-use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
+use tektii_gateway_core::websocket::messages::{AccountEventType, OrderEventType, WsMessage};
 use tektii_gateway_test_support::models::test_order_request;
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 use tokio::sync::mpsc;
@@ -50,6 +50,152 @@ async fn submit_market_order_fill() {
     let handle = adapter.submit_order(&request).await.unwrap();
     assert_eq!(handle.id, "456");
     assert_eq!(handle.status, OrderStatus::Filled);
+}
+
+#[tokio::test]
+async fn submit_market_order_fill_emits_account_snapshot() {
+    // A synchronous REST fill must be followed by exactly one account
+    // snapshot on the strategy stream: balance from the fill's own
+    // accountBalance, equity/margin/unrealized from the summary fetch.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"accountBalance": "100123.45"})),
+    )
+    .await;
+    mount_json(
+        &server,
+        "GET",
+        "/v3/accounts/test-account-123/summary",
+        200,
+        oanda_account_json(),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let first = rx.try_recv().expect("fill event published");
+    let WsMessage::Order {
+        event: event_type, ..
+    } = first.msg
+    else {
+        panic!("expected an order event first");
+    };
+    assert_eq!(event_type, OrderEventType::OrderFilled);
+
+    let second = rx.try_recv().expect("account snapshot follows the fill");
+    let WsMessage::Account {
+        event,
+        account,
+        timestamp,
+    } = second.msg
+    else {
+        panic!("expected an account event after the fill");
+    };
+    assert_eq!(event, AccountEventType::BalanceUpdated);
+    assert_eq!(
+        timestamp,
+        "2024-01-15T10:30:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap(),
+        "snapshot timestamp comes from the fill transaction time"
+    );
+    assert_eq!(account.balance, dec!(100123.45));
+    assert_eq!(account.equity, dec!(100500.00));
+    assert_eq!(account.margin_used, dec!(5000.00));
+    assert_eq!(account.margin_available, dec!(95000.00));
+    assert_eq!(account.unrealized_pnl, dec!(500.00));
+    assert_eq!(account.currency, "USD");
+    assert!(rx.try_recv().is_err(), "exactly two events expected");
+}
+
+#[tokio::test]
+async fn submit_fill_snapshot_balance_falls_back_to_summary() {
+    // OANDA omits accountBalance on some fill responses; the snapshot then
+    // carries the summary's balance instead of being dropped.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({})),
+    )
+    .await;
+    mount_json(
+        &server,
+        "GET",
+        "/v3/accounts/test-account-123/summary",
+        200,
+        oanda_account_json(),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let first = rx.try_recv().expect("fill event published");
+    assert!(matches!(first.msg, WsMessage::Order { .. }));
+
+    let second = rx.try_recv().expect("account snapshot follows the fill");
+    let WsMessage::Account { account, .. } = second.msg else {
+        panic!("expected an account event after the fill");
+    };
+    assert_eq!(account.balance, dec!(100000.00));
+    assert!(rx.try_recv().is_err(), "exactly two events expected");
+}
+
+#[tokio::test]
+async fn submit_fill_skips_account_snapshot_when_summary_fails() {
+    // A failed summary fetch must drop the snapshot, never emit zeros --
+    // and must not block the fill event or the order handle.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"accountBalance": "100123.45"})),
+    )
+    .await;
+    mount_json(
+        &server,
+        "GET",
+        "/v3/accounts/test-account-123/summary",
+        500,
+        json!({"errorMessage": "internal server error"}),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.status, OrderStatus::Filled);
+
+    let first = rx.try_recv().expect("fill event published");
+    assert!(matches!(first.msg, WsMessage::Order { .. }));
+    assert!(
+        rx.try_recv().is_err(),
+        "no account snapshot expected when the summary fetch fails"
+    );
 }
 
 #[tokio::test]
@@ -113,6 +259,17 @@ async fn submit_ioc_limit_miss_emits_cancel_event() {
         "/v3/accounts/test-account-123/orders",
         201,
         oanda_ioc_cancel_json(),
+    )
+    .await;
+    // Mount a healthy summary so a wrongly-wired account snapshot on the
+    // cancel path would actually emit and trip the exactly-one-event check
+    // below, rather than being silently skipped on a 404.
+    mount_json(
+        &server,
+        "GET",
+        "/v3/accounts/test-account-123/summary",
+        200,
+        oanda_account_json(),
     )
     .await;
 

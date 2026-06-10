@@ -128,6 +128,9 @@ pub struct OandaTransaction {
     /// Price.
     #[serde(default)]
     pub price: Option<String>,
+    /// Account balance after this transaction (present on `ORDER_FILL`).
+    #[serde(default)]
+    pub account_balance: Option<String>,
     /// Transaction time (RFC 3339).
     #[serde(default)]
     pub time: Option<String>,

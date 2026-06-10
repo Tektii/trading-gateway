@@ -77,7 +77,7 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// no default timeout) would stall heartbeat-timeout detection and reconnect/disconnect
 /// cancellation. Kept below `HEARTBEAT_TIMEOUT` so a stalled fetch cannot defer a
 /// reconnect by more than one fetch window; on timeout the snapshot is simply skipped.
-const ACCOUNT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const ACCOUNT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum reconnection backoff.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Initial reconnection backoff.
@@ -913,6 +913,7 @@ async fn run_transaction_stream(
         api_token,
         account_id,
         platform,
+        timeout: ACCOUNT_FETCH_TIMEOUT,
     };
     let mut backoff = INITIAL_BACKOFF;
 
@@ -1153,7 +1154,9 @@ async fn process_transaction_buffer(
                 // Emit a per-fill account snapshot, ordered right after the fill.
                 if line.transaction_type == "ORDER_FILL"
                     && let Some(fetcher) = account_fetcher
-                    && let Some(account) = fetcher.account_snapshot_for_fill(&line).await
+                    && let Some(account) = fetcher
+                        .account_snapshot_for_fill(line.account_balance.as_deref())
+                        .await
                 {
                     messages.push(WsMessage::Account {
                         event: AccountEventType::BalanceUpdated,
@@ -1178,13 +1181,17 @@ async fn process_transaction_buffer(
 ///
 /// The streaming task has no `OandaAdapter` handle, so it does its own raw summary
 /// fetch the same way [`poll_candles`] fetches candles. The summary->[`Account`]
-/// mapping mirrors `OandaAdapter::get_account`.
-struct AccountFetcher<'a> {
-    client: &'a Client,
-    rest_url: &'a str,
-    api_token: &'a str,
-    account_id: &'a str,
-    platform: TradingPlatform,
+/// mapping mirrors `OandaAdapter::get_account`. Shared with the adapter's REST
+/// fill path, which is the fill signal that actually fires in production --
+/// OANDA's transaction stream omits `ORDER_FILL`.
+pub(crate) struct AccountFetcher<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) rest_url: &'a str,
+    pub(crate) api_token: &'a str,
+    pub(crate) account_id: &'a str,
+    pub(crate) platform: TradingPlatform,
+    /// Bound on the summary fetch ([`ACCOUNT_FETCH_TIMEOUT`] in production).
+    pub(crate) timeout: Duration,
 }
 
 impl AccountFetcher<'_> {
@@ -1266,25 +1273,26 @@ impl AccountFetcher<'_> {
     }
 
     /// Build the per-fill account snapshot: the fetched summary with `balance`
-    /// overridden by the fill's `accountBalance`. `None` if the fetch failed or did
-    /// not complete within [`ACCOUNT_FETCH_TIMEOUT`] -- the bound keeps a hung summary
-    /// endpoint from stalling the transaction stream's heartbeat/cancellation arms.
-    async fn account_snapshot_for_fill(
+    /// overridden by `fill_balance` (the fill's `accountBalance`). `None` if the
+    /// fetch failed or did not complete within `self.timeout` -- the bound keeps a
+    /// hung summary endpoint from stalling the transaction stream's
+    /// heartbeat/cancellation arms (and the REST order path's response).
+    pub(crate) async fn account_snapshot_for_fill(
         &self,
-        fill: &OandaTransactionStreamLine,
+        fill_balance: Option<&str>,
     ) -> Option<Account> {
-        let account = match tokio::time::timeout(ACCOUNT_FETCH_TIMEOUT, self.fetch()).await {
+        let account = match tokio::time::timeout(self.timeout, self.fetch()).await {
             Ok(account) => account?,
             Err(_elapsed) => {
                 warn!(
                     platform = %self.platform,
-                    timeout_secs = ACCOUNT_FETCH_TIMEOUT.as_secs(),
+                    timeout_ms = self.timeout.as_millis(),
                     "Account summary fetch timed out -- skipping account snapshot"
                 );
                 return None;
             }
         };
-        Some(merge_fill_account(account, fill.account_balance.as_deref()))
+        Some(merge_fill_account(account, fill_balance))
     }
 }
 
@@ -1530,7 +1538,7 @@ fn transaction_financing_to_messages(
 }
 
 /// Parse an OANDA RFC-3339 transaction time, falling back to now if absent/unparseable.
-fn parse_transaction_time(time: Option<&str>) -> DateTime<Utc> {
+pub(crate) fn parse_transaction_time(time: Option<&str>) -> DateTime<Utc> {
     time.and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
 }
@@ -1723,7 +1731,9 @@ mod tests {
     use super::*;
     use crate::types::OandaPriceBucket;
     use tektii_gateway_core::websocket::messages::TradeEventType;
-    use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
+    use tektii_gateway_test_support::wiremock_helpers::{
+        mount_json, mount_json_with_delay, start_mock_server,
+    };
 
     /// Helper to create a test transaction stream line with sensible defaults.
     fn test_tx(id: &str, tx_type: &str) -> OandaTransactionStreamLine {
@@ -2430,6 +2440,7 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         let account = fetcher
@@ -2463,6 +2474,7 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         assert!(
@@ -2492,6 +2504,7 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         assert!(
@@ -2527,11 +2540,53 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         assert!(
             fetcher.fetch().await.is_none(),
             "a non-numeric NAV must yield no snapshot, not a zeroed equity"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_snapshot_skipped_on_timeout() {
+        // A summary response slower than the fetcher's bound must yield no
+        // snapshot -- the bound keeps a hung endpoint from stalling the
+        // transaction stream and the REST order path.
+        let (server, base_url) = start_mock_server().await;
+        mount_json_with_delay(
+            &server,
+            "GET",
+            "/v3/accounts/test-acct/summary",
+            200,
+            account_summary_value(
+                "100000.0000",
+                "100250.5000",
+                "2500.0000",
+                "97750.5000",
+                "250.5000",
+            ),
+            Duration::from_millis(500),
+        )
+        .await;
+
+        let client = Client::new();
+        let fetcher = AccountFetcher {
+            client: &client,
+            rest_url: &base_url,
+            api_token: "test-token",
+            account_id: "test-acct",
+            platform: TradingPlatform::OandaPractice,
+            timeout: Duration::from_millis(50),
+        };
+
+        assert!(
+            fetcher
+                .account_snapshot_for_fill(Some("100123.45"))
+                .await
+                .is_none(),
+            "a timed-out summary fetch must drop the snapshot"
         );
     }
 
@@ -2560,6 +2615,7 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         let mut buffer = BytesMut::new();
@@ -2627,6 +2683,7 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         let mut buffer = BytesMut::new();
@@ -2682,6 +2739,7 @@ mod tests {
             api_token: "test-token",
             account_id: "test-acct",
             platform: TradingPlatform::OandaPractice,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
         };
 
         let mut buffer = BytesMut::new();

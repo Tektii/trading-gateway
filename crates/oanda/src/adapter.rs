@@ -31,11 +31,12 @@ use tektii_gateway_core::exit_management::{
     ExitHandler, ExitHandlerConfig, ExitHandling, ExitLegType,
 };
 use tektii_gateway_core::state::StateManager;
-use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
+use tektii_gateway_core::websocket::messages::{AccountEventType, OrderEventType, WsMessage};
 use tektii_gateway_core::websocket::provider::ProviderEvent;
 
 use crate::capabilities::OandaCapabilities;
 use crate::credentials::OandaCredentials;
+use crate::streaming::{ACCOUNT_FETCH_TIMEOUT, AccountFetcher, parse_transaction_time};
 
 // Import trading models
 use tektii_gateway_core::adapter::{ProviderCapabilities, TradingAdapter};
@@ -237,6 +238,56 @@ impl OandaAdapter {
             .is_err()
         {
             debug!("no provider event receiver; REST fill dropped");
+        }
+    }
+
+    /// Publish one `WsMessage::Account` snapshot after a synchronous REST fill,
+    /// ordered after the fill's own frames so consumers (the canary) can
+    /// attribute snapshot->fill. Balance comes from the fill's
+    /// `accountBalance`; equity/margin/unrealized from a bounded account-summary
+    /// fetch. Skipped entirely -- never zeros -- on any fetch/parse failure.
+    ///
+    /// This REST path is the snapshot source that fires in production: Oanda's
+    /// transaction stream omits `ORDER_FILL`, so the stream-side hook in
+    /// `streaming::process_transaction_buffer` stays dormant.
+    async fn emit_rest_fill_account_snapshot(&self, fill: &OandaTransaction) {
+        // Clone the sender and release the lock before the summary fetch: the
+        // provider's `connect` takes the write side on every (re)connect, and
+        // tokio's write-preferring RwLock would queue all other readers behind
+        // it for the duration of the fetch.
+        let tx = {
+            let guard = self.provider_event_tx.read().await;
+            let Some(tx) = guard.as_ref() else {
+                debug!("provider event sender not connected; account snapshot not published");
+                return;
+            };
+            tx.clone()
+        };
+
+        let fetcher = AccountFetcher {
+            client: &self.client,
+            rest_url: &self.base_url,
+            api_token: self.api_token.expose_secret(),
+            account_id: &self.account_id,
+            platform: self.platform,
+            timeout: ACCOUNT_FETCH_TIMEOUT,
+        };
+        let Some(account) = fetcher
+            .account_snapshot_for_fill(fill.account_balance.as_deref())
+            .await
+        else {
+            return;
+        };
+
+        if tx
+            .send(ProviderEvent::live(WsMessage::Account {
+                event: AccountEventType::BalanceUpdated,
+                account,
+                timestamp: parse_transaction_time(fill.time.as_deref()),
+            }))
+            .is_err()
+        {
+            debug!("no provider event receiver; account snapshot dropped");
         }
     }
 
@@ -1017,6 +1068,7 @@ impl TradingAdapter for OandaAdapter {
             // path candles/quotes take to clients — stamped with the caller's
             // client_order_id so a strategy can match it to the order it placed.
             self.emit_rest_fill(request, fill).await;
+            self.emit_rest_fill_account_snapshot(fill).await;
             (
                 fill.id.clone(),
                 tektii_gateway_core::models::OrderStatus::Filled,
