@@ -27,7 +27,9 @@ use tektii_gateway_core::circuit_breaker::{
 };
 use tektii_gateway_core::error::{GatewayError, GatewayResult, reject_codes};
 use tektii_gateway_core::events::router::EventRouter;
-use tektii_gateway_core::exit_management::{ExitHandler, ExitHandlerConfig, ExitHandling};
+use tektii_gateway_core::exit_management::{
+    ExitHandler, ExitHandlerConfig, ExitHandling, ExitLegType,
+};
 use tektii_gateway_core::state::StateManager;
 use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
 use tektii_gateway_core::websocket::provider::ProviderEvent;
@@ -841,22 +843,40 @@ impl TradingAdapter for OandaAdapter {
             .or(request.stop_price)
             .map(|d| d.to_string());
 
-        // Build bracket (SL/TP on fill)
+        // Build bracket (SL/TP on fill). Each leg carries the synthesized-exit
+        // id convention ({parent_client_order_id}-{sl|tp}) so the server-side
+        // dependent order's fill is pairable by client id, matching the id the
+        // client-side exit path would have minted for the same leg.
+        let leg_client_extensions = |leg: ExitLegType| {
+            request
+                .client_order_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(|id| OandaClientExtensions {
+                    id: Some(format!("{id}-{suffix}", suffix = leg.client_order_suffix())),
+                    tag: None,
+                    comment: None,
+                })
+        };
+
         let stop_loss_on_fill = request.stop_loss.map(|sl| OandaStopLossOnFill {
             price: sl.to_string(),
             time_in_force: "GTC".to_string(),
+            client_extensions: leg_client_extensions(ExitLegType::StopLoss),
         });
 
         let take_profit_on_fill = request.take_profit.map(|tp| OandaTakeProfitOnFill {
             price: tp.to_string(),
             time_in_force: "GTC".to_string(),
+            client_extensions: leg_client_extensions(ExitLegType::TakeProfit),
         });
 
         let client_extensions = request
             .client_order_id
-            .as_ref()
+            .as_deref()
+            .filter(|id| !id.is_empty())
             .map(|id| OandaClientExtensions {
-                id: Some(id.clone()),
+                id: Some(id.to_string()),
                 tag: None,
                 comment: None,
             });

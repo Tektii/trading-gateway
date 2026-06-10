@@ -355,6 +355,9 @@ pub struct OandaStopLossOnFill {
     /// Time in force for the stop loss order (default GTC).
     #[serde(default = "default_gtc")]
     pub time_in_force: String,
+    /// Client extensions stamped onto the server-side stop loss order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_extensions: Option<OandaClientExtensions>,
 }
 
 /// Take profit on fill parameters.
@@ -366,6 +369,9 @@ pub struct OandaTakeProfitOnFill {
     /// Time in force for the take profit order (default GTC).
     #[serde(default = "default_gtc")]
     pub time_in_force: String,
+    /// Client extensions stamped onto the server-side take profit order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_extensions: Option<OandaClientExtensions>,
 }
 
 /// Trailing stop loss on fill parameters.
@@ -494,6 +500,11 @@ pub struct OandaTransactionStreamLine {
     /// Related order ID.
     #[serde(default)]
     pub order_id: Option<String>,
+    /// Client-assigned ID of the related order, when it carries client
+    /// extensions. OANDA spells the wire field `clientOrderID` (capital ID),
+    /// so it needs an explicit rename rather than the container camelCase.
+    #[serde(default, rename = "clientOrderID")]
+    pub client_order_id: Option<String>,
     /// Reason for this transaction.
     #[serde(default)]
     pub reason: Option<String>,
@@ -786,10 +797,12 @@ mod tests {
                 stop_loss_on_fill: Some(OandaStopLossOnFill {
                     price: "1.08000".to_string(),
                     time_in_force: "GTC".to_string(),
+                    client_extensions: None,
                 }),
                 take_profit_on_fill: Some(OandaTakeProfitOnFill {
                     price: "1.09500".to_string(),
                     time_in_force: "GTC".to_string(),
+                    client_extensions: None,
                 }),
                 trailing_stop_loss_on_fill: None,
                 client_extensions: None,
