@@ -9,12 +9,19 @@ on:
 # last release. Merging the Release PR pushes a `vX.Y.Z` tag, which triggers
 # release.yml to promote the main-built images to their versioned tags.
 #
-# Authenticates via a scoped fine-grained PAT (RELEASE_PLEASE_TOKEN) rather
-# than GITHUB_TOKEN. The Tektii org enforces "Actions cannot create or
-# approve pull requests" at org level, which the default GITHUB_TOKEN
-# inherits. The PAT is scoped to this repo with `contents: write` +
-# `pull-requests: write` only, so it does not bypass the org policy
-# globally — only release-please gets elevated rights, and only here.
+# Authenticates as an org-owned GitHub App ("Tektii Release Bot") rather than
+# GITHUB_TOKEN. The Tektii org enforces "Actions cannot create or approve pull
+# requests" at org level, which the default GITHUB_TOKEN inherits; an App
+# installation token is a separate identity not bound by that toggle, so
+# release-please can open its Release PR. The App is granted only
+# Contents: write + Pull requests: write, and create-github-app-token mints a
+# short-lived token scoped to this repo on each run — the only stored
+# credential is the App's private key, held as an org secret and not bound to
+# any person. Using the App identity (not GITHUB_TOKEN) also lets the release
+# tag it creates trigger release.yml's publish job.
+#
+# Required config (both org secrets): RELEASE_BOT_APP_ID (the App's numeric ID)
+# and RELEASE_BOT_APP_KEY (the App's PEM private key).
 
 concurrency:
   group: release-please-${{ github.ref }}
@@ -24,12 +31,19 @@ jobs:
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
-    permissions: {} # All API calls go through RELEASE_PLEASE_TOKEN
+    permissions: {} # Auth is via the App token, not GITHUB_TOKEN
     steps:
+      - name: Mint a GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_APP_KEY }}
+
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
@@ -45,16 +59,16 @@ jobs:
       #
       # `cargo update --workspace` relocks only the workspace members (the 10
       # tektii-* crates), not transitive dependencies, so the diff is exactly the
-      # version bump and nothing else. Pushing with the PAT (not GITHUB_TOKEN) lets
-      # CI re-run on the PR; the push targets the PR branch, never main, so it does
-      # not re-trigger this workflow.
+      # version bump and nothing else. Pushing with the App token (not
+      # GITHUB_TOKEN) lets CI re-run on the PR; the push targets the PR branch,
+      # never main, so it does not re-trigger this workflow.
       # ---------------------------------------------------------------------------
       - name: Check out the Release PR branch
         if: ${{ steps.release.outputs.pr }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up Rust
         if: ${{ steps.release.outputs.pr }}
