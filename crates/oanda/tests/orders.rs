@@ -1,8 +1,8 @@
 mod helpers;
 
 use helpers::{
-    oanda_market_fill_json, oanda_order_json, oanda_pending_order_json, oanda_reject_json,
-    test_adapter,
+    oanda_ioc_cancel_json, oanda_market_fill_json, oanda_order_json, oanda_pending_order_json,
+    oanda_reject_json, test_adapter,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -12,8 +12,10 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{
     ModifyOrderRequest, OrderQueryParams, OrderRequest, OrderStatus, OrderType, Side, TimeInForce,
 };
+use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
 use tektii_gateway_test_support::models::test_order_request;
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
+use tokio::sync::mpsc;
 
 /// Helper to build an `OrderRequest` for Oanda forex tests.
 fn forex_order(symbol: &str, side: Side, order_type: OrderType, qty: Decimal) -> OrderRequest {
@@ -71,6 +73,150 @@ async fn submit_limit_order_pending() {
     let handle = adapter.submit_order(&request).await.unwrap();
     assert_eq!(handle.id, "789");
     assert_eq!(handle.status, OrderStatus::Open);
+}
+
+#[tokio::test]
+async fn submit_ioc_limit_miss_returns_cancelled() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_ioc_cancel_json(),
+    )
+    .await;
+
+    let request = OrderRequest {
+        limit_price: Some(dec!(1.10000)),
+        time_in_force: TimeInForce::Ioc,
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Limit, dec!(10000))
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "1981");
+    assert_eq!(handle.status, OrderStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn submit_ioc_limit_miss_emits_cancel_event() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_ioc_cancel_json(),
+    )
+    .await;
+
+    let request = OrderRequest {
+        limit_price: Some(dec!(1.10000)),
+        time_in_force: TimeInForce::Ioc,
+        client_order_id: Some("client-ioc-1".to_string()),
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Limit, dec!(10000))
+    };
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx
+        .try_recv()
+        .expect("cancel event published on the provider stream");
+    let WsMessage::Order {
+        event: event_type,
+        order,
+        ..
+    } = event.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderCancelled);
+    assert_eq!(order.status, OrderStatus::Cancelled);
+    assert_eq!(order.id, "1981");
+    assert_eq!(order.client_order_id.as_deref(), Some("client-ioc-1"));
+    assert_eq!(order.filled_quantity, Decimal::ZERO);
+    assert!(rx.try_recv().is_err(), "exactly one event expected");
+}
+
+#[tokio::test]
+async fn submit_fill_takes_precedence_over_cancel() {
+    // An IOC fill response can carry both a fill and a cancel transaction;
+    // the fill must win, and only a fill event may reach strategies.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    let mut body = oanda_market_fill_json(&json!({}));
+    body["orderCancelTransaction"] = json!({
+        "id": "457",
+        "type": "ORDER_CANCEL",
+        "orderID": "455",
+        "reason": "TIME_IN_FORCE_EXPIRED",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    });
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        body,
+    )
+    .await;
+
+    let request = OrderRequest {
+        limit_price: Some(dec!(1.10000)),
+        time_in_force: TimeInForce::Ioc,
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Limit, dec!(10000))
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.status, OrderStatus::Filled);
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order {
+        event: event_type, ..
+    } = event.msg
+    else {
+        panic!("expected an order event");
+    };
+    assert_eq!(event_type, OrderEventType::OrderFilled);
+    assert!(rx.try_recv().is_err(), "no cancel event expected");
+}
+
+#[tokio::test]
+async fn submit_cancel_without_create_falls_back_to_cancel_id() {
+    // Defensive path: a cancel transaction with no create transaction. Not
+    // observed from Oanda in practice, but the handle must still be terminal.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let mut body = oanda_ioc_cancel_json();
+    body.as_object_mut()
+        .unwrap()
+        .remove("orderCreateTransaction");
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        body,
+    )
+    .await;
+
+    let request = OrderRequest {
+        limit_price: Some(dec!(1.10000)),
+        time_in_force: TimeInForce::Ioc,
+        ..forex_order("EUR_USD", Side::Buy, OrderType::Limit, dec!(10000))
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "1982");
+    assert_eq!(handle.status, OrderStatus::Cancelled);
 }
 
 #[tokio::test]

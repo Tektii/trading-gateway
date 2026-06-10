@@ -240,6 +240,66 @@ impl OandaAdapter {
         }
     }
 
+    /// Publish a synchronous-cancel `Order` event from the REST order
+    /// response onto the provider's outbound event stream (if connected),
+    /// preserving the caller's `client_order_id`. Oanda cancels a missed
+    /// IOC/FOK order inside the create request itself and its transaction
+    /// stream omits the `ORDER_CANCEL`, so the REST response is the only
+    /// cancel signal strategies can receive.
+    async fn emit_rest_cancel(
+        &self,
+        request: &tektii_gateway_core::models::OrderRequest,
+        order_id: &str,
+    ) {
+        let guard = self.provider_event_tx.read().await;
+        let Some(tx) = guard.as_ref() else {
+            debug!("provider event sender not connected; REST cancel not published");
+            return;
+        };
+
+        let order = Order {
+            id: order_id.to_string(),
+            client_order_id: request.client_order_id.clone(),
+            symbol: request.symbol.clone(),
+            side: request.side,
+            order_type: request.order_type,
+            quantity: request.quantity,
+            filled_quantity: Decimal::ZERO,
+            remaining_quantity: request.quantity,
+            limit_price: request.limit_price,
+            stop_price: request.stop_price,
+            stop_loss: None,
+            take_profit: None,
+            trailing_distance: None,
+            trailing_type: None,
+            average_fill_price: None,
+            status: OrderStatus::Cancelled,
+            reject_reason: None,
+            position_id: None,
+            reduce_only: None,
+            post_only: None,
+            hidden: None,
+            display_quantity: None,
+            oco_group_id: None,
+            correlation_id: None,
+            time_in_force: request.time_in_force,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        if tx
+            .send(ProviderEvent::live(WsMessage::Order {
+                event: OrderEventType::OrderCancelled,
+                order,
+                parent_order_id: None,
+                timestamp: Utc::now(),
+            }))
+            .is_err()
+        {
+            debug!("no provider event receiver; REST cancel dropped");
+        }
+    }
+
     /// Enable custom `ExitHandler` configuration.
     #[must_use]
     #[allow(dead_code)]
@@ -961,6 +1021,20 @@ impl TradingAdapter for OandaAdapter {
                 fill.id.clone(),
                 tektii_gateway_core::models::OrderStatus::Filled,
             )
+        } else if let Some(ref cancel) = resp.order_cancel_transaction {
+            // Order created and synchronously cancelled in the same request
+            // (e.g. an IOC limit that missed). As with the fill above, the
+            // transaction stream omits the ORDER_CANCEL, so the REST response
+            // is the only cancel signal — publish it to strategy clients.
+            let order_id = resp
+                .order_create_transaction
+                .as_ref()
+                .map_or_else(|| cancel.id.clone(), |create| create.id.clone());
+            self.emit_rest_cancel(request, &order_id).await;
+            (
+                order_id,
+                tektii_gateway_core::models::OrderStatus::Cancelled,
+            )
         } else if let Some(ref create) = resp.order_create_transaction {
             (
                 create.id.clone(),
@@ -968,7 +1042,7 @@ impl TradingAdapter for OandaAdapter {
             )
         } else {
             return Err(GatewayError::internal(
-                "Oanda order response contained no create or fill transaction".to_string(),
+                "Oanda order response contained no create, fill, or cancel transaction".to_string(),
             ));
         };
 
