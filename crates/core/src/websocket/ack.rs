@@ -287,15 +287,18 @@ impl Default for AckManager {
 ///    eligible to be ACK'd back to the engine.
 /// 2. `mark_sent` is called by the registry's broadcast loop after
 ///    `connection_manager.send_to` returns successfully. Only events that
-///    have been marked sent will be drained on the next strategy ACK.
+///    have been marked sent are eligible for release by a strategy ACK.
 ///
-/// `handle_strategy_ack` drains only events with `sent = true`. Events still
-/// in flight (registered but not yet sent) remain pending and will be drained
-/// by a later strategy ACK once they reach the strategy.
+/// `handle_strategy_ack` releases exactly the oldest `sent = true` event —
+/// strategies ACK once per delivered event, after handling it, so one ACK
+/// frees one event (FIFO). Releasing everything delivered would ack events
+/// the strategy hasn't consumed yet, letting the engine advance sim time
+/// before the strategy's response orders land (TEK-1026). Events still in
+/// flight (registered but not yet sent) remain pending until delivered.
 #[async_trait]
 pub trait AckBridge: Send + Sync {
-    /// Handle an ACK from a connected strategy. Drains only events that have
-    /// been marked sent.
+    /// Handle an ACK from a connected strategy. Releases the oldest event
+    /// that has been marked sent.
     async fn handle_strategy_ack(&self);
 
     /// Register events as pending acknowledgment (phase 1: WS read).

@@ -500,7 +500,7 @@ async fn backtest_complete_relayed_and_flush_ack_forwarded() {
 }
 
 #[tokio::test]
-async fn multiple_pending_events_batch_drained() {
+async fn multiple_pending_events_released_one_per_ack() {
     let (server, tx, mut rx) = MockWsServer::start().await;
     let (provider, _broadcast_rx) = create_ws_provider(&server.url());
 
@@ -548,38 +548,42 @@ async fn multiple_pending_events_batch_drained() {
         ])
         .await;
 
-    // Single strategy ACK drains all pending
-    provider
-        .handle_ack(EventAckMessage {
-            correlation_id: "batch".to_string(),
-            events_processed: vec!["any".to_string()],
-            timestamp: 0,
-        })
-        .await
-        .expect("handle_ack failed");
+    // Each strategy ACK releases exactly one event — the oldest delivered —
+    // never everything delivered (TEK-1026: a single ACK draining the whole
+    // batch let the engine advance sim time past events the strategy hadn't
+    // consumed yet).
+    for expected in ["evt-1", "evt-2", "evt-3"] {
+        provider
+            .handle_ack(EventAckMessage {
+                correlation_id: "batch".to_string(),
+                events_processed: vec!["any".to_string()],
+                timestamp: 0,
+            })
+            .await
+            .expect("handle_ack failed");
 
-    // Collect all ACK event_ids from the engine
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let mut all_acked_ids = Vec::new();
-    while let Ok(Some(raw)) = timeout(Duration::from_millis(500), rx.recv()).await {
+        let raw = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("engine should receive an ACK")
+            .expect("engine rx closed");
         let client_msg = parse_client_message(&raw);
-        if let ClientMessage::EventAck {
-            events_processed, ..
-        } = client_msg
-        {
-            all_acked_ids.extend(events_processed);
+        match client_msg {
+            ClientMessage::EventAck {
+                events_processed, ..
+            } => {
+                assert_eq!(
+                    events_processed,
+                    vec![expected.to_string()],
+                    "each strategy ACK must release exactly the oldest delivered event"
+                );
+            }
+            other => panic!("Expected EventAck, got {other:?}"),
         }
     }
 
-    assert_eq!(
-        all_acked_ids.len(),
-        3,
-        "All 3 events should be ACK'd, got: {all_acked_ids:?}"
-    );
-    assert!(all_acked_ids.contains(&"evt-1".to_string()));
-    assert!(all_acked_ids.contains(&"evt-2".to_string()));
-    assert!(all_acked_ids.contains(&"evt-3".to_string()));
+    // No further ACKs — three ACKs released exactly three events.
+    let extra = timeout(Duration::from_millis(200), rx.recv()).await;
+    assert!(extra.is_err(), "No extra ACKs should be sent");
 
     server.shutdown().await;
 }

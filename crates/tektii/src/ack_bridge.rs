@@ -3,7 +3,7 @@
 //! In simulation mode, the engine waits for ACKs before advancing simulation time.
 //! This bridge tracks pending `event_ids` and forwards strategy ACKs to the engine.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,23 +11,40 @@ use tektii_gateway_core::websocket::ack::AckBridge;
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, trace, warn};
 
-/// Pending state, mutated under a single write lock so the events map and
+/// One engine event awaiting its strategy ACK, in delivery order.
+#[derive(Debug)]
+struct PendingEvent {
+    id: String,
+    /// Whether the event has actually been delivered to the strategy
+    /// WebSocket (`mark_sent` flips it true).
+    sent: bool,
+}
+
+/// Pending state, mutated under a single write lock so the event queue and
 /// the deferred-ACK flag stay consistent across the micro-race window
 /// between `connection_manager.send_to` and `mark_sent` (TEK-270).
 #[derive(Debug, Default)]
 struct PendingState {
-    /// Pending `event_ids` keyed by id; the bool tracks whether the event
-    /// has actually been delivered to the strategy WebSocket
-    /// (`mark_sent` flips it true).
-    events: HashMap<String, bool>,
+    /// Pending events in registration (= engine emission = delivery) order.
+    queue: VecDeque<PendingEvent>,
 
-    /// Set when `handle_strategy_ack` finds nothing to drain but there are
-    /// `sent = false` events still in flight. The next `mark_sent` that
-    /// promotes an entry to `sent = true` consumes the flag and forwards
-    /// the drained events to the engine. Closes the sub-µs window where
+    /// Set when `handle_strategy_ack` finds the queue head not yet delivered.
+    /// The next `mark_sent` that promotes the head consumes the flag and
+    /// forwards that one event to the engine. Closes the sub-µs window where
     /// the strategy ACK arrives between `send_to.await` returning Ok and
     /// the registry's `mark_sent.await` acquiring the bridge lock.
     strategy_ack_deferred: bool,
+}
+
+impl PendingState {
+    /// Pop the queue head if it has been delivered to the strategy.
+    fn pop_delivered_head(&mut self) -> Option<String> {
+        if self.queue.front().is_some_and(|event| event.sent) {
+            self.queue.pop_front().map(|event| event.id)
+        } else {
+            None
+        }
+    }
 }
 
 /// Bridge for coordinating ACKs between strategy and engine in simulation mode.
@@ -36,37 +53,52 @@ struct PendingState {
 /// ACK arrives between WS-read and registry broadcast (TEK-270):
 ///
 /// - `register_pending` is called when the engine emits an event (WS read).
-///   The event is tracked with `sent = false` — it's pending the strategy ACK
+///   The event is queued with `sent = false` — it's pending the strategy ACK
 ///   AND pending actual delivery to the strategy WebSocket.
 /// - `mark_sent` is called by the registry's broadcast loop after
 ///   `connection_manager.send_to` returns Ok. Only `sent = true` events are
-///   eligible to be drained on the next strategy ACK.
+///   eligible to be released by a strategy ACK.
 ///
-/// When a strategy sends an ACK, all `sent = true` events are drained and
-/// ACK'd to the engine (auto-correlation approach). `sent = false` events
-/// remain pending and will be drained by a later strategy ACK once they are
-/// actually delivered.
+/// # FIFO release — one ACK frees exactly one event
+///
+/// Strategies ACK once per delivered event, *after* their handler for it has
+/// run (SDK and canary-runner contract). Each strategy ACK therefore releases
+/// exactly the **oldest delivered** event — never everything delivered. The
+/// strategy still doesn't track engine `event_ids`; delivery order alone
+/// correlates ACKs to events.
+///
+/// The previous drain-all ("auto-correlation") release was unsound: an engine
+/// fill broadcasts a multi-event batch (order, trade, account, position) and
+/// blocks on ALL ids, so the first strategy ACK after batch delivery — sent
+/// for an event *before* the batch — released the whole batch while the
+/// strategy had consumed none of it. The strategy's remaining per-event ACKs
+/// then released subsequent candles it hadn't seen, letting the engine
+/// advance sim time past a bar before the strategy's response orders were
+/// placed. Symptom: backtest fills lagging live by a full bar and bunching
+/// on one tick (TEK-1026, canary C06/C08 `fill_time` −57..−80s).
 ///
 /// A residual sub-µs race remains between `send_to.await` returning Ok and
-/// `bridge.mark_sent.await` acquiring the lock. To close it, an out-of-order
-/// strategy ACK that finds no `sent = true` entries (but DOES find
-/// `sent = false` entries) sets `strategy_ack_deferred = true`. The next
-/// `mark_sent` that promotes an entry consumes the flag and drains
-/// synchronously inside the same critical section.
+/// `bridge.mark_sent.await` acquiring the lock. To close it, a strategy ACK
+/// that finds the queue head still `sent = false` sets
+/// `strategy_ack_deferred = true`. The next `mark_sent` that promotes the
+/// head consumes the flag and forwards that event synchronously inside the
+/// same critical section.
 ///
 /// # Flow
 ///
 /// 1. Engine sends event with `event_id` to gateway WS read.
-/// 2. Gateway calls `register_pending(id)` → tracked, `sent = false`.
+/// 2. Gateway calls `register_pending(id)` → queued, `sent = false`.
 /// 3. Registry forwards event through pipeline.
 /// 4. Registry calls `connection_manager.send_to(conn_id, ws_msg)` for each
 ///    strategy. On Ok, registry calls `mark_sent(id)` → `sent = true`.
 /// 5. Strategy processes event and sends `EventAck`.
-/// 6. Gateway calls `handle_strategy_ack()` → drains only `sent = true` events.
-/// 7. Engine receives ACK and advances simulation time.
+/// 6. Gateway calls `handle_strategy_ack()` → releases the oldest
+///    `sent = true` event.
+/// 7. Engine receives ACK and advances simulation time once every id it
+///    waits on has been released.
 #[derive(Debug)]
 pub struct TektiiAckBridge {
-    /// Pending events + deferred-ACK flag, both mutated atomically.
+    /// Pending event queue + deferred-ACK flag, both mutated atomically.
     state: Arc<RwLock<PendingState>>,
 
     /// Channel to send ACKs to engine writer task.
@@ -108,25 +140,28 @@ impl TektiiAckBridge {
 
     /// Register an event as pending strategy ACK (phase 1: WS read time).
     ///
-    /// The event is recorded with `sent = false` — eligible to be drained only
+    /// The event is queued with `sent = false` — eligible for release only
     /// after `mark_sent` is called once the registry has actually delivered it
     /// to the strategy WebSocket.
     pub async fn register_pending(&self, event_id: String) {
         let mut state = self.state.write().await;
-        state.events.insert(event_id.clone(), false);
-        debug!(event_id = %event_id, pending_count = state.events.len(), "Registered pending event");
+        state.queue.push_back(PendingEvent {
+            id: event_id.clone(),
+            sent: false,
+        });
+        debug!(event_id = %event_id, pending_count = state.queue.len(), "Registered pending event");
     }
 
     /// Mark events as actually delivered to the strategy WebSocket
     /// (phase 2: post `connection_manager.send_to`).
     ///
-    /// If a strategy ACK was previously deferred (it arrived before any event
-    /// completed broadcast), the events promoted by this call are drained
-    /// synchronously and forwarded to the engine — closing the micro-race
+    /// If a strategy ACK was previously deferred (it arrived before the queue
+    /// head completed broadcast), a promotion of the head consumes the flag
+    /// and forwards that one event to the engine — closing the micro-race
     /// between `send_to.await` and `mark_sent.await`.
     ///
     /// Unknown `event_ids` are silently ignored — defensive against ordering
-    /// edge cases (late `mark_sent` after an early drain, duplicate calls).
+    /// edge cases (late `mark_sent` after an early release, duplicate calls).
     pub async fn mark_sent(&self, event_ids: Vec<String>) {
         if event_ids.is_empty() {
             return;
@@ -136,13 +171,13 @@ impl TektiiAckBridge {
         let mut newly_sent = 0_usize;
 
         for id in &event_ids {
-            if let Some(sent) = state.events.get_mut(id) {
-                if !*sent {
-                    *sent = true;
+            if let Some(event) = state.queue.iter_mut().find(|event| event.id == *id) {
+                if !event.sent {
+                    event.sent = true;
                     newly_sent += 1;
                 }
             } else {
-                trace!(event_id = %id, "mark_sent for unknown event_id (already drained?)");
+                trace!(event_id = %id, "mark_sent for unknown event_id (already released?)");
             }
         }
 
@@ -150,42 +185,38 @@ impl TektiiAckBridge {
             debug!(count = newly_sent, "Marked events as sent to strategy");
         }
 
-        // If a strategy ACK was deferred, consume it now: drain any
-        // `sent = true` entries (which now includes the events we just
-        // promoted) and forward to engine. Same critical section, no yield.
-        if state.strategy_ack_deferred && newly_sent > 0 {
-            let to_ack = drain_sent(&mut state.events);
-            if !to_ack.is_empty() {
-                state.strategy_ack_deferred = false;
-                let count = to_ack.len();
-                let in_flight = state.events.len();
-                drop(state);
-                if self.engine_ack_tx.send(to_ack).is_err() {
-                    warn!("Engine ACK channel closed, dropping deferred ACK");
-                } else {
-                    info!(
-                        count,
-                        in_flight, "Forwarded deferred strategy ACK to engine"
-                    );
-                }
+        // If a strategy ACK was deferred and this call promoted the queue
+        // head, consume the deferred ACK now: release exactly that one event.
+        // Same critical section, no yield.
+        if state.strategy_ack_deferred
+            && let Some(id) = state.pop_delivered_head()
+        {
+            state.strategy_ack_deferred = false;
+            let in_flight = state.queue.len();
+            drop(state);
+            if self.engine_ack_tx.send(vec![id]).is_err() {
+                warn!("Engine ACK channel closed, dropping deferred ACK");
+            } else {
+                info!(in_flight, "Forwarded deferred strategy ACK to engine");
             }
         }
     }
 
-    /// Handle strategy ACK by draining `sent = true` events and forwarding to
-    /// engine.
+    /// Handle strategy ACK by releasing the oldest delivered event and
+    /// forwarding it to the engine.
     ///
-    /// Auto-correlation: ANY strategy ACK drains every event already delivered
-    /// to the strategy (no need for the strategy to track engine `event_ids`).
-    /// Events that have been registered but NOT yet delivered (`sent = false`)
-    /// remain pending. If the ACK arrives while every pending event is still
-    /// in flight (the micro-race between `send_to` and `mark_sent`), the ACK
-    /// is deferred and consumed by the next `mark_sent` that promotes an
-    /// entry.
+    /// Strategies ACK once per delivered event, after handling it, so each
+    /// ACK releases exactly one event — the queue head — never everything
+    /// delivered. Releasing more would tell the engine the strategy has
+    /// processed events still sitting unconsumed in its buffer, letting sim
+    /// time advance before the strategy's response orders are placed
+    /// (TEK-1026). If the head is still in flight (the micro-race between
+    /// `send_to` and `mark_sent`), the ACK is deferred and consumed by the
+    /// `mark_sent` that promotes the head.
     pub async fn handle_strategy_ack(&self) {
         let mut state = self.state.write().await;
 
-        if state.events.is_empty() {
+        if state.queue.is_empty() {
             // No events tracked at all — strategy ACK'd something the bridge
             // doesn't know about. Don't defer (no future mark_sent is owed
             // for an event we never registered).
@@ -193,31 +224,27 @@ impl TektiiAckBridge {
             return;
         }
 
-        let to_ack = drain_sent(&mut state.events);
+        if let Some(id) = state.pop_delivered_head() {
+            // Released the head — clear any deferred flag (this ACK
+            // satisfies it) and forward.
+            state.strategy_ack_deferred = false;
+            let in_flight = state.queue.len();
+            drop(state);
 
-        if to_ack.is_empty() {
-            // Every pending event is still in flight (`sent = false`).
-            // Defer the ACK — the next `mark_sent` that promotes an entry
-            // will consume the flag and forward to the engine.
+            if self.engine_ack_tx.send(vec![id]).is_err() {
+                warn!("Engine ACK channel closed, dropping ACK");
+            } else {
+                info!(in_flight, "Forwarded strategy ACK to engine");
+            }
+        } else {
+            // The oldest pending event is still in flight (`sent = false`).
+            // Defer the ACK — the `mark_sent` that promotes the head will
+            // consume the flag and forward to the engine.
             state.strategy_ack_deferred = true;
             debug!(
-                in_flight = state.events.len(),
-                "Strategy ACK deferred — no events delivered yet"
+                in_flight = state.queue.len(),
+                "Strategy ACK deferred — oldest pending event not yet delivered"
             );
-            return;
-        }
-
-        // Got some sent entries to drain — clear any deferred flag (this ACK
-        // satisfies it) and forward.
-        state.strategy_ack_deferred = false;
-        let count = to_ack.len();
-        let in_flight = state.events.len();
-        drop(state);
-
-        if self.engine_ack_tx.send(to_ack).is_err() {
-            warn!("Engine ACK channel closed, dropping ACKs");
-        } else {
-            info!(count, in_flight, "Forwarded strategy ACK to engine");
         }
     }
 
@@ -237,22 +264,8 @@ impl TektiiAckBridge {
     /// Get the number of pending events (for testing/debugging).
     #[cfg(test)]
     pub async fn pending_count(&self) -> usize {
-        self.state.read().await.events.len()
+        self.state.read().await.queue.len()
     }
-}
-
-/// Drain `sent = true` entries from the events map, returning their ids.
-fn drain_sent(events: &mut HashMap<String, bool>) -> Vec<String> {
-    let mut to_ack: Vec<String> = Vec::new();
-    events.retain(|id, sent| {
-        if *sent {
-            to_ack.push(id.clone());
-            false
-        } else {
-            true
-        }
-    });
-    to_ack
 }
 
 #[async_trait]
@@ -294,7 +307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_strategy_ack_forwards_to_engine() {
+    async fn test_handle_strategy_ack_forwards_only_oldest_delivered_event() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = TektiiAckBridge::new(tx);
 
@@ -311,17 +324,110 @@ mod tests {
             ])
             .await;
 
-        // Handle strategy ACK
+        // One strategy ACK = one consumed event. Only the oldest delivered
+        // event may be released — evt-1/evt-2 are still unconsumed in the
+        // strategy's buffer.
         bridge.handle_strategy_ack().await;
 
-        // Verify all events were forwarded
-        let acked = rx.recv().await.expect("Should receive ACKs");
-        assert_eq!(acked.len(), 3);
-        assert!(acked.contains(&"evt-0".to_string()));
-        assert!(acked.contains(&"evt-1".to_string()));
-        assert!(acked.contains(&"evt-2".to_string()));
+        let acked = rx.recv().await.expect("Should receive ACK");
+        assert_eq!(acked, vec!["evt-0".to_string()]);
+        assert!(
+            rx.try_recv().is_err(),
+            "Only the oldest delivered event may be released per ACK"
+        );
+        assert_eq!(bridge.pending_count().await, 2);
 
-        // Pending should be empty now
+        // Subsequent ACKs drain the rest, one per ACK, in delivery order.
+        bridge.handle_strategy_ack().await;
+        assert_eq!(
+            rx.recv().await.expect("second ACK"),
+            vec!["evt-1".to_string()]
+        );
+        bridge.handle_strategy_ack().await;
+        assert_eq!(
+            rx.recv().await.expect("third ACK"),
+            vec!["evt-2".to_string()]
+        );
+        assert_eq!(bridge.pending_count().await, 0);
+    }
+
+    /// TEK-1026 regression: an engine fill broadcasts a multi-event batch
+    /// (order, trade, account, position) and waits for ALL ids before
+    /// advancing sim time. Pre-FIFO, the first strategy ACK after batch
+    /// delivery drained the whole batch — the engine resumed while the
+    /// strategy had consumed none of it, and the strategy's remaining
+    /// per-event ACKs then released subsequent candles the strategy hadn't
+    /// seen. Net effect: candle-gated orders reached the engine one bar
+    /// late (C06/C08 fill_time −57..−80s, bunched same-tick fills).
+    ///
+    /// FIFO contract: the engine's batch wait completes only after the
+    /// strategy has acked every event in the batch — i.e. after it has
+    /// actually processed all of them.
+    #[tokio::test]
+    async fn test_fill_batch_releases_one_event_per_ack_in_delivery_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = TektiiAckBridge::new(tx);
+
+        // Fill batch (4 events) followed by the next candle, all delivered
+        // to the strategy WebSocket back-to-back.
+        let ids = ["order", "trade", "account", "position", "candle"];
+        for id in ids {
+            bridge.register_pending(id.to_string()).await;
+        }
+        bridge
+            .mark_sent(ids.iter().map(ToString::to_string).collect())
+            .await;
+
+        // The strategy consumes + acks one event at a time. Each ACK must
+        // release exactly that event — the candle (last) is only released
+        // by the fifth ACK, never by a stale batch ACK.
+        for expected in ids {
+            bridge.handle_strategy_ack().await;
+            assert_eq!(
+                rx.recv().await.expect("ACK forwarded"),
+                vec![expected.to_string()],
+                "each strategy ACK must release exactly the oldest delivered event"
+            );
+        }
+        assert_eq!(bridge.pending_count().await, 0);
+    }
+
+    /// Strict head-of-line: an ACK must never release a later event past an
+    /// undelivered head, even if that later event is already marked sent.
+    /// Delivery order defines consumption order — releasing out of order
+    /// would ack an event the strategy cannot have processed yet.
+    #[tokio::test]
+    async fn test_ack_never_releases_past_undelivered_head() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = TektiiAckBridge::new(tx);
+
+        bridge.register_pending("evt-a".to_string()).await;
+        bridge.register_pending("evt-b".to_string()).await;
+        // Out-of-order bookkeeping: only the later event is marked sent.
+        bridge.mark_sent(vec!["evt-b".to_string()]).await;
+
+        // Head (evt-a) is undelivered — the ACK defers; evt-b must NOT leak.
+        bridge.handle_strategy_ack().await;
+        assert!(
+            rx.try_recv().is_err(),
+            "ACK must not release evt-b past the undelivered head evt-a"
+        );
+        assert_eq!(bridge.pending_count().await, 2);
+
+        // Head delivery consumes the deferred ACK and releases evt-a only.
+        bridge.mark_sent(vec!["evt-a".to_string()]).await;
+        assert_eq!(
+            rx.recv().await.expect("deferred ACK"),
+            vec!["evt-a".to_string()]
+        );
+        assert_eq!(bridge.pending_count().await, 1);
+
+        // evt-b still needs its own ACK.
+        bridge.handle_strategy_ack().await;
+        assert_eq!(
+            rx.recv().await.expect("evt-b ACK"),
+            vec!["evt-b".to_string()]
+        );
         assert_eq!(bridge.pending_count().await, 0);
     }
 
@@ -369,16 +475,22 @@ mod tests {
         let batch1 = rx.recv().await.expect("Should receive first batch");
         assert_eq!(batch1.len(), 1);
 
-        // Second batch
+        // Second batch — two delivered events take two ACKs, one each.
         bridge.register_pending("evt-1".to_string()).await;
         bridge.register_pending("evt-2".to_string()).await;
         bridge
             .mark_sent(vec!["evt-1".to_string(), "evt-2".to_string()])
             .await;
         bridge.handle_strategy_ack().await;
-
-        let batch2 = rx.recv().await.expect("Should receive second batch");
-        assert_eq!(batch2.len(), 2);
+        assert_eq!(
+            rx.recv().await.expect("Should receive evt-1"),
+            vec!["evt-1".to_string()]
+        );
+        bridge.handle_strategy_ack().await;
+        assert_eq!(
+            rx.recv().await.expect("Should receive evt-2"),
+            vec!["evt-2".to_string()]
+        );
 
         // Pending should be empty
         assert_eq!(bridge.pending_count().await, 0);
@@ -544,8 +656,9 @@ mod tests {
     }
 
     /// Multiple strategy ACKs deferred while events are in flight collapse
-    /// to one — auto-correlation already drains everything available, so
-    /// repeated ACKs in the deferred state are idempotent.
+    /// to one — at most one legitimate ACK can sit in the send_to/mark_sent
+    /// micro-race window at a time, so repeated ACKs in the deferred state
+    /// are idempotent.
     #[tokio::test]
     async fn test_multiple_deferred_acks_are_idempotent() {
         let (tx, mut rx) = mpsc::unbounded_channel();
