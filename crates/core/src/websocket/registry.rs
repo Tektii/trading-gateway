@@ -363,8 +363,8 @@ impl ProviderRegistry {
 
     /// Handle strategy ACK by forwarding to the ACK bridge.
     ///
-    /// Uses auto-correlation: any ACK from strategy triggers ACK of all pending
-    /// events. This simplifies strategy implementation (no need to track event IDs).
+    /// One ACK releases the oldest delivered event (FIFO) — strategies ACK
+    /// once per event, after handling it, and never track event IDs.
     pub async fn handle_strategy_ack(&self) {
         let bridge = self.tektii_ack_bridge.read().await;
         if let Some(ref b) = *bridge {
