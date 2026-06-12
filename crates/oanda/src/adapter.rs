@@ -36,6 +36,7 @@ use tektii_gateway_core::websocket::provider::ProviderEvent;
 
 use crate::capabilities::OandaCapabilities;
 use crate::credentials::OandaCredentials;
+use crate::dedupe::PUBLISHED_TRANSACTIONS;
 use crate::streaming::{ACCOUNT_FETCH_TIMEOUT, AccountFetcher, parse_transaction_time};
 
 // Import trading models
@@ -180,11 +181,22 @@ impl OandaAdapter {
         Arc::clone(&self.provider_event_tx)
     }
 
-    /// Publish an immediate-fill `Order` event from the synchronous REST order
-    /// response onto the provider's outbound event stream (if connected),
-    /// preserving the caller's `client_order_id`. A `filled_quantity` short of
-    /// the requested quantity (a partially filled IOC) is published as
+    /// Publish the fill frames from the synchronous REST order response onto
+    /// the provider's outbound event stream (if connected), preserving the
+    /// caller's `client_order_id`. A `filled_quantity` short of the requested
+    /// quantity (a partially filled IOC) is published as
     /// `OrderPartiallyFilled` with the real remaining quantity.
+    ///
+    /// Emits the same frame set as the stream conversion
+    /// (`streaming::transaction_fill_to_messages`), so strategies receive one
+    /// shape regardless of which path wins the fill's dedupe claim:
+    /// 1. `Order` -- the order state change.
+    /// 2. `Trade { TradeFilled }` -- carries the per-fill `commission`.
+    /// 3. `Financing` -- only when the fill settles non-zero carry.
+    ///
+    /// The transaction stream delivers the same fill; the caller must have
+    /// claimed the fill's transaction id (see `place_order`) before this is
+    /// called, so the stream copy is suppressed.
     async fn emit_rest_fill(
         &self,
         request: &tektii_gateway_core::models::OrderRequest,
@@ -206,8 +218,9 @@ impl OandaAdapter {
             (OrderEventType::OrderFilled, OrderStatus::Filled)
         };
         let average_fill_price = parse_price(fill.price.as_deref());
+        let order_id = fill.order_id.clone().unwrap_or_else(|| fill.id.clone());
         let order = Order {
-            id: fill.order_id.clone().unwrap_or_else(|| fill.id.clone()),
+            id: order_id.clone(),
             client_order_id: request.client_order_id.clone(),
             symbol: request.symbol.clone(),
             side: request.side,
@@ -236,16 +249,56 @@ impl OandaAdapter {
             updated_at: Utc::now(),
         };
 
-        if tx
-            .send(ProviderEvent::live(WsMessage::Order {
+        let commission = fill
+            .commission
+            .as_deref()
+            .and_then(|c| Decimal::from_str(c).ok())
+            .unwrap_or(Decimal::ZERO);
+        let timestamp = parse_transaction_time(fill.time.as_deref());
+        let trade = Trade {
+            // The fill transaction id identifies the execution, matching the
+            // stream conversion.
+            id: fill.id.clone(),
+            order_id,
+            symbol: request.symbol.clone(),
+            side: request.side,
+            quantity: filled_quantity,
+            price: average_fill_price.unwrap_or(Decimal::ZERO),
+            commission,
+            // Home currency is not carried on the transaction (see the stream
+            // conversion's docs).
+            commission_currency: String::new(),
+            is_maker: None,
+            timestamp,
+        };
+
+        let mut messages = vec![
+            WsMessage::Order {
                 event,
                 order,
                 parent_order_id: None,
                 timestamp: Utc::now(),
-            }))
-            .is_err()
+            },
+            WsMessage::trade(trade),
+        ];
+        if let Some(amount) = fill
+            .financing
+            .as_deref()
+            .and_then(|f| Decimal::from_str(f).ok())
+            && !amount.is_zero()
         {
-            debug!("no provider event receiver; REST fill dropped");
+            messages.push(WsMessage::Financing {
+                symbol: request.symbol.clone(),
+                amount,
+                timestamp,
+            });
+        }
+
+        for msg in messages {
+            if tx.send(ProviderEvent::live(msg)).is_err() {
+                debug!("no provider event receiver; REST fill dropped");
+                return;
+            }
         }
     }
 
@@ -255,9 +308,9 @@ impl OandaAdapter {
     /// `accountBalance`; equity/margin/unrealized from a bounded account-summary
     /// fetch. Skipped entirely -- never zeros -- on any fetch/parse failure.
     ///
-    /// This REST path is the snapshot source that fires in production: Oanda's
-    /// transaction stream omits `ORDER_FILL`, so the stream-side hook in
-    /// `streaming::process_transaction_buffer` stays dormant.
+    /// Only called when this REST path won the fill's dedupe claim; when the
+    /// transaction stream publishes the fill instead, the stream-side hook in
+    /// `streaming::process_transaction_buffer` emits the snapshot.
     async fn emit_rest_fill_account_snapshot(&self, fill: &OandaTransaction) {
         // Clone the sender and release the lock before the summary fetch: the
         // provider's `connect` takes the write side on every (re)connect, and
@@ -302,11 +355,13 @@ impl OandaAdapter {
     /// Publish a synchronous-cancel `Order` event from the REST order
     /// response onto the provider's outbound event stream (if connected),
     /// preserving the caller's `client_order_id`. Oanda cancels a missed
-    /// IOC/FOK order inside the create request itself and its transaction
-    /// stream omits the `ORDER_CANCEL`, so the REST response is the only
-    /// cancel signal strategies can receive. A non-zero `filled_quantity`
-    /// (a partially filled IOC whose remainder was cancelled) carries the
-    /// order's final fill state on the terminal event.
+    /// IOC/FOK order inside the create request itself, so the REST response
+    /// is the synchronous cancel signal. The transaction stream delivers the
+    /// same `ORDER_CANCEL`; the caller must have claimed the cancel's
+    /// transaction id (see `place_order`) before this is called, so the
+    /// stream copy is suppressed. A non-zero `filled_quantity` (a partially
+    /// filled IOC whose remainder was cancelled) carries the order's final
+    /// fill state on the terminal event.
     async fn emit_rest_cancel(
         &self,
         request: &tektii_gateway_core::models::OrderRequest,
@@ -1078,12 +1133,13 @@ impl TradingAdapter for OandaAdapter {
 
         // Get order ID from create or fill transaction
         let (order_id, order_status) = if let Some(ref fill) = resp.order_fill_transaction {
-            // Market order filled immediately. Oanda's transaction stream
-            // delivers the MARKET_ORDER create transaction but not the
-            // ORDER_FILL, so strategy clients never observe the fill via
-            // streaming. Publish it onto the provider's event stream — the same
-            // path candles/quotes take to clients — stamped with the caller's
-            // client_order_id so a strategy can match it to the order it placed.
+            // Market order filled immediately. Publish the fill onto the
+            // provider's event stream — the same path candles/quotes take to
+            // clients — stamped with the caller's client_order_id so a
+            // strategy can match it to the order it placed. The transaction
+            // stream delivers the same fill; the dedupe claim inside
+            // emit_rest_fill keeps it exactly-once regardless of which path
+            // observes it first.
             //
             // The fill transaction's `units` carries the actually-filled
             // quantity (signed; negative = sell). A partially filled IOC
@@ -1101,9 +1157,25 @@ impl TradingAdapter for OandaAdapter {
             // the strategy-visible fill event always agree. Fall back to the
             // fill transaction id only if the wire omits `orderID`.
             let order_id = fill.order_id.clone().unwrap_or_else(|| fill.id.clone());
-            self.emit_rest_fill(request, fill, filled_quantity).await;
-            let status = if filled_quantity < request.quantity {
-                if resp.order_cancel_transaction.is_some() {
+            let is_partial = filled_quantity < request.quantity;
+            let cancel = resp.order_cancel_transaction.as_ref();
+
+            // One path owns the whole order outcome: the fill and any
+            // accompanying cancel transaction are claimed atomically, so the
+            // pair can never split between the REST and stream publishers and
+            // deliver a contradictory fill/cancel combination. On a full fill
+            // the cancel is claimed but not emitted -- the fill wins, and the
+            // claim suppresses the stream's copy of the cancel too. Claimed
+            // only while a strategy channel is connected, so a dead channel
+            // never claims an event away from the stream.
+            let claimed = self.provider_event_tx.read().await.is_some()
+                && match cancel {
+                    Some(cancel) => PUBLISHED_TRANSACTIONS.try_claim_all(&[&fill.id, &cancel.id]),
+                    None => PUBLISHED_TRANSACTIONS.try_claim(&fill.id),
+                };
+            if claimed {
+                self.emit_rest_fill(request, fill, filled_quantity).await;
+                if is_partial && cancel.is_some() {
                     self.emit_rest_cancel(
                         request,
                         &order_id,
@@ -1112,23 +1184,41 @@ impl TradingAdapter for OandaAdapter {
                     )
                     .await;
                 }
+                self.emit_rest_fill_account_snapshot(fill).await;
+            } else {
+                debug!(
+                    transaction_id = %fill.id,
+                    "fill already published from the transaction stream (or no \
+                     strategy channel); REST copy suppressed"
+                );
+            }
+            let status = if is_partial {
                 tektii_gateway_core::models::OrderStatus::PartiallyFilled
             } else {
                 tektii_gateway_core::models::OrderStatus::Filled
             };
-            self.emit_rest_fill_account_snapshot(fill).await;
             (order_id, status)
         } else if let Some(ref cancel) = resp.order_cancel_transaction {
             // Order created and synchronously cancelled in the same request
-            // (e.g. an IOC limit that missed). As with the fill above, the
-            // transaction stream omits the ORDER_CANCEL, so the REST response
-            // is the only cancel signal — publish it to strategy clients.
+            // (e.g. an IOC limit that missed). The REST response is the
+            // synchronous cancel signal; the transaction stream's copy of the
+            // ORDER_CANCEL is deduped by transaction id.
             let order_id = resp
                 .order_create_transaction
                 .as_ref()
                 .map_or_else(|| cancel.id.clone(), |create| create.id.clone());
-            self.emit_rest_cancel(request, &order_id, Decimal::ZERO, None)
-                .await;
+            let claimed = self.provider_event_tx.read().await.is_some()
+                && PUBLISHED_TRANSACTIONS.try_claim(&cancel.id);
+            if claimed {
+                self.emit_rest_cancel(request, &order_id, Decimal::ZERO, None)
+                    .await;
+            } else {
+                debug!(
+                    transaction_id = %cancel.id,
+                    "cancel already published from the transaction stream (or no \
+                     strategy channel); REST copy suppressed"
+                );
+            }
             (
                 order_id,
                 tektii_gateway_core::models::OrderStatus::Cancelled,

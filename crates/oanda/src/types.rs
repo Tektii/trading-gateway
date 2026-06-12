@@ -148,6 +148,15 @@ pub struct OandaTransaction {
     /// Rejection reason (present in reject transactions).
     #[serde(default)]
     pub reject_reason: Option<String>,
+    /// Commission charged for an `ORDER_FILL`, in the account home currency.
+    /// OANDA spread-bet/practice accounts are spread-only, so this is
+    /// "0.0000", but the gateway forwards whatever the broker reports.
+    #[serde(default)]
+    pub commission: Option<String>,
+    /// Financing (carry) cash flow settled on an `ORDER_FILL` that closes an
+    /// overnight position, in the account home currency.
+    #[serde(default)]
+    pub financing: Option<String>,
 }
 
 // ============================================================================

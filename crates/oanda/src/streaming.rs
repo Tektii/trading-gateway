@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::adapter::OandaAdapter;
+use super::dedupe::{PUBLISHED_TRANSACTIONS, PublishedTransactions};
 use super::types::{
     OandaAccountResponse, OandaCandle, OandaCandlesResponse, OandaPriceStreamMessage,
     OandaTransactionStreamLine,
@@ -180,10 +181,11 @@ impl OandaWebSocketProvider {
     }
 
     /// Adopt a shared outbound event sender so the matching `OandaAdapter` can
-    /// publish events (e.g. REST-sourced order fills that Oanda's transaction
-    /// stream never delivers) onto the same stream this provider feeds to
-    /// strategy clients. Must be called before `connect`, which writes the
-    /// active sender into this shared handle.
+    /// publish events (e.g. REST-sourced order fills) onto the same stream this
+    /// provider feeds to strategy clients. The transaction stream delivers the
+    /// same fills; the two paths are deduplicated by transaction id. Must be
+    /// called before `connect`, which writes the active sender into this
+    /// shared handle.
     #[must_use]
     pub fn with_event_tx(
         mut self,
@@ -923,19 +925,17 @@ async fn run_transaction_stream(
             &url,
             api_token,
             platform,
-            Some(&account_fetcher),
+            &TransactionSink::Strategy {
+                slot: &event_tx,
+                dedupe: &PUBLISHED_TRANSACTIONS,
+                account_fetcher: Some(&account_fetcher),
+            },
             &stream_cancel,
             &parent_cancel,
         )
         .await;
 
-        // Cancelled / PermanentAuth return BEFORE the buffered-message flush below,
-        // intentionally dropping `result.1`. On reconnect-driven cancel this prevents the
-        // old generation from emitting its buffered events onto the new generation's
-        // `event_tx` (which `connect()` has already repointed). Only Network /
-        // HeartbeatTimeout fall through to the flush, since those are within the same
-        // generation (the loop retries with the same `event_tx`).
-        match &result.0 {
+        match &result {
             StreamError::Cancelled => {
                 debug!(platform = %platform, "Transaction stream cancelled");
                 return;
@@ -965,15 +965,6 @@ async fn run_transaction_stream(
             }
         }
 
-        // Emit buffered messages before sleeping for backoff.
-        let tx_guard = event_tx.read().await;
-        if let Some(tx) = tx_guard.as_ref() {
-            for msg in result.1 {
-                let _ = tx.send(msg.into());
-            }
-        }
-        drop(tx_guard);
-
         tokio::select! {
             () = tokio::time::sleep(backoff) => {},
             () = stream_cancel.cancelled() => return,
@@ -999,20 +990,18 @@ async fn run_transaction_stream_internal(
 
     loop {
         // Registry owns a single lifecycle token here, so both select arms collapse onto it.
-        // No account enrichment: the EventRouter consumer synthesises positions from
-        // order events and never forwards account frames to strategies.
         let result = run_single_transaction_stream(
             client,
             &url,
             api_token,
             platform,
-            None,
+            &TransactionSink::Internal(&internal_tx, platform),
             &cancel_token,
             &cancel_token,
         )
         .await;
 
-        match &result.0 {
+        match &result {
             StreamError::Cancelled => {
                 debug!(platform = %platform, "Internal transaction stream cancelled");
                 return;
@@ -1042,12 +1031,6 @@ async fn run_transaction_stream_internal(
             }
         }
 
-        // Emit buffered messages on internal channel.
-        for msg in result.1 {
-            let event = InternalTradingEvent::new(msg, platform);
-            let _ = internal_tx.send(event);
-        }
-
         tokio::select! {
             () = tokio::time::sleep(backoff) => {},
             () = cancel_token.cancelled() => return,
@@ -1057,8 +1040,78 @@ async fn run_transaction_stream_internal(
     }
 }
 
-/// Run a single transaction stream connection. Returns the error reason and
-/// any messages parsed before the error occurred.
+/// Destination for transaction-stream events, sent inline as lines are parsed.
+enum TransactionSink<'a> {
+    /// Strategy-facing provider channel. Shared with the adapter's REST
+    /// paths, which publish the same fill/cancel transactions — `dedupe`
+    /// arbitrates so each is delivered exactly once. Each `ORDER_FILL` is
+    /// followed by one account snapshot from `account_fetcher` (when set).
+    Strategy {
+        slot: &'a Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
+        dedupe: &'a PublishedTransactions,
+        account_fetcher: Option<&'a AccountFetcher<'a>>,
+    },
+    /// Internal EventRouter broadcast channel. No dedupe: the REST path
+    /// publishes only to strategy clients, and sharing claims with the
+    /// strategy stream would make the two streams compete for the same
+    /// event (the EventRouter consumers self-guard). No account enrichment:
+    /// the EventRouter synthesises positions from order events and never
+    /// forwards account frames, so the fetch would be wasted.
+    Internal(&'a broadcast::Sender<InternalTradingEvent>, TradingPlatform),
+}
+
+impl<'a> TransactionSink<'a> {
+    /// Whether this transaction should be emitted, claiming its id when the
+    /// REST path publishes the same transaction type. A disconnected strategy
+    /// channel declines without claiming, so a dead channel never claims an
+    /// event away from the REST path. (The slot can still be repointed
+    /// between the claim and the send -- a narrow, accepted race: the slot is
+    /// only rewritten on `connect`.)
+    async fn claim_if_needed(&self, line: &OandaTransactionStreamLine) -> bool {
+        let Self::Strategy { slot, dedupe, .. } = self else {
+            return true;
+        };
+        if !rest_path_also_publishes(&line.transaction_type) {
+            return true;
+        }
+        let Some(id) = line.id.as_deref() else {
+            warn!(
+                transaction_type = %line.transaction_type,
+                "Transaction line carries no id -- emitting without dedupe"
+            );
+            return true;
+        };
+        if slot.read().await.is_none() {
+            return false;
+        }
+        dedupe.try_claim(id)
+    }
+
+    const fn account_fetcher(&self) -> Option<&'a AccountFetcher<'a>> {
+        match self {
+            Self::Strategy {
+                account_fetcher, ..
+            } => *account_fetcher,
+            Self::Internal(..) => None,
+        }
+    }
+
+    async fn send(&self, msg: WsMessage) {
+        match self {
+            Self::Strategy { slot, .. } => {
+                if let Some(tx) = slot.read().await.as_ref() {
+                    let _ = tx.send(msg.into());
+                }
+            }
+            Self::Internal(tx, platform) => {
+                let _ = tx.send(InternalTradingEvent::new(msg, *platform));
+            }
+        }
+    }
+}
+
+/// Run a single transaction stream connection, emitting events on `sink`
+/// inline as they are parsed. Returns the reason the connection ended.
 ///
 /// Selects on both `stream_cancel` (per-spawn, fires on respawn) and `parent_cancel`
 /// (top-level, fires on disconnect) so the old generation always terminates.
@@ -1067,29 +1120,28 @@ async fn run_single_transaction_stream(
     url: &str,
     api_token: &str,
     platform: TradingPlatform,
-    account_fetcher: Option<&AccountFetcher<'_>>,
+    sink: &TransactionSink<'_>,
     stream_cancel: &CancellationToken,
     parent_cancel: &CancellationToken,
-) -> (StreamError, Vec<WsMessage>) {
+) -> StreamError {
     let mut response = match client.get(url).bearer_auth(api_token).send().await {
         Ok(resp) => {
             let status = resp.status();
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                return (StreamError::PermanentAuth(format!("HTTP {status}")), vec![]);
+                return StreamError::PermanentAuth(format!("HTTP {status}"));
             }
             if !status.is_success() {
-                return (StreamError::Network(format!("HTTP {status}")), vec![]);
+                return StreamError::Network(format!("HTTP {status}"));
             }
             resp
         }
-        Err(e) => return (StreamError::Network(e.to_string()), vec![]),
+        Err(e) => return StreamError::Network(e.to_string()),
     };
 
     let mut buffer = BytesMut::new();
     let mut deadline = Instant::now() + HEARTBEAT_TIMEOUT;
-    let mut messages = Vec::new();
 
     loop {
         tokio::select! {
@@ -1098,44 +1150,59 @@ async fn run_single_transaction_stream(
                     Ok(Some(data)) => {
                         deadline = Instant::now() + HEARTBEAT_TIMEOUT;
                         buffer.extend_from_slice(&data);
-                        process_transaction_buffer(&mut buffer, platform, &mut messages, account_fetcher).await;
+                        process_transaction_buffer(&mut buffer, platform, sink, stream_cancel, parent_cancel).await;
                     },
                     Ok(None) => {
-                        return (StreamError::Network("Stream ended (EOF)".to_string()), messages);
+                        return StreamError::Network("Stream ended (EOF)".to_string());
                     },
                     Err(e) => {
-                        return (StreamError::Network(e.to_string()), messages);
+                        return StreamError::Network(e.to_string());
                     },
                 }
             },
             () = tokio::time::sleep_until(deadline) => {
-                return (StreamError::HeartbeatTimeout, messages);
+                return StreamError::HeartbeatTimeout;
             },
             () = stream_cancel.cancelled() => {
-                return (StreamError::Cancelled, messages);
+                return StreamError::Cancelled;
             },
             () = parent_cancel.cancelled() => {
-                return (StreamError::Cancelled, messages);
+                return StreamError::Cancelled;
             },
         }
     }
 }
 
-/// Process complete NDJSON lines from the buffer and collect order events.
+/// Transaction types the adapter's synchronous REST order path also publishes,
+/// so the stream copy must win a dedupe claim before emitting.
+fn rest_path_also_publishes(transaction_type: &str) -> bool {
+    matches!(transaction_type, "ORDER_FILL" | "ORDER_CANCEL")
+}
+
+/// Process complete NDJSON lines from the buffer, sending events inline on
+/// the sink as they are parsed (mirroring the price stream). See
+/// [`TransactionSink`] for the per-sink dedupe and account-snapshot rules; a
+/// lost claim suppresses the whole transaction -- its order event, derived
+/// trade/financing frames, and account snapshot. Each `ORDER_FILL`'s snapshot
+/// is sent inline so it is ordered immediately after the fill's own frames --
+/// the canary attributes an account snapshot to the fill that precedes it on
+/// the wire.
 ///
-/// When `account_fetcher` is set (the strategy-facing stream), each `ORDER_FILL`
-/// is followed by one `WsMessage::Account` snapshot, fetched and appended inline so
-/// it is ordered immediately after the fill's own frames -- the canary attributes an
-/// account snapshot to the fill that precedes it on the wire. The internal
-/// EventRouter stream passes `None`: it synthesises positions from order events and
-/// never forwards account frames, so enriching it would be a wasted fetch.
+/// Bails between lines once either token fires, so a cancelled generation
+/// (its `event_tx` already repointed to the new one) stops emitting mid-burst
+/// instead of draining the rest of its buffer onto the new channel.
 async fn process_transaction_buffer(
     buffer: &mut BytesMut,
     platform: TradingPlatform,
-    messages: &mut Vec<WsMessage>,
-    account_fetcher: Option<&AccountFetcher<'_>>,
+    sink: &TransactionSink<'_>,
+    stream_cancel: &CancellationToken,
+    parent_cancel: &CancellationToken,
 ) {
     while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+        if stream_cancel.is_cancelled() || parent_cancel.is_cancelled() {
+            return;
+        }
+
         let line = buffer.split_to(pos + 1);
         let line_str = String::from_utf8_lossy(&line).trim().to_string();
 
@@ -1148,21 +1215,34 @@ async fn process_transaction_buffer(
                 // Heartbeat -- no message emitted.
             }
             Ok(line) => {
-                let events = transaction_to_messages(&line, platform);
-                messages.extend(events);
+                if !sink.claim_if_needed(&line).await {
+                    debug!(
+                        platform = %platform,
+                        transaction_id = ?line.id,
+                        transaction_type = %line.transaction_type,
+                        "Transaction already published via the REST path (or no \
+                         strategy channel) -- suppressing stream copy"
+                    );
+                    continue;
+                }
+
+                for msg in transaction_to_messages(&line, platform) {
+                    sink.send(msg).await;
+                }
 
                 // Emit a per-fill account snapshot, ordered right after the fill.
                 if line.transaction_type == "ORDER_FILL"
-                    && let Some(fetcher) = account_fetcher
+                    && let Some(fetcher) = sink.account_fetcher()
                     && let Some(account) = fetcher
                         .account_snapshot_for_fill(line.account_balance.as_deref())
                         .await
                 {
-                    messages.push(WsMessage::Account {
+                    sink.send(WsMessage::Account {
                         event: AccountEventType::BalanceUpdated,
                         account,
                         timestamp: parse_transaction_time(line.time.as_deref()),
-                    });
+                    })
+                    .await;
                 }
             }
             Err(e) => {
@@ -1182,8 +1262,8 @@ async fn process_transaction_buffer(
 /// The streaming task has no `OandaAdapter` handle, so it does its own raw summary
 /// fetch the same way [`poll_candles`] fetches candles. The summary->[`Account`]
 /// mapping mirrors `OandaAdapter::get_account`. Shared with the adapter's REST
-/// fill path, which is the fill signal that actually fires in production --
-/// OANDA's transaction stream omits `ORDER_FILL`.
+/// fill path: both paths deliver fills (deduped by transaction id), and
+/// whichever publishes a fill also emits its snapshot.
 pub(crate) struct AccountFetcher<'a> {
     pub(crate) client: &'a Client,
     pub(crate) rest_url: &'a str,
@@ -2276,6 +2356,40 @@ mod tests {
         }
     }
 
+    /// Run the buffer through a strategy sink backed by `dedupe` and return
+    /// everything it sent.
+    async fn run_buffer_through_strategy_sink(
+        buffer: &mut BytesMut,
+        dedupe: &PublishedTransactions,
+        account_fetcher: Option<&AccountFetcher<'_>>,
+    ) -> Vec<WsMessage> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(RwLock::new(Some(tx)));
+        let cancel = CancellationToken::new();
+        process_transaction_buffer(
+            buffer,
+            TradingPlatform::OandaPractice,
+            &TransactionSink::Strategy {
+                slot: &slot,
+                dedupe,
+                account_fetcher,
+            },
+            &cancel,
+            &cancel,
+        )
+        .await;
+
+        let mut messages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            messages.push(event.msg);
+        }
+        messages
+    }
+
+    fn fresh_dedupe() -> PublishedTransactions {
+        PublishedTransactions::with_capacity(8)
+    }
+
     #[tokio::test]
     async fn ndjson_buffer_processing() {
         let mut buffer = BytesMut::new();
@@ -2287,17 +2401,237 @@ mod tests {
 
         // No fetcher (None): heartbeat produces no messages; ORDER_FILL produces
         // Order + Trade, with no account snapshot appended.
-        let mut messages = Vec::new();
-        process_transaction_buffer(
-            &mut buffer,
-            TradingPlatform::OandaPractice,
-            &mut messages,
-            None,
-        )
-        .await;
+        let messages = run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), None).await;
 
         assert_eq!(messages.len(), 2);
         assert!(buffer.is_empty(), "Buffer should be fully consumed");
+    }
+
+    #[tokio::test]
+    async fn ndjson_fill_sent_inline_even_when_more_data_is_pending() {
+        // Inline emission: a fill must reach the sink as soon as its line is
+        // parsed, not be held back until the connection errors.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(RwLock::new(Some(tx)));
+        let dedupe = fresh_dedupe();
+        let cancel = CancellationToken::new();
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+{"type":"HEARTBEAT","time":"2024-01-"#,
+        );
+
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &TransactionSink::Strategy {
+                slot: &slot,
+                dedupe: &dedupe,
+                account_fetcher: None,
+            },
+            &cancel,
+            &cancel,
+        )
+        .await;
+
+        assert!(
+            matches!(rx.try_recv(), Ok(event) if matches!(event.msg, WsMessage::Order { .. })),
+            "fill must be on the channel immediately after its line is parsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ndjson_internal_sink_sends_inline_without_dedupe() {
+        // Pins inline emission on the Internal sink. (Its independence from
+        // strategy-side claims is structural -- the variant carries no dedupe
+        // handle -- and is pinned end-to-end by the integration test
+        // `internal_stream_delivers_fills_independent_of_strategy_dedupe`.)
+        let (tx, mut rx) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+"#,
+        );
+
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &TransactionSink::Internal(&tx, TradingPlatform::OandaPractice),
+            &cancel,
+            &cancel,
+        )
+        .await;
+
+        assert!(
+            matches!(rx.try_recv(), Ok(event) if matches!(event.message, WsMessage::Order { .. })),
+            "fill must be broadcast immediately after its line is parsed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ndjson_dedupe_suppresses_redelivered_fill() {
+        let dedupe = fresh_dedupe();
+        let line = br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+"#;
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(line);
+        let first = run_buffer_through_strategy_sink(&mut buffer, &dedupe, None).await;
+        assert_eq!(first.len(), 2, "first delivery emits Order + Trade");
+
+        // The same transaction re-delivered (e.g. after a reconnect).
+        buffer.extend_from_slice(line);
+        let second = run_buffer_through_strategy_sink(&mut buffer, &dedupe, None).await;
+        assert!(second.is_empty(), "re-delivered fill must be suppressed");
+    }
+
+    #[tokio::test]
+    async fn ndjson_dedupe_only_applies_to_rest_published_types() {
+        // LIMIT_ORDER creates are never published by the REST path, so they
+        // bypass the claim even if an id collides.
+        let dedupe = fresh_dedupe();
+        assert!(dedupe.try_claim("7001"));
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"LIMIT_ORDER","id":"7001","instrument":"EUR_USD","units":"10000","price":"1.05000"}
+"#,
+        );
+
+        let messages = run_buffer_through_strategy_sink(&mut buffer, &dedupe, None).await;
+        assert_eq!(
+            messages.len(),
+            1,
+            "order-create event must still be emitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn ndjson_fill_without_id_bypasses_dedupe() {
+        // An id-less ORDER_FILL cannot be claimed, so it is emitted rather
+        // than dropped -- a possible duplicate is preferable to a lost fill.
+        let dedupe = fresh_dedupe();
+        assert!(dedupe.try_claim("6361"));
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+"#,
+        );
+
+        let messages = run_buffer_through_strategy_sink(&mut buffer, &dedupe, None).await;
+        assert_eq!(messages.len(), 2, "id-less fill still emits Order + Trade");
+    }
+
+    #[tokio::test]
+    async fn ndjson_disconnected_channel_does_not_claim() {
+        // With no strategy sender, the stream must decline WITHOUT claiming,
+        // so the REST path can still publish the fill later.
+        let slot: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>> =
+            Arc::new(RwLock::new(None));
+        let dedupe = fresh_dedupe();
+        let cancel = CancellationToken::new();
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+"#,
+        );
+
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &TransactionSink::Strategy {
+                slot: &slot,
+                dedupe: &dedupe,
+                account_fetcher: None,
+            },
+            &cancel,
+            &cancel,
+        )
+        .await;
+
+        assert!(
+            dedupe.try_claim("6361"),
+            "a dead channel must not claim the fill away from the REST path"
+        );
+    }
+
+    #[tokio::test]
+    async fn ndjson_cancelled_generation_stops_emitting() {
+        // Once the generation's token fires (its event_tx repointed to the
+        // new generation), remaining buffered lines must not be emitted.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(RwLock::new(Some(tx)));
+        let dedupe = fresh_dedupe();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+"#,
+        );
+
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &TransactionSink::Strategy {
+                slot: &slot,
+                dedupe: &dedupe,
+                account_fetcher: None,
+            },
+            &cancel,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a cancelled generation must not emit"
+        );
+        assert!(
+            dedupe.try_claim("6361"),
+            "a cancelled generation must not claim either"
+        );
+    }
+
+    #[tokio::test]
+    async fn ndjson_disconnect_stops_emitting() {
+        // The parent (disconnect) token must stop emission just like the
+        // per-generation token.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(RwLock::new(Some(tx)));
+        let dedupe = fresh_dedupe();
+        let parent_cancel = CancellationToken::new();
+        parent_cancel.cancel();
+
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"ORDER_FILL","id":"6361","instrument":"EUR_USD","units":"10000","price":"1.08525","orderID":"6357"}
+"#,
+        );
+
+        process_transaction_buffer(
+            &mut buffer,
+            TradingPlatform::OandaPractice,
+            &TransactionSink::Strategy {
+                slot: &slot,
+                dedupe: &dedupe,
+                account_fetcher: None,
+            },
+            &CancellationToken::new(),
+            &parent_cancel,
+        )
+        .await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a disconnected provider must not emit"
+        );
     }
 
     #[tokio::test]
@@ -2305,14 +2639,7 @@ mod tests {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(br#"{"type":"HEARTBEAT","time":"2024-01-"#);
 
-        let mut messages = Vec::new();
-        process_transaction_buffer(
-            &mut buffer,
-            TradingPlatform::OandaPractice,
-            &mut messages,
-            None,
-        )
-        .await;
+        let messages = run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), None).await;
 
         assert!(messages.is_empty());
         assert!(!buffer.is_empty(), "Partial line should remain in buffer");
@@ -2323,14 +2650,7 @@ mod tests {
         let mut buffer = BytesMut::new();
         buffer.extend_from_slice(b"not valid json\n");
 
-        let mut messages = Vec::new();
-        process_transaction_buffer(
-            &mut buffer,
-            TradingPlatform::OandaPractice,
-            &mut messages,
-            None,
-        )
-        .await;
+        let messages = run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), None).await;
 
         assert!(
             messages.is_empty(),
@@ -2624,14 +2944,8 @@ mod tests {
 "#,
         );
 
-        let mut messages = Vec::new();
-        process_transaction_buffer(
-            &mut buffer,
-            TradingPlatform::OandaPractice,
-            &mut messages,
-            Some(&fetcher),
-        )
-        .await;
+        let messages =
+            run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), Some(&fetcher)).await;
 
         // Order, Trade, then the account snapshot -- in that order.
         assert_eq!(messages.len(), 3);
@@ -2693,14 +3007,8 @@ mod tests {
 "#,
         );
 
-        let mut messages = Vec::new();
-        process_transaction_buffer(
-            &mut buffer,
-            TradingPlatform::OandaPractice,
-            &mut messages,
-            Some(&fetcher),
-        )
-        .await;
+        let messages =
+            run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), Some(&fetcher)).await;
 
         // [Order, Trade, Account] x2, interleaved per fill.
         assert_eq!(messages.len(), 6);
@@ -2748,14 +3056,8 @@ mod tests {
 "#,
         );
 
-        let mut messages = Vec::new();
-        process_transaction_buffer(
-            &mut buffer,
-            TradingPlatform::OandaPractice,
-            &mut messages,
-            Some(&fetcher),
-        )
-        .await;
+        let messages =
+            run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), Some(&fetcher)).await;
 
         // Fill frames still emitted; no account snapshot when the summary fetch fails.
         assert_eq!(messages.len(), 2);
