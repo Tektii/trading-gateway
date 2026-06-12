@@ -6,10 +6,12 @@ use serde_json::json;
 use tektii_gateway_core::adapter::TradingAdapter;
 use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{
-    ModifyOrderRequest, OrderQueryParams, OrderStatus, OrderType, Side,
+    ModifyOrderRequest, OrderQueryParams, OrderStatus, OrderType, Side, TimeInForce,
 };
 use tektii_gateway_test_support::models::test_order_request;
 use tektii_gateway_test_support::wiremock_helpers::{mount_empty, mount_json, start_mock_server};
+use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::{Mock, ResponseTemplate};
 
 #[tokio::test]
 async fn submit_market_order() {
@@ -108,6 +110,151 @@ async fn submit_order_tracks_oco_group() {
     // Verify OCO group is enriched on get_order
     let order = adapter.get_order("order-abc-123").await.unwrap();
     assert_eq!(order.oco_group_id.as_deref(), Some("group-1"));
+}
+
+async fn mount_order_create_expecting_tif(server: &wiremock::MockServer, tif: &str) {
+    Mock::given(method("POST"))
+        .and(path("/api/v1/orders"))
+        .and(body_partial_json(json!({ "time_in_force": tif })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(engine_order_handle_json(&json!({}))),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn submit_order_forwards_ioc_time_in_force() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_order_create_expecting_tif(&server, "ioc").await;
+
+    let request = tektii_gateway_core::models::OrderRequest {
+        time_in_force: TimeInForce::Ioc,
+        ..test_order_request()
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "order-abc-123");
+}
+
+#[tokio::test]
+async fn submit_order_forwards_gtc_time_in_force() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_order_create_expecting_tif(&server, "gtc").await;
+
+    let request = tektii_gateway_core::models::OrderRequest {
+        time_in_force: TimeInForce::Gtc,
+        ..test_order_request()
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "order-abc-123");
+}
+
+#[tokio::test]
+async fn submit_order_rejects_day_time_in_force() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let request = tektii_gateway_core::models::OrderRequest {
+        time_in_force: TimeInForce::Day,
+        ..test_order_request()
+    };
+    let err = adapter.submit_order(&request).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            GatewayError::InvalidValue { field, provided, .. }
+                if field == "time_in_force" && provided.as_deref() == Some("DAY")
+        ),
+        "expected InvalidValue on time_in_force with wire-form DAY, got: {err:?}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn submit_order_rejects_fok_time_in_force() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let request = tektii_gateway_core::models::OrderRequest {
+        time_in_force: TimeInForce::Fok,
+        ..test_order_request()
+    };
+    let err = adapter.submit_order(&request).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            GatewayError::InvalidValue { field, provided, .. }
+                if field == "time_in_force" && provided.as_deref() == Some("FOK")
+        ),
+        "expected InvalidValue on time_in_force with wire-form FOK, got: {err:?}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn submit_order_rejects_ioc_for_stop_orders() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    for order_type in [OrderType::Stop, OrderType::StopLimit] {
+        let request = tektii_gateway_core::models::OrderRequest {
+            order_type,
+            stop_price: Some(dec!(145)),
+            limit_price: (order_type == OrderType::StopLimit).then(|| dec!(144)),
+            time_in_force: TimeInForce::Ioc,
+            ..test_order_request()
+        };
+        let err = adapter.submit_order(&request).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                GatewayError::InvalidValue { field, provided, .. }
+                    if field == "time_in_force" && provided.as_deref() == Some("IOC")
+            ),
+            "expected InvalidValue on time_in_force for {order_type:?}, got: {err:?}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn get_order_maps_ioc_time_in_force() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/orders/order-abc-123",
+        200,
+        engine_order_json(&json!({"time_in_force": "ioc"})),
+    )
+    .await;
+
+    let order = adapter.get_order("order-abc-123").await.unwrap();
+    assert_eq!(order.time_in_force, TimeInForce::Ioc);
+}
+
+#[tokio::test]
+async fn get_order_defaults_missing_time_in_force_to_gtc() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/orders/order-abc-123",
+        200,
+        engine_order_json(&json!({})),
+    )
+    .await;
+
+    let order = adapter.get_order("order-abc-123").await.unwrap();
+    assert_eq!(order.time_in_force, TimeInForce::Gtc);
 }
 
 #[tokio::test]
@@ -437,6 +584,61 @@ async fn modify_order_happy_path() {
     assert_eq!(result.order.id, "new-order-456");
     assert_eq!(result.previous_order_id, Some("order-abc-123".to_string()));
     assert_eq!(result.order.limit_price, Some(dec!(160)));
+}
+
+#[tokio::test]
+async fn modify_order_preserves_ioc_time_in_force() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/orders/order-abc-123",
+        200,
+        engine_order_json(&json!({
+            "order_type": "limit",
+            "price": "150",
+            "time_in_force": "ioc"
+        })),
+    )
+    .await;
+    mount_empty(&server, "DELETE", "/api/v1/orders/order-abc-123", 204).await;
+    // Replacement POST must carry the original order's IOC time-in-force;
+    // a body without it gets no match and the modify fails.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/orders"))
+        .and(body_partial_json(json!({"time_in_force": "ioc"})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(engine_order_handle_json(&json!({"id": "new-order-456"}))),
+        )
+        .mount(&server)
+        .await;
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/orders/new-order-456",
+        200,
+        engine_order_json(&json!({
+            "id": "new-order-456",
+            "order_type": "limit",
+            "price": "160",
+            "time_in_force": "ioc"
+        })),
+    )
+    .await;
+
+    let request = ModifyOrderRequest {
+        limit_price: Some(dec!(160)),
+        ..Default::default()
+    };
+
+    let result = adapter
+        .modify_order("order-abc-123", &request)
+        .await
+        .unwrap();
+    assert_eq!(result.order.time_in_force, TimeInForce::Ioc);
 }
 
 #[tokio::test]

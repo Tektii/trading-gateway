@@ -182,6 +182,7 @@ pub fn make_engine_order() -> tektii_protocol::rest::Order {
         average_fill_price: None,
         limit_price: None,
         status: tektii_protocol::rest::OrderStatus::Open,
+        time_in_force: tektii_protocol::rest::TimeInForce::Gtc,
         position_id: None,
         created_at: 1_704_067_200_000,
         executed_at: None,
