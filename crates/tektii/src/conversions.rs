@@ -101,6 +101,14 @@ pub const fn engine_reject_reason_to_api(reason: engine::RejectionReason) -> api
     }
 }
 
+/// Convert engine `TimeInForce` to gateway `TimeInForce`.
+pub const fn engine_time_in_force_to_api(tif: engine::TimeInForce) -> api::TimeInForce {
+    match tif {
+        engine::TimeInForce::Gtc => api::TimeInForce::Gtc,
+        engine::TimeInForce::Ioc => api::TimeInForce::Ioc,
+    }
+}
+
 /// Convert engine `OrderEventType` to gateway `OrderEventType`.
 pub const fn engine_order_event_type_to_api(event: engine::OrderEventType) -> ws::OrderEventType {
     match event {
@@ -138,6 +146,32 @@ pub fn api_order_type_to_engine(
             field: "order_type".to_string(),
             message: "TrailingStop not supported by Tektii engine".to_string(),
             provided: Some(format!("{order_type:?}")),
+        }),
+    }
+}
+
+/// Gateway wire spelling of a `TimeInForce`, for error payloads.
+const fn api_time_in_force_wire_name(tif: api::TimeInForce) -> &'static str {
+    match tif {
+        api::TimeInForce::Gtc => "GTC",
+        api::TimeInForce::Day => "DAY",
+        api::TimeInForce::Ioc => "IOC",
+        api::TimeInForce::Fok => "FOK",
+    }
+}
+
+/// Convert gateway `TimeInForce` to engine `TimeInForce`.
+/// Returns error for types the backtest engine doesn't support (`Day`, `Fok`).
+pub fn api_time_in_force_to_engine(
+    tif: api::TimeInForce,
+) -> Result<engine::TimeInForce, GatewayError> {
+    match tif {
+        api::TimeInForce::Gtc => Ok(engine::TimeInForce::Gtc),
+        api::TimeInForce::Ioc => Ok(engine::TimeInForce::Ioc),
+        api::TimeInForce::Day | api::TimeInForce::Fok => Err(GatewayError::InvalidValue {
+            field: "time_in_force".to_string(),
+            message: "only GTC and IOC are supported by the Tektii engine".to_string(),
+            provided: Some(api_time_in_force_wire_name(tif).to_string()),
         }),
     }
 }
@@ -187,6 +221,21 @@ pub fn order_request_to_engine(
     reject_if_true("hidden", req.hidden)?;
 
     let order_type = api_order_type_to_engine(req.order_type)?;
+    let time_in_force = api_time_in_force_to_engine(req.time_in_force)?;
+
+    if time_in_force == engine::TimeInForce::Ioc
+        && matches!(
+            order_type,
+            engine::OrderType::Stop | engine::OrderType::StopLimit
+        )
+    {
+        return Err(GatewayError::InvalidValue {
+            field: "time_in_force".to_string(),
+            message: "IOC is only valid for market and limit orders on the Tektii engine"
+                .to_string(),
+            provided: Some(api_time_in_force_wire_name(req.time_in_force).to_string()),
+        });
+    }
 
     Ok(engine::SubmitOrderRequest {
         symbol: req.symbol.clone(),
@@ -198,6 +247,7 @@ pub fn order_request_to_engine(
         client_order_id: req.client_order_id.clone(),
         position_id: req.position_id.clone(),
         reduce_only: req.reduce_only,
+        time_in_force,
     })
 }
 
@@ -262,7 +312,7 @@ pub fn engine_order_to_api(order: &engine::Order) -> api::Order {
         display_quantity: None,
         oco_group_id: None,
         correlation_id: None,
-        time_in_force: api::TimeInForce::Gtc,
+        time_in_force: engine_time_in_force_to_api(order.time_in_force),
         created_at,
         updated_at,
     }
@@ -433,6 +483,7 @@ mod tests {
             average_fill_price: None,
             limit_price: None,
             status: engine::OrderStatus::Open,
+            time_in_force: engine::TimeInForce::Ioc,
             position_id: None,
             created_at: 1_704_067_200_000,
             executed_at: None,
@@ -451,6 +502,42 @@ mod tests {
         assert_eq!(api_order.remaining_quantity, dec!(50));
         // Partially filled order (50/100) should be PartiallyFilled
         assert_eq!(api_order.status, api::OrderStatus::PartiallyFilled);
+        assert_eq!(api_order.time_in_force, api::TimeInForce::Ioc);
+    }
+
+    #[test]
+    fn test_time_in_force_conversion() {
+        assert_eq!(
+            api_time_in_force_to_engine(api::TimeInForce::Gtc).unwrap(),
+            engine::TimeInForce::Gtc
+        );
+        assert_eq!(
+            api_time_in_force_to_engine(api::TimeInForce::Ioc).unwrap(),
+            engine::TimeInForce::Ioc
+        );
+        for (tif, wire) in [
+            (api::TimeInForce::Day, "DAY"),
+            (api::TimeInForce::Fok, "FOK"),
+        ] {
+            let err = api_time_in_force_to_engine(tif).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    GatewayError::InvalidValue { field, provided, .. }
+                        if field == "time_in_force" && provided.as_deref() == Some(wire)
+                ),
+                "expected InvalidValue with wire-form {wire}, got: {err:?}"
+            );
+        }
+
+        assert_eq!(
+            engine_time_in_force_to_api(engine::TimeInForce::Gtc),
+            api::TimeInForce::Gtc
+        );
+        assert_eq!(
+            engine_time_in_force_to_api(engine::TimeInForce::Ioc),
+            api::TimeInForce::Ioc
+        );
     }
 
     #[test]

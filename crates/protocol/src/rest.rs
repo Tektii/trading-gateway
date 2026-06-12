@@ -40,6 +40,20 @@ pub enum OrderStatus {
     Rejected,
 }
 
+/// How long an order stays working after submission.
+///
+/// The engine only supports GTC and IOC. IOC fills what the trigger tick
+/// supports and cancels the remainder; only valid for market and limit orders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeInForce {
+    /// Good-till-cancelled: rests until filled or cancelled (default).
+    #[default]
+    Gtc,
+    /// Immediate-or-cancel: fills immediately, remainder is cancelled.
+    Ioc,
+}
+
 /// Position side (long or short).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +139,10 @@ pub struct SubmitOrderRequest {
     /// Prevents accidental position flip.
     #[serde(default)]
     pub reduce_only: bool,
+
+    /// Time in force (defaults to GTC).
+    #[serde(default)]
+    pub time_in_force: TimeInForce,
 }
 
 impl SubmitOrderRequest {
@@ -140,6 +158,7 @@ impl SubmitOrderRequest {
             client_order_id: None,
             position_id: None,
             reduce_only: false,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 
@@ -155,6 +174,7 @@ impl SubmitOrderRequest {
             client_order_id: None,
             position_id: None,
             reduce_only: false,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 
@@ -175,7 +195,15 @@ impl SubmitOrderRequest {
             client_order_id: None,
             position_id: None,
             reduce_only: false,
+            time_in_force: TimeInForce::Gtc,
         }
+    }
+
+    /// Set the time in force.
+    #[must_use]
+    pub const fn with_time_in_force(mut self, time_in_force: TimeInForce) -> Self {
+        self.time_in_force = time_in_force;
+        self
     }
 
     /// Create a stop-limit order request.
@@ -196,6 +224,7 @@ impl SubmitOrderRequest {
             client_order_id: None,
             position_id: None,
             reduce_only: false,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 }
@@ -285,6 +314,11 @@ pub struct Order {
 
     /// Current order status.
     pub status: OrderStatus,
+
+    /// Time in force the order was submitted with. Defaults to GTC when
+    /// talking to engine builds that predate time-in-force support.
+    #[serde(default)]
+    pub time_in_force: TimeInForce,
 
     /// Position ID affected by this order (for hedging mode tracking).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -546,6 +580,19 @@ pub struct SymbolsResponse {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    /// Constructors default to GTC; `with_time_in_force` opts an order into
+    /// IOC and it serializes in the engine's snake_case wire form.
+    #[test]
+    fn submit_order_request_with_time_in_force() {
+        let req = SubmitOrderRequest::limit("AAPL", Side::Buy, dec!(10), dec!(150));
+        assert_eq!(req.time_in_force, TimeInForce::Gtc);
+
+        let req = req.with_time_in_force(TimeInForce::Ioc);
+        assert_eq!(req.time_in_force, TimeInForce::Ioc);
+        let value = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(value["time_in_force"], "ioc");
+    }
 
     /// Engine emits a normal-close `Trade` without the `liquidation` field
     /// (TEK-286). The gateway must accept it as `liquidation: false` rather
