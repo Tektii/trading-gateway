@@ -713,3 +713,144 @@ async fn internal_stream_delivers_fills_independent_of_strategy_dedupe() {
         }
     ));
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn stream_won_partial_ioc_delivers_wire_shape_pair_and_suppresses_rest() {
+    // When the stream wins the race for a partial IOC, strategies receive the
+    // wire shape — OrderFilled carrying the filled units, then the terminal
+    // OrderCancelled — in that order, with the order context derived from the
+    // fill's `reason`. The REST response's copies of both transactions must
+    // then be suppressed wholesale.
+    let (server, base_url) = start_mock_server().await;
+    mount_json(&server, "GET", SUMMARY_PATH, 200, oanda_account_json()).await;
+
+    // REST response: partial fill (6000 of 10000) plus the remainder-cancel.
+    let mut body = oanda_market_fill_json(&json!({
+        "id": "9701",
+        "orderID": "9700",
+        "units": "6000"
+    }));
+    body["orderCancelTransaction"] = json!({
+        "id": "9702",
+        "type": "ORDER_CANCEL",
+        "orderID": "9700",
+        "reason": "TIME_IN_FORCE_EXPIRED",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    });
+    mount_json(&server, "POST", ORDERS_PATH, 201, body).await;
+
+    // Stream copy of the same pair, with the fill reason an IOC limit carries.
+    let fill_line = json!({
+        "type": "ORDER_FILL",
+        "id": "9701",
+        "orderID": "9700",
+        "instrument": "EUR_USD",
+        "units": "6000",
+        "price": "1.10000",
+        "reason": "LIMIT_ORDER",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    })
+    .to_string();
+    mount_text(
+        &server,
+        "GET",
+        STREAM_PATH,
+        200,
+        &format!(
+            "{}\n{}\n{}\n",
+            fill_line,
+            order_cancel_line("9702", "9700"),
+            sentinel_line("9703")
+        ),
+    )
+    .await;
+
+    // Adapter and provider share one outbound channel, as wired in production;
+    // the stream delivers the pair before the REST response is processed.
+    let adapter = test_adapter(&base_url);
+    let provider = test_provider(&base_url).with_event_tx(adapter.provider_event_tx_handle());
+    let mut rx = provider.connect(provider_config()).await.unwrap();
+
+    // Record everything up to and including the terminal cancel.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("stream delivers the pair in real time")
+            .expect("stream channel open");
+        let done = matches!(
+            event.msg,
+            WsMessage::Order {
+                event: OrderEventType::OrderCancelled,
+                ..
+            }
+        );
+        events.push(event.msg);
+        if done {
+            break;
+        }
+    }
+
+    let fill_pos = events
+        .iter()
+        .position(
+            |m| matches!(m, WsMessage::Order { event, .. } if *event == OrderEventType::OrderFilled),
+        )
+        .expect("stream publishes the fill before the cancel");
+
+    match &events[fill_pos] {
+        WsMessage::Order { order, .. } => {
+            assert_eq!(order.id, "9700");
+            assert_eq!(order.order_type, OrderType::Limit, "derived from reason");
+            assert_eq!(
+                order.time_in_force,
+                TimeInForce::Gtc,
+                "wire carries no TIF; the contract's documented best-effort"
+            );
+            assert_eq!(order.filled_quantity, dec!(6000));
+            assert_eq!(order.status, OrderStatus::Filled, "wire shape");
+        }
+        other => panic!("expected the fill's Order frame, got {other:?}"),
+    }
+    assert_eq!(count_trades(&events), 1, "the fill's trade frame");
+    assert_eq!(count_accounts(&events), 1, "the fill's account snapshot");
+
+    // The REST response carries the same pair — both copies must be
+    // suppressed while the order handle still reports the partial fill.
+    let request = OrderRequest {
+        symbol: "EUR_USD".into(),
+        quantity: dec!(10000),
+        order_type: OrderType::Limit,
+        limit_price: Some(dec!(1.10)),
+        time_in_force: TimeInForce::Ioc,
+        ..test_order_request()
+    };
+    let handle = adapter.submit_order(&request).await.unwrap();
+    assert_eq!(handle.id, "9700");
+    assert_eq!(handle.status, OrderStatus::PartiallyFilled);
+
+    let later = collect_events(&mut rx, ONE_RECONNECT).await;
+    assert!(
+        count_order_events(&later, OrderEventType::OrderCreated) >= 1,
+        "sentinel must prove the stream is still delivering within the window"
+    );
+    assert_eq!(
+        count_order_events(&later, OrderEventType::OrderFilled)
+            + count_order_events(&later, OrderEventType::OrderPartiallyFilled),
+        0,
+        "REST copy of the stream-published fill must be suppressed"
+    );
+    assert_eq!(
+        count_order_events(&later, OrderEventType::OrderCancelled),
+        0,
+        "REST copy of the stream-published cancel must be suppressed"
+    );
+    assert_eq!(count_trades(&later), 0);
+    assert_eq!(
+        count_accounts(&later),
+        0,
+        "a suppressed REST fill must not add an account snapshot"
+    );
+}

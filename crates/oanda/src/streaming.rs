@@ -1468,6 +1468,29 @@ fn transaction_to_messages(
     }
 }
 
+/// Derive the filled order's type and time-in-force from the `ORDER_FILL`
+/// `reason` -- the only order context the wire line carries.
+///
+/// `MARKET_IF_TOUCHED_ORDER` maps to `StopLimit` and `TRAILING_STOP_LOSS_ORDER`
+/// to `TrailingStop`, matching the adapter's `from_oanda_order_type`. Market
+/// fills get `Fok`: OANDA market orders are FOK or IOC only (never GTC), and
+/// the adapter always submits FOK. Resting-order fills default to `Gtc` (see
+/// the event contract below). A missing or unrecognised reason keeps the
+/// pre-enrichment `(Market, Gtc)` -- an "unknown" sentinel, not a wire-valid
+/// combination.
+fn fill_reason_to_order_context(reason: Option<&str>) -> (OrderType, TimeInForce) {
+    match reason {
+        Some("LIMIT_ORDER" | "TAKE_PROFIT_ORDER") => (OrderType::Limit, TimeInForce::Gtc),
+        Some("STOP_ORDER" | "STOP_LOSS_ORDER" | "GUARANTEED_STOP_LOSS_ORDER") => {
+            (OrderType::Stop, TimeInForce::Gtc)
+        }
+        Some("TRAILING_STOP_LOSS_ORDER") => (OrderType::TrailingStop, TimeInForce::Gtc),
+        Some("MARKET_IF_TOUCHED_ORDER") => (OrderType::StopLimit, TimeInForce::Gtc),
+        Some(r) if r.starts_with("MARKET_ORDER") => (OrderType::Market, TimeInForce::Fok),
+        _ => (OrderType::Market, TimeInForce::Gtc),
+    }
+}
+
 /// ORDER_FILL -> Filled order event, plus a Trade carrying commission and an
 /// optional Financing for carry settled on the fill.
 ///
@@ -1480,6 +1503,31 @@ fn transaction_to_messages(
 ///
 /// `commission_currency` is left empty: OANDA does not carry the account home
 /// currency on the transaction line (amounts are denominated in it).
+///
+/// # Event contract: stream-won vs REST-won fills
+///
+/// A fill belonging to a synchronous REST `submit_order` is published by
+/// whichever path claims its transaction id first (see `dedupe`). The two
+/// shapes differ -- which one strategies receive depends on the race winner:
+///
+/// * **REST wins** (`OandaAdapter::emit_rest_fill`): full request context --
+///   real `order_type`/`time_in_force`, `quantity` = requested, and a partial
+///   IOC publishes `OrderPartiallyFilled(requested/filled/remaining)` followed
+///   by `OrderCancelled`.
+/// * **Stream wins** (this conversion): wire context only -- `order_type` and
+///   `time_in_force` derived from the fill `reason`
+///   ([`fill_reason_to_order_context`]), `quantity` = filled units,
+///   `remaining` = 0, and a partial IOC publishes OANDA's wire shape:
+///   `OrderFilled(filled)` followed by `OrderCancelled`. A stream-won
+///   IOC/FOK limit fill reports `Gtc` (the wire does not carry TIF), and
+///   non-market types carry `limit_price`/`stop_price` = `None` (the wire
+///   does not carry the trigger price either).
+///
+/// Either way the fill+cancel pair is claimed atomically and stays internally
+/// coherent, and the `Trade` frame is identical in both shapes -- consumers
+/// pairing executions should key on trades. Resting-order fills (entered via
+/// the create response, filled later) have no REST competitor and always take
+/// the stream shape.
 fn transaction_fill_to_messages(
     tx: &OandaTransactionStreamLine,
     _platform: TradingPlatform,
@@ -1505,13 +1553,14 @@ fn transaction_fill_to_messages(
         .unwrap_or("unknown");
 
     let timestamp = parse_transaction_time(tx.time.as_deref());
+    let (order_type, time_in_force) = fill_reason_to_order_context(tx.reason.as_deref());
 
     let order = Order {
         id: order_id.to_string(),
         client_order_id: tx.client_order_id.clone(),
         symbol: symbol.clone(),
         side,
-        order_type: OrderType::Market,
+        order_type,
         quantity,
         filled_quantity: quantity,
         remaining_quantity: Decimal::ZERO,
@@ -1531,7 +1580,7 @@ fn transaction_fill_to_messages(
         display_quantity: None,
         oco_group_id: None,
         correlation_id: None,
-        time_in_force: TimeInForce::Gtc,
+        time_in_force,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -2025,6 +2074,93 @@ mod tests {
             }
             other => panic!("Expected Order event, got {other:?}"),
         }
+    }
+
+    /// Extract `(order_type, time_in_force)` from a fill's `Order` frame.
+    fn fill_order_context(reason: Option<&str>) -> (OrderType, TimeInForce) {
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("10000".to_string()),
+            price: Some("1.08525".to_string()),
+            order_id: Some("6357".to_string()),
+            reason: reason.map(String::from),
+            ..test_tx("6360", "ORDER_FILL")
+        };
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        match &msgs[0] {
+            WsMessage::Order { order, .. } => (order.order_type, order.time_in_force),
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_fill_market_reasons_map_to_market_fok() {
+        for reason in [
+            "MARKET_ORDER",
+            "MARKET_ORDER_TRADE_CLOSE",
+            "MARKET_ORDER_POSITION_CLOSEOUT",
+            "MARKET_ORDER_MARGIN_CLOSEOUT",
+        ] {
+            assert_eq!(
+                fill_order_context(Some(reason)),
+                (OrderType::Market, TimeInForce::Fok),
+                "reason {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_fill_limit_reasons_map_to_limit() {
+        for reason in ["LIMIT_ORDER", "TAKE_PROFIT_ORDER"] {
+            assert_eq!(
+                fill_order_context(Some(reason)),
+                (OrderType::Limit, TimeInForce::Gtc),
+                "reason {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_fill_stop_reasons_map_to_stop() {
+        for reason in [
+            "STOP_ORDER",
+            "STOP_LOSS_ORDER",
+            "GUARANTEED_STOP_LOSS_ORDER",
+        ] {
+            assert_eq!(
+                fill_order_context(Some(reason)),
+                (OrderType::Stop, TimeInForce::Gtc),
+                "reason {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_fill_trailing_stop_reason_maps_to_trailing_stop() {
+        assert_eq!(
+            fill_order_context(Some("TRAILING_STOP_LOSS_ORDER")),
+            (OrderType::TrailingStop, TimeInForce::Gtc)
+        );
+    }
+
+    #[test]
+    fn transaction_fill_market_if_touched_reason_maps_to_stop_limit() {
+        assert_eq!(
+            fill_order_context(Some("MARKET_IF_TOUCHED_ORDER")),
+            (OrderType::StopLimit, TimeInForce::Gtc)
+        );
+    }
+
+    #[test]
+    fn transaction_fill_missing_or_unknown_reason_defaults_market_gtc() {
+        assert_eq!(
+            fill_order_context(None),
+            (OrderType::Market, TimeInForce::Gtc)
+        );
+        assert_eq!(
+            fill_order_context(Some("FIXED_PRICE_ORDER")),
+            (OrderType::Market, TimeInForce::Gtc)
+        );
     }
 
     #[test]
