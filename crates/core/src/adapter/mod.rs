@@ -42,11 +42,12 @@ pub trait TradingAdapter: Send + Sync {
     /// connected strategies.
     ///
     /// Most adapters return `None` — their events flow exclusively from the
-    /// provider's streaming side. The Oanda adapter returns `Some`: Oanda's
-    /// transaction stream does not deliver `ORDER_FILL`, so the synchronous REST
-    /// order response is the only fill signal, and the adapter publishes the
-    /// fill event onto this shared sender (populated by the provider's
-    /// `connect`) so strategy clients observe it.
+    /// provider's streaming side. The Oanda adapter returns `Some`: its
+    /// synchronous REST order response carries the fill, which the adapter
+    /// publishes onto this shared sender (populated by the provider's
+    /// `connect`) so strategies observe it without waiting on the transaction
+    /// stream; the stream's copy of the same transaction is deduplicated
+    /// inside the Oanda crate.
     ///
     /// [`WebSocketProvider`]: crate::websocket::provider::WebSocketProvider
     fn provider_event_sender(

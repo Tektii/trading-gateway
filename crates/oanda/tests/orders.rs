@@ -12,7 +12,9 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{
     ModifyOrderRequest, OrderQueryParams, OrderRequest, OrderStatus, OrderType, Side, TimeInForce,
 };
-use tektii_gateway_core::websocket::messages::{AccountEventType, OrderEventType, WsMessage};
+use tektii_gateway_core::websocket::messages::{
+    AccountEventType, OrderEventType, TradeEventType, WsMessage,
+};
 use tektii_gateway_test_support::models::test_order_request;
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 use tokio::sync::mpsc;
@@ -130,12 +132,15 @@ async fn submit_market_order_fill_emits_account_snapshot() {
     };
     assert_eq!(event_type, OrderEventType::OrderFilled);
 
-    let second = rx.try_recv().expect("account snapshot follows the fill");
+    let second = rx.try_recv().expect("trade frame follows the fill");
+    assert!(matches!(second.msg, WsMessage::Trade { .. }));
+
+    let third = rx.try_recv().expect("account snapshot follows the fill");
     let WsMessage::Account {
         event,
         account,
         timestamp,
-    } = second.msg
+    } = third.msg
     else {
         panic!("expected an account event after the fill");
     };
@@ -153,7 +158,115 @@ async fn submit_market_order_fill_emits_account_snapshot() {
     assert_eq!(account.margin_available, dec!(95000.00));
     assert_eq!(account.unrealized_pnl, dec!(500.00));
     assert_eq!(account.currency, "USD");
-    assert!(rx.try_recv().is_err(), "exactly two events expected");
+    assert!(rx.try_recv().is_err(), "exactly three events expected");
+}
+
+#[tokio::test]
+async fn submit_market_order_fill_emits_trade_and_financing_frames() {
+    // Frame parity with the transaction stream: whichever path publishes a
+    // fill, strategies receive the same shape — Order, Trade (carrying the
+    // per-fill commission), Financing (when the fill settles carry), then
+    // the account snapshot.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({
+            "orderID": "455",
+            "commission": "1.25",
+            "financing": "-0.50"
+        })),
+    )
+    .await;
+    mount_json(
+        &server,
+        "GET",
+        "/v3/accounts/test-account-123/summary",
+        200,
+        oanda_account_json(),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let first = rx.try_recv().expect("fill event published");
+    assert!(matches!(
+        first.msg,
+        WsMessage::Order {
+            event: OrderEventType::OrderFilled,
+            ..
+        }
+    ));
+
+    let second = rx.try_recv().expect("trade frame follows the fill");
+    let WsMessage::Trade { event, trade, .. } = second.msg else {
+        panic!("expected a trade event after the fill");
+    };
+    assert_eq!(event, TradeEventType::TradeFilled);
+    assert_eq!(trade.id, "456", "trade id is the fill transaction id");
+    assert_eq!(trade.order_id, "455");
+    assert_eq!(trade.symbol, "EUR_USD");
+    assert_eq!(trade.side, Side::Buy);
+    assert_eq!(trade.quantity, dec!(10000));
+    assert_eq!(trade.price, dec!(1.10000));
+    assert_eq!(trade.commission, dec!(1.25));
+
+    let third = rx.try_recv().expect("financing frame follows the trade");
+    let WsMessage::Financing { symbol, amount, .. } = third.msg else {
+        panic!("expected a financing event after the trade");
+    };
+    assert_eq!(symbol, "EUR_USD");
+    assert_eq!(amount, dec!(-0.50));
+
+    let fourth = rx
+        .try_recv()
+        .expect("account snapshot follows the fill frames");
+    assert!(matches!(fourth.msg, WsMessage::Account { .. }));
+
+    assert!(rx.try_recv().is_err(), "exactly four events expected");
+}
+
+#[tokio::test]
+async fn submit_fill_without_financing_emits_no_financing_frame() {
+    // Zero/absent financing books no cash flow — no Financing frame, same as
+    // the stream conversion.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"commission": "0.0000", "financing": "0.0000"})),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let first = rx.try_recv().expect("fill event published");
+    assert!(matches!(first.msg, WsMessage::Order { .. }));
+    let second = rx.try_recv().expect("trade frame follows the fill");
+    let WsMessage::Trade { trade, .. } = second.msg else {
+        panic!("expected a trade event after the fill");
+    };
+    assert_eq!(trade.commission, Decimal::ZERO);
+    assert!(
+        rx.try_recv().is_err(),
+        "no financing frame and no snapshot (summary not mounted)"
+    );
 }
 
 #[tokio::test]
@@ -189,12 +302,15 @@ async fn submit_fill_snapshot_balance_falls_back_to_summary() {
     let first = rx.try_recv().expect("fill event published");
     assert!(matches!(first.msg, WsMessage::Order { .. }));
 
-    let second = rx.try_recv().expect("account snapshot follows the fill");
-    let WsMessage::Account { account, .. } = second.msg else {
+    let second = rx.try_recv().expect("trade frame follows the fill");
+    assert!(matches!(second.msg, WsMessage::Trade { .. }));
+
+    let third = rx.try_recv().expect("account snapshot follows the fill");
+    let WsMessage::Account { account, .. } = third.msg else {
         panic!("expected an account event after the fill");
     };
     assert_eq!(account.balance, dec!(100000.00));
-    assert!(rx.try_recv().is_err(), "exactly two events expected");
+    assert!(rx.try_recv().is_err(), "exactly three events expected");
 }
 
 #[tokio::test]
@@ -230,6 +346,8 @@ async fn submit_fill_skips_account_snapshot_when_summary_fails() {
 
     let first = rx.try_recv().expect("fill event published");
     assert!(matches!(first.msg, WsMessage::Order { .. }));
+    let second = rx.try_recv().expect("trade frame follows the fill");
+    assert!(matches!(second.msg, WsMessage::Trade { .. }));
     assert!(
         rx.try_recv().is_err(),
         "no account snapshot expected when the summary fetch fails"
@@ -381,6 +499,8 @@ async fn submit_fill_takes_precedence_over_cancel() {
         panic!("expected an order event");
     };
     assert_eq!(event_type, OrderEventType::OrderFilled);
+    let second = rx.try_recv().expect("trade frame follows the fill");
+    assert!(matches!(second.msg, WsMessage::Trade { .. }));
     assert!(rx.try_recv().is_err(), "no cancel event expected");
 }
 
@@ -451,12 +571,18 @@ async fn submit_partial_ioc_fill_reports_partial_then_cancel() {
     assert_eq!(order.remaining_quantity, dec!(4000));
     assert_eq!(order.average_fill_price, Some(dec!(1.10000)));
 
-    let second = rx.try_recv().expect("terminal cancel event published");
+    let second = rx.try_recv().expect("trade frame follows the partial fill");
+    let WsMessage::Trade { trade, .. } = second.msg else {
+        panic!("expected a trade event after the partial fill");
+    };
+    assert_eq!(trade.quantity, dec!(6000), "trade carries the filled units");
+
+    let third = rx.try_recv().expect("terminal cancel event published");
     let WsMessage::Order {
         event: event_type,
         order,
         ..
-    } = second.msg
+    } = third.msg
     else {
         panic!("expected an order event");
     };
@@ -468,13 +594,13 @@ async fn submit_partial_ioc_fill_reports_partial_then_cancel() {
     assert_eq!(order.remaining_quantity, dec!(4000));
     assert_eq!(order.average_fill_price, Some(dec!(1.10000)));
 
-    let third = rx.try_recv().expect("account snapshot follows the cancel");
-    let WsMessage::Account { event, .. } = third.msg else {
+    let fourth = rx.try_recv().expect("account snapshot follows the cancel");
+    let WsMessage::Account { event, .. } = fourth.msg else {
         panic!("expected an account event after the order frames");
     };
     assert_eq!(event, AccountEventType::BalanceUpdated);
 
-    assert!(rx.try_recv().is_err(), "exactly three events expected");
+    assert!(rx.try_recv().is_err(), "exactly four events expected");
 }
 
 #[tokio::test]
@@ -601,7 +727,9 @@ async fn submit_partial_fill_without_cancel_emits_partial_only() {
     assert_eq!(order.filled_quantity, dec!(6000));
     assert_eq!(order.remaining_quantity, dec!(4000));
 
-    assert!(rx.try_recv().is_err(), "exactly one event expected");
+    let second = rx.try_recv().expect("trade frame follows the partial fill");
+    assert!(matches!(second.msg, WsMessage::Trade { .. }));
+    assert!(rx.try_recv().is_err(), "exactly two events expected");
 }
 
 #[tokio::test]

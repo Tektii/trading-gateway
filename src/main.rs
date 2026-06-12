@@ -692,8 +692,9 @@ async fn connect_oanda(
     }
 
     // Share the adapter's outbound event sender with the provider so the
-    // adapter's REST order path can publish fills (which Oanda's transaction
-    // stream omits) onto the same stream strategies receive from.
+    // adapter's REST order path can publish fills onto the same stream
+    // strategies receive from (deduped against the transaction stream's
+    // copy by transaction id).
     let mut provider = OandaWebSocketProvider::new(&creds, platform);
     if let Some(adapter) = provider_registry.get_trading_adapter(platform).await
         && let Some(event_tx) = adapter.provider_event_sender()

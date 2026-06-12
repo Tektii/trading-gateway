@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod capabilities;
 pub mod credentials;
+mod dedupe;
 pub mod streaming;
 pub mod types;
 

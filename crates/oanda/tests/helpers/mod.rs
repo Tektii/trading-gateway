@@ -53,6 +53,12 @@ pub fn oanda_order_json(overrides: &Value) -> Value {
 }
 
 /// Oanda market order fill response (orderFillTransaction present).
+///
+/// NOTE: fill/cancel transaction ids are claimed once per process by the
+/// adapter's stream-vs-REST dedupe. Safe under nextest (one process per
+/// test), but a single test that submits two orders reusing the default
+/// id "456" will see the second fill's events suppressed — override `id`
+/// per order in that case.
 pub fn oanda_market_fill_json(overrides: &Value) -> Value {
     let mut base = json!({
         "orderFillTransaction": {
