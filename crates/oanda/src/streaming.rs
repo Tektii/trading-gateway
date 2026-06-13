@@ -83,6 +83,11 @@ pub(crate) const ACCOUNT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Initial reconnection backoff.
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+/// Consecutive failed candle-poll cycles tolerated before the poll gives up and stops.
+/// A single transient OANDA blip (the failure this guards) recovers on the next attempt;
+/// only a sustained run -- roughly three minutes once the backoff saturates at
+/// `MAX_BACKOFF` -- indicates a real outage worth stopping for and surfacing loudly.
+const MAX_CONSECUTIVE_CANDLE_POLL_FAILURES: u32 = 8;
 
 // ============================================================================
 // Error type (internal to streaming)
@@ -764,7 +769,11 @@ async fn poll_candles(
 ///   single missed boundary recovers the skipped bar(s) rather than dropping them. A candle
 ///   returned repeatedly (quiet/closed market) is suppressed because it is not past the watermark.
 ///
-/// Returns `false` if a permanent auth failure was hit, signalling the caller to stop polling.
+/// Returns `true` if the cycle was healthy. Returns `false` if any symbol hit a retryable HTTP
+/// failure (auth blip, 5xx, network, decode) -- the caller backs off and retries rather than
+/// stopping. A 401/403 is treated as transient here: OANDA has been observed to return a
+/// spurious 401 on the candle endpoint while the same token streams prices and reads the
+/// account fine, so a momentary auth blip must not latch the candle feed off permanently.
 async fn poll_and_emit(
     client: &Client,
     rest_url: &str,
@@ -774,25 +783,28 @@ async fn poll_and_emit(
     event_tx: &Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
     last_emitted: &mut HashMap<String, DateTime<Utc>>,
 ) -> bool {
+    let mut healthy = true;
     for symbol in symbols {
         let candles = match poll_candles(client, rest_url, api_token, symbol).await {
             Ok(candles) => candles,
             Err(CandlePollError::Auth(msg)) => {
-                error!(
+                warn!(
                     platform = %platform,
                     symbol = %symbol,
                     error = %msg,
-                    "Candle poll auth failure -- stopping candle poll"
+                    "Candle poll auth failure -- treating as transient, will retry with backoff"
                 );
-                return false;
+                healthy = false;
+                continue;
             }
             Err(CandlePollError::Transient(msg)) => {
                 warn!(
                     platform = %platform,
                     symbol = %symbol,
                     error = %msg,
-                    "Candle poll error -- will retry next minute"
+                    "Candle poll error -- will retry with backoff"
                 );
+                healthy = false;
                 continue;
             }
         };
@@ -823,15 +835,18 @@ async fn poll_and_emit(
         }
     }
 
-    true
+    healthy
 }
 
 /// Poll Oanda's `/candles` endpoint on the minute boundary and emit `WsMessage::Candle`.
 ///
-/// Boundary-aligned: each iteration recomputes the next minute from `Utc::now()` (so the
-/// schedule self-corrects against poll latency) and wakes a few seconds past it, by which
-/// point the just-closed candle is finalized. Transient errors are logged and retried next
-/// minute (the 60s cadence is its own backoff); a permanent auth failure stops the task.
+/// Boundary-aligned on the happy path: each iteration recomputes the next minute from
+/// `Utc::now()` (so the schedule self-corrects against poll latency) and wakes a few seconds
+/// past it, by which point the just-closed candle is finalized. After a failed cycle it
+/// retries sooner on bounded exponential backoff (mirroring the transaction stream) so a
+/// transient OANDA blip -- including a spurious 401 -- recovers within seconds instead of
+/// stalling a full minute, and only gives up (with a loud `error!`) after
+/// `MAX_CONSECUTIVE_CANDLE_POLL_FAILURES` consecutive failures, i.e. a sustained outage.
 /// Also stops on `poll_cancel` (respawn) or `parent_cancel` (disconnect).
 #[allow(clippy::too_many_arguments)]
 async fn run_candle_poll(
@@ -845,12 +860,18 @@ async fn run_candle_poll(
     parent_cancel: CancellationToken,
 ) {
     let mut last_emitted: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut backoff = INITIAL_BACKOFF;
+    let mut consecutive_failures: u32 = 0;
 
     loop {
-        let now = Utc::now();
-        let wake_at =
-            next_minute_boundary(now) + chrono::Duration::seconds(CANDLE_POLL_OFFSET_SECS);
-        let sleep_dur = (wake_at - now).to_std().unwrap_or(Duration::ZERO);
+        let sleep_dur = if consecutive_failures == 0 {
+            let now = Utc::now();
+            let wake_at =
+                next_minute_boundary(now) + chrono::Duration::seconds(CANDLE_POLL_OFFSET_SECS);
+            (wake_at - now).to_std().unwrap_or(Duration::ZERO)
+        } else {
+            backoff
+        };
 
         tokio::select! {
             () = tokio::time::sleep(sleep_dur) => {}
@@ -869,7 +890,7 @@ async fn run_candle_poll(
             continue;
         }
 
-        let keep_polling = poll_and_emit(
+        let healthy = poll_and_emit(
             client,
             rest_url,
             api_token,
@@ -880,8 +901,20 @@ async fn run_candle_poll(
         )
         .await;
 
-        if !keep_polling {
-            return;
+        if healthy {
+            consecutive_failures = 0;
+            backoff = INITIAL_BACKOFF;
+        } else {
+            consecutive_failures += 1;
+            if consecutive_failures >= MAX_CONSECUTIVE_CANDLE_POLL_FAILURES {
+                error!(
+                    platform = %platform,
+                    consecutive_failures,
+                    "Candle poll failed for too many consecutive attempts -- stopping candle poll"
+                );
+                return;
+            }
+            backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
 }
@@ -3661,7 +3694,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_and_emit_stops_on_auth_failure() {
+    async fn poll_and_emit_reports_auth_failure_as_unhealthy() {
+        // A 403/401 reports an unhealthy (retryable) cycle rather than signalling a permanent
+        // stop -- the caller backs off and retries. No candle is emitted on the failed cycle.
         let (server, base_url) = start_mock_server().await;
         mount_json(
             &server,
@@ -3676,7 +3711,7 @@ mod tests {
         let event_tx = Arc::new(RwLock::new(Some(tx)));
         let mut last_emitted = HashMap::new();
 
-        let ok = poll_and_emit(
+        let healthy = poll_and_emit(
             &Client::new(),
             &base_url,
             "test-token",
@@ -3687,8 +3722,44 @@ mod tests {
         )
         .await;
 
-        assert!(!ok, "auth failure should signal the poll to stop");
+        assert!(!healthy, "auth failure should mark the cycle unhealthy");
         assert!(rx.try_recv().is_err(), "no candle on auth failure");
+    }
+
+    #[tokio::test]
+    async fn poll_and_emit_reports_transient_failure_as_unhealthy() {
+        // A 5xx marks the cycle unhealthy so the caller backs off -- previously a transient
+        // error was swallowed and the cycle reported healthy, retrying only at the 60s cadence.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            500,
+            serde_json::json!({ "errorMessage": "boom" }),
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let mut last_emitted = HashMap::new();
+
+        let healthy = poll_and_emit(
+            &Client::new(),
+            &base_url,
+            "test-token",
+            &["EUR_USD".to_string()],
+            TradingPlatform::OandaPractice,
+            &event_tx,
+            &mut last_emitted,
+        )
+        .await;
+
+        assert!(
+            !healthy,
+            "transient failure should mark the cycle unhealthy"
+        );
+        assert!(rx.try_recv().is_err(), "no candle on transient failure");
     }
 
     #[tokio::test]
@@ -3791,6 +3862,112 @@ mod tests {
         assert!(
             res.is_ok(),
             "run_candle_poll should return promptly when cancelled"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_candle_poll_resumes_after_transient_auth_failure() {
+        // A momentary 401 must not latch the candle feed off: the poll backs off and
+        // recovers on the next attempt. First request 401, every later request 200+candle.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let (server, base_url) = start_mock_server().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/instruments/EUR_USD/candles"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({ "errorMessage": "transient blip" })),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            200,
+            serde_json::json!({ "candles": [candle_value("2024-01-15T10:00:00.000000000Z", true)] }),
+        )
+        .await;
+
+        let instruments = Arc::new(RwLock::new(vec!["EUR_USD".to_string()]));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let poll_cancel = CancellationToken::new();
+        let parent_cancel = CancellationToken::new();
+        let client = Client::new();
+
+        let poll = run_candle_poll(
+            &client,
+            &base_url,
+            "test-token",
+            instruments,
+            TradingPlatform::OandaPractice,
+            event_tx,
+            poll_cancel.clone(),
+            parent_cancel,
+        );
+        tokio::pin!(poll);
+
+        let event = tokio::select! {
+            () = &mut poll => panic!("candle poll exited on the transient 401 instead of recovering"),
+            ev = rx.recv() => ev.expect("poll should emit the recovered candle"),
+        };
+        match event.msg {
+            WsMessage::Candle { bar, .. } => assert_eq!(bar.symbol, "EUR_USD"),
+            other => panic!("expected Candle, got {other:?}"),
+        }
+
+        // The poll is still alive after recovery -- tear it down cleanly.
+        poll_cancel.cancel();
+        let _ = poll.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_candle_poll_gives_up_after_sustained_failure() {
+        // A sustained outage (every poll 401s) must eventually give up loudly and return,
+        // but only after retrying -- not on the first failure as the old code did.
+        let (server, base_url) = start_mock_server().await;
+        mount_json(
+            &server,
+            "GET",
+            "/v3/instruments/EUR_USD/candles",
+            401,
+            serde_json::json!({ "errorMessage": "still down" }),
+        )
+        .await;
+
+        let instruments = Arc::new(RwLock::new(vec!["EUR_USD".to_string()]));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let event_tx = Arc::new(RwLock::new(Some(tx)));
+        let client = Client::new();
+
+        // Awaited directly under a paused clock: auto-advance fast-forwards the boundary
+        // and backoff sleeps, so the poll exhausts its retry budget and returns in real
+        // milliseconds. The old code returned after a single 401 (one request); the fix
+        // retries before giving up.
+        run_candle_poll(
+            &client,
+            &base_url,
+            "test-token",
+            instruments,
+            TradingPlatform::OandaPractice,
+            event_tx,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        )
+        .await;
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("mock server should record requests");
+        assert_eq!(
+            requests.len(),
+            MAX_CONSECUTIVE_CANDLE_POLL_FAILURES as usize,
+            "candle poll should give up only after exactly the sustained-failure budget"
         );
     }
 
