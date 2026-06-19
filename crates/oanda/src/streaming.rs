@@ -1482,13 +1482,20 @@ fn transaction_to_messages(
     match tx.transaction_type.as_str() {
         "ORDER_FILL" => transaction_fill_to_messages(tx, platform),
         "ORDER_CANCEL" => transaction_cancel_to_messages(tx, platform),
-        "LIMIT_ORDER" | "STOP_ORDER" | "MARKET_IF_TOUCHED_ORDER" => {
-            transaction_new_order_to_messages(tx, platform)
-        }
+        // STOP_LOSS_ORDER / TAKE_PROFIT_ORDER are the dependent legs OANDA
+        // creates server-side on a native bracket's entry fill. They reference a
+        // trade and carry no instrument/units, so the emitted OrderCreated is
+        // wire-only (id, type, trigger price); without it the SL leg -- the OCO
+        // loser, which never fills -- would never surface to consumers.
+        "LIMIT_ORDER"
+        | "STOP_ORDER"
+        | "MARKET_IF_TOUCHED_ORDER"
+        | "STOP_LOSS_ORDER"
+        | "TAKE_PROFIT_ORDER" => transaction_new_order_to_messages(tx, platform),
         "MARKET_ORDER_REJECT" => transaction_reject_to_messages(tx, platform),
         "DAILY_FINANCING" => transaction_financing_to_messages(tx, platform),
-        // Ignored transaction types: STOP_LOSS_ORDER, TAKE_PROFIT_ORDER,
-        // TRAILING_STOP_LOSS_ORDER, etc.
+        // Ignored transaction types: TRAILING_STOP_LOSS_ORDER (carries a distance,
+        // not a price), MARKET_ORDER (its fill is what matters), etc.
         other => {
             debug!(
                 platform = %platform,
@@ -1780,8 +1787,8 @@ fn transaction_new_order_to_messages(
     let trigger_price = tx.price.as_deref().and_then(|p| Decimal::from_str(p).ok());
 
     let order_type = match tx.transaction_type.as_str() {
-        "LIMIT_ORDER" => OrderType::Limit,
-        "STOP_ORDER" => OrderType::Stop,
+        "LIMIT_ORDER" | "TAKE_PROFIT_ORDER" => OrderType::Limit,
+        "STOP_ORDER" | "STOP_LOSS_ORDER" => OrderType::Stop,
         _ => OrderType::StopLimit,
     };
 
@@ -2321,14 +2328,65 @@ mod tests {
     }
 
     #[test]
+    fn transaction_stop_loss_order_emits_created() {
+        let tx = OandaTransactionStreamLine {
+            price: Some("1.14362".to_string()),
+            ..test_tx("6211", "STOP_LOSS_ORDER")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 1);
+
+        match &msgs[0] {
+            WsMessage::Order { event, order, .. } => {
+                assert_eq!(*event, OrderEventType::OrderCreated);
+                assert_eq!(order.id, "6211");
+                assert_eq!(order.order_type, OrderType::Stop);
+                // Wire-only: the SL transaction carries no instrument/units.
+                assert!(order.symbol.is_empty());
+                assert_eq!(order.quantity, Decimal::ZERO);
+                assert_eq!(
+                    order.stop_price,
+                    Some(Decimal::from_str("1.14362").unwrap())
+                );
+                assert_eq!(order.status, OrderStatus::Open);
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_take_profit_order_emits_created() {
+        let tx = OandaTransactionStreamLine {
+            price: Some("1.14398".to_string()),
+            ..test_tx("6212", "TAKE_PROFIT_ORDER")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 1);
+
+        match &msgs[0] {
+            WsMessage::Order { event, order, .. } => {
+                assert_eq!(*event, OrderEventType::OrderCreated);
+                assert_eq!(order.id, "6212");
+                assert_eq!(order.order_type, OrderType::Limit);
+                assert_eq!(
+                    order.limit_price,
+                    Some(Decimal::from_str("1.14398").unwrap())
+                );
+                assert_eq!(order.status, OrderStatus::Open);
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn transaction_ignored_types_produce_no_messages() {
-        // DAILY_FINANCING is no longer ignored -- it now emits Financing messages
-        // (see transaction_daily_financing_emits_per_position).
-        for tx_type in &[
-            "STOP_LOSS_ORDER",
-            "TAKE_PROFIT_ORDER",
-            "TRAILING_STOP_LOSS_ORDER",
-        ] {
+        // DAILY_FINANCING, STOP_LOSS_ORDER, and TAKE_PROFIT_ORDER are no longer
+        // ignored -- they emit Financing / OrderCreated messages respectively.
+        // TRAILING_STOP_LOSS_ORDER stays ignored (the transaction carries a
+        // distance, not a price, which the wire-only converter cannot model).
+        for tx_type in &["TRAILING_STOP_LOSS_ORDER", "MARKET_ORDER"] {
             let tx = test_tx("9999", tx_type);
 
             let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
@@ -2573,6 +2631,35 @@ mod tests {
         let messages = run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), None).await;
 
         assert_eq!(messages.len(), 2);
+        assert!(buffer.is_empty(), "Buffer should be fully consumed");
+    }
+
+    #[tokio::test]
+    async fn ndjson_stop_loss_order_surfaces_through_strategy_sink() {
+        // A native bracket's server-side SL leg arrives as a STOP_LOSS_ORDER line.
+        // It is not a REST-published type, so the dedupe never suppresses it; it
+        // must reach the strategy sink as an OrderCreated.
+        let mut buffer = BytesMut::new();
+        buffer.extend_from_slice(
+            br#"{"type":"STOP_LOSS_ORDER","id":"6211","price":"1.14362","reason":"ON_FILL"}
+"#,
+        );
+
+        let messages = run_buffer_through_strategy_sink(&mut buffer, &fresh_dedupe(), None).await;
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            WsMessage::Order { event, order, .. } => {
+                assert_eq!(*event, OrderEventType::OrderCreated);
+                assert_eq!(order.id, "6211");
+                assert_eq!(order.order_type, OrderType::Stop);
+                assert_eq!(
+                    order.stop_price,
+                    Some(Decimal::from_str("1.14362").unwrap())
+                );
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
         assert!(buffer.is_empty(), "Buffer should be fully consumed");
     }
 
