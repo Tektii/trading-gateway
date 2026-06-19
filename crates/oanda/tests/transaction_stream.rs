@@ -21,7 +21,7 @@ use rust_decimal_macros::dec;
 use serde_json::json;
 use tektii_gateway_core::adapter::TradingAdapter;
 use tektii_gateway_core::models::{
-    OrderRequest, OrderStatus, OrderType, TimeInForce, TradingPlatform,
+    Order, OrderRequest, OrderStatus, OrderType, TimeInForce, TradingPlatform,
 };
 use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
 use tektii_gateway_core::websocket::provider::{
@@ -121,6 +121,19 @@ fn count_order_events(events: &[WsMessage], wanted: OrderEventType) -> usize {
         .iter()
         .filter(|m| matches!(m, WsMessage::Order { event, .. } if *event == wanted))
         .count()
+}
+
+fn find_order_event<'a>(
+    events: &'a [WsMessage],
+    order_id: &str,
+    wanted: OrderEventType,
+) -> Option<&'a Order> {
+    events.iter().find_map(|m| match m {
+        WsMessage::Order { event, order, .. } if *event == wanted && order.id == order_id => {
+            Some(order)
+        }
+        _ => None,
+    })
 }
 
 fn count_trades(events: &[WsMessage]) -> usize {
@@ -852,5 +865,97 @@ async fn stream_won_partial_ioc_delivers_wire_shape_pair_and_suppresses_rest() {
         count_accounts(&later),
         0,
         "a suppressed REST fill must not add an account snapshot"
+    );
+}
+
+/// A native-bracket dependent leg create (`STOP_LOSS_ORDER` / `TAKE_PROFIT_ORDER`).
+/// OANDA creates these server-side on the entry fill; the wire line references a
+/// trade and carries no instrument/units, only the trigger price.
+fn dependent_leg_line(id: &str, leg_type: &str, price: &str) -> String {
+    json!({
+        "type": leg_type,
+        "id": id,
+        "price": price,
+        "time": "2024-01-15T10:30:00.000000000Z"
+    })
+    .to_string()
+}
+
+/// The C09 native-bracket race, at the gateway boundary: the marketable
+/// take-profit fills and closes the trade, the stop-loss loser surfaces only
+/// afterwards, then OANDA's own OCO cancels it because its trade is gone. The
+/// gateway owns no exit state for a native bracket (OANDA manages the OCO), so
+/// its sole job is to surface the loser's full lifecycle — `OrderCreated` then
+/// the terminal `OrderCancelled` — rather than leaving it resting `Open` and
+/// orphaned. This regression-guards the leg-surfacing + cancel-forwarding path
+/// for the exact sequence that orphaned the stop-loss in canary C09.
+#[tokio::test]
+async fn native_bracket_stop_loss_loser_surfaces_and_then_terminates() {
+    let (server, base_url) = start_mock_server().await;
+    mount_json(&server, "GET", SUMMARY_PATH, 200, oanda_account_json()).await;
+
+    // The take-profit fills and closes the long trade; the stop-loss leg lands
+    // on the stream only after the close (the race); OANDA then cancels it as a
+    // linked-trade-closed loser.
+    let take_profit_fill = json!({
+        "type": "ORDER_FILL",
+        "id": "6207",
+        "orderID": "6206",
+        "instrument": "EUR_USD",
+        "units": "-10000",
+        "price": "1.10100",
+        "reason": "TAKE_PROFIT_ORDER",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    })
+    .to_string();
+    let stop_loss_cancel = json!({
+        "type": "ORDER_CANCEL",
+        "id": "6209",
+        "orderID": "6208",
+        "reason": "LINKED_TRADE_CLOSED",
+        "time": "2024-01-15T10:30:00.000000000Z"
+    })
+    .to_string();
+    mount_text(
+        &server,
+        "GET",
+        STREAM_PATH,
+        200,
+        &format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            order_fill_line("6204", "6203", "10000"),
+            dependent_leg_line("6206", "TAKE_PROFIT_ORDER", "1.10100"),
+            take_profit_fill,
+            dependent_leg_line("6208", "STOP_LOSS_ORDER", "1.09900"),
+            stop_loss_cancel,
+        ),
+    )
+    .await;
+
+    let provider = test_provider(&base_url);
+    let mut rx = provider.connect(provider_config()).await.unwrap();
+
+    let events = collect_events(&mut rx, TWO_RECONNECTS).await;
+
+    // The stop-loss loser surfaced as a resting Stop.
+    let sl_create = find_order_event(&events, "6208", OrderEventType::OrderCreated)
+        .expect("the stop-loss loser must surface as an OrderCreated");
+    assert_eq!(sl_create.order_type, OrderType::Stop);
+    assert_eq!(sl_create.status, OrderStatus::Open);
+
+    // ...and then reached a terminal Cancelled state exactly once (deduped
+    // across reconnects), so nothing rests orphaned after the position is flat.
+    assert_eq!(
+        count_order_events(&events, OrderEventType::OrderCancelled),
+        1,
+        "the stop-loss loser must terminate (OrderCancelled), exactly once"
+    );
+
+    // The entry fill that opened the position and the take-profit fill that
+    // closed it are each delivered exactly once across the reconnect window.
+    assert_eq!(
+        count_order_events(&events, OrderEventType::OrderFilled),
+        2,
+        "entry fill + take-profit fill, each delivered exactly once"
     );
 }
