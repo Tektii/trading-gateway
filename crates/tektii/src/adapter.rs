@@ -39,6 +39,31 @@ struct EngineCancelAllResponse {
     failed_count: u32,
 }
 
+/// Engine error envelope: `{"error": {"code": ..., "message": ...}}`.
+///
+/// The engine reports every "not found" as HTTP 404 with the same `not_found`
+/// code; only the message prefix (`<resource> not found: <id>`) distinguishes a
+/// symbol miss from a timeframe/data/store miss.
+#[derive(Debug, Deserialize)]
+struct EngineErrorEnvelope {
+    error: EngineErrorBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct EngineErrorBody {
+    message: String,
+}
+
+impl EngineErrorBody {
+    /// True when the engine's "not found" is about the symbol itself, e.g.
+    /// `symbol not found: AAPL` — as opposed to a timeframe/data/store miss.
+    fn is_symbol_not_found(&self) -> bool {
+        self.message
+            .split_once(" not found")
+            .is_some_and(|(resource, _)| resource.trim().eq_ignore_ascii_case("symbol"))
+    }
+}
+
 /// Tektii adapter implementing `TradingAdapter` for the engine.
 pub struct TektiiAdapter {
     /// HTTP client for REST API calls
@@ -166,6 +191,31 @@ impl TektiiAdapter {
             message,
             provider: Some("tektii".to_string()),
             source: None,
+        }
+    }
+
+    /// Map an engine 404 to a gateway error without masking the real cause.
+    ///
+    /// Only a genuine symbol miss becomes `SymbolNotFound`. Other engine 404s
+    /// (timeframe/quote/data miss for a valid symbol) are client-level "not
+    /// available", not upstream failures, so they surface as a 4xx that can't
+    /// trip strategy-side retry/circuit-breaker logic the way a 5xx would. A
+    /// body that isn't the engine's structured error at all (proxy/infra
+    /// anomaly) stays a provider error so the unexpected response is visible.
+    async fn map_not_found(response: reqwest::Response, symbol: &str) -> GatewayError {
+        let body = response.text().await.unwrap_or_default();
+        match serde_json::from_str::<EngineErrorEnvelope>(&body) {
+            Ok(envelope) if envelope.error.is_symbol_not_found() => GatewayError::SymbolNotFound {
+                symbol: symbol.to_string(),
+            },
+            Ok(envelope) => GatewayError::InvalidRequest {
+                message: envelope.error.message,
+                field: None,
+            },
+            Err(_) if body.is_empty() => {
+                Self::provider_error("Engine returned 404 Not Found".to_string())
+            }
+            Err(_) => Self::provider_error(body),
         }
     }
 
@@ -651,11 +701,8 @@ impl TradingAdapter for TektiiAdapter {
         );
 
         // Handle specific error responses
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(GatewayError::SymbolNotFound {
-                symbol: symbol.to_string(),
-            });
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Self::map_not_found(response, symbol).await);
         }
 
         let engine_quote: engine_types::Quote = Self::handle_response(response).await?;
@@ -719,11 +766,8 @@ impl TradingAdapter for TektiiAdapter {
         );
 
         // Handle specific error responses
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(GatewayError::SymbolNotFound {
-                symbol: symbol.to_string(),
-            });
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Self::map_not_found(response, symbol).await);
         }
 
         let engine_response: engine_types::BarsResponse = Self::handle_response(response).await?;
