@@ -7,7 +7,9 @@ use tektii_gateway_core::adapter::TradingAdapter;
 use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::BarParams;
 use tektii_gateway_core::models::Timeframe;
-use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
+use tektii_gateway_test_support::wiremock_helpers::{
+    mount_empty, mount_json, mount_text, start_mock_server,
+};
 
 #[tokio::test]
 async fn get_quote_success() {
@@ -44,12 +46,82 @@ async fn get_quote_not_found() {
         "GET",
         "/api/v1/quote",
         404,
-        json!({"error": "not found"}),
+        json!({"error": {"code": "not_found", "message": "symbol not found: UNKNOWN"}}),
     )
     .await;
 
     let err = adapter.get_quote("UNKNOWN").await.unwrap_err();
     assert!(matches!(err, GatewayError::SymbolNotFound { .. }));
+}
+
+#[tokio::test]
+async fn get_quote_non_symbol_404_preserves_engine_error() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/quote",
+        404,
+        json!({"error": {"code": "not_found", "message": "data not found: No data for requested time range"}}),
+    )
+    .await;
+
+    let err = adapter.get_quote("AAPL").await.unwrap_err();
+    assert!(
+        !matches!(err, GatewayError::SymbolNotFound { .. }),
+        "a non-symbol engine 404 must not be flattened into SymbolNotFound: {err:?}"
+    );
+    match err {
+        GatewayError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("data not found"),
+                "engine's real error must be preserved, got: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest carrying the engine message, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn get_quote_empty_404_not_reported_as_symbol() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_empty(&server, "GET", "/api/v1/quote", 404).await;
+
+    let err = adapter.get_quote("AAPL").await.unwrap_err();
+    assert!(
+        matches!(err, GatewayError::ProviderError { .. }),
+        "a bodyless 404 must surface as a provider error, not SymbolNotFound: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_quote_non_json_404_preserves_body() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_text(
+        &server,
+        "GET",
+        "/api/v1/quote",
+        404,
+        "<html>not found</html>",
+    )
+    .await;
+
+    let err = adapter.get_quote("AAPL").await.unwrap_err();
+    match err {
+        GatewayError::ProviderError { message, .. } => {
+            assert!(
+                message.contains("<html>not found</html>"),
+                "a non-JSON 404 body must be preserved, got: {message}"
+            );
+        }
+        other => panic!("expected ProviderError carrying the raw body, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -117,7 +189,7 @@ async fn get_bars_not_found() {
         "GET",
         "/api/v1/bars",
         404,
-        json!({"error": "not found"}),
+        json!({"error": {"code": "not_found", "message": "symbol not found: UNKNOWN"}}),
     )
     .await;
 
@@ -129,6 +201,42 @@ async fn get_bars_not_found() {
     };
     let err = adapter.get_bars("UNKNOWN", &params).await.unwrap_err();
     assert!(matches!(err, GatewayError::SymbolNotFound { .. }));
+}
+
+#[tokio::test]
+async fn get_bars_non_symbol_404_preserves_engine_error() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/bars",
+        404,
+        json!({"error": {"code": "not_found", "message": "timeframe not found: 1m"}}),
+    )
+    .await;
+
+    let params = BarParams {
+        timeframe: Timeframe::OneMinute,
+        limit: None,
+        start: None,
+        end: None,
+    };
+    let err = adapter.get_bars("AAPL", &params).await.unwrap_err();
+    assert!(
+        !matches!(err, GatewayError::SymbolNotFound { .. }),
+        "a non-symbol engine 404 must not be flattened into SymbolNotFound: {err:?}"
+    );
+    match err {
+        GatewayError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("timeframe not found"),
+                "engine's real error must be preserved, got: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest carrying the engine message, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
