@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Pin amd64: the Tektii engine runs linux/amd64, so an arm64 image built on
+# Apple Silicon would only fail at run time with a cryptic exec-format error.
+FROM --platform=linux/amd64 python:3.12-slim
 
 WORKDIR /app
 

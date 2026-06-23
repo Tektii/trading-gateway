@@ -79,6 +79,11 @@ The images run as an unprivileged user and exec `python` as PID 1 so
 `SIGTERM` is delivered cleanly on `docker stop` — Cloud Run's 10-second
 grace shutdown is honoured without extra work.
 
+The `Dockerfile` pins `--platform=linux/amd64` in its `FROM`, so a plain
+`docker build .` produces an amd64 image even on Apple Silicon — the arch the
+Tektii engine runs. Without the pin, an arm64 image builds fine locally but
+fails at run time on the engine with a cryptic exec-format error.
+
 The `pip install` step pulls `tektii` from PyPI. Once the Python
 SDK is published, these images build standalone. Until then, build against
 a local SDK checkout by copying the built wheel into the template directory
