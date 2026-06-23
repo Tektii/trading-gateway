@@ -38,7 +38,7 @@ jobs:
       debian_digest: ${{ steps.digests.outputs.debian_digest }}
       slim_digest: ${{ steps.digests.outputs.slim_digest }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Validate version
         id: version
