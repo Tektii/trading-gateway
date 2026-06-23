@@ -438,3 +438,61 @@ async fn strategy_ack_does_not_drain_in_flight_events() {
 
     server.shutdown().await;
 }
+
+/// The engine begins replaying its simulation the moment the gateway connects
+/// to it, so the gateway must not connect until the strategy is attached to
+/// consume the events. This mirrors `main.rs::connect_tektii`: wait for the
+/// strategy, then `provider.connect()`. The mock engine only accepts a
+/// connection once `connect()` runs, so observing when `connect()` completes
+/// proves the ordering.
+#[tokio::test]
+async fn engine_is_not_connected_until_the_strategy_connects() {
+    let (server, _engine_tx, _engine_rx) = MockWsServer::start().await;
+    let (provider, _broadcast_rx) = create_ws_provider(&server.url());
+
+    let ws_manager = Arc::new(WsConnectionManager::new());
+    let cancel = CancellationToken::new();
+    let registry = Arc::new(ProviderRegistry::new(
+        ws_manager.clone(),
+        SubscriptionFilter::new(&[]),
+        cancel.clone(),
+        ReconnectionConfig::default(),
+        Arc::new(CorrelationStore::new()),
+    ));
+
+    let (connected_tx, mut connected_rx) = mpsc::channel::<()>(1);
+    let gate = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            registry.wait_for_strategy().await;
+            let _stream = provider
+                .connect(minimal_provider_config())
+                .await
+                .expect("provider.connect should succeed");
+            let _ = connected_tx.send(()).await;
+        })
+    };
+
+    // No strategy yet: the gateway must not have connected to the engine.
+    assert!(
+        timeout(Duration::from_millis(300), connected_rx.recv())
+            .await
+            .is_err(),
+        "engine must not be connected before the strategy attaches"
+    );
+
+    // The strategy connects — the gate releases and the engine connect proceeds.
+    let (out_tx, _out_rx) = mpsc::channel::<WsMessage>(16);
+    let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
+    let conn_id = conn.id;
+    ws_manager.add_connection(conn).await;
+    registry.register_strategy_connection(conn_id).await;
+
+    timeout(Duration::from_secs(2), connected_rx.recv())
+        .await
+        .expect("engine should connect once the strategy is present")
+        .expect("connected channel closed");
+
+    gate.await.ok();
+    server.shutdown().await;
+}
