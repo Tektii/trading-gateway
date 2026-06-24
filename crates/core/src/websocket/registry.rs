@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -120,6 +120,12 @@ pub struct ProviderRegistry {
 
     /// Price source for trailing stop tracking (receives market data quotes).
     price_source: Arc<RwLock<Option<Arc<crate::trailing_stop::WebSocketPriceSource>>>>,
+
+    /// Latch that flips to `true` when the strategy connects and never reverts.
+    /// The gateway serves a single strategy; the Tektii engine provider awaits
+    /// this before connecting, so the engine never starts its simulation before
+    /// the strategy is attached to consume the events it emits on connect.
+    strategy_connected: watch::Sender<bool>,
 }
 
 impl ProviderRegistry {
@@ -154,6 +160,7 @@ impl ProviderRegistry {
             reconnection_config,
             correlation_store,
             price_source: Arc::new(RwLock::new(None)),
+            strategy_connected: watch::channel(false).0,
         }
     }
 
@@ -402,11 +409,25 @@ impl ProviderRegistry {
     pub async fn register_strategy_connection(&self, conn_id: Uuid) {
         let mut strategies = self.connected_strategies.write().await;
         strategies.insert(conn_id);
+        self.strategy_connected.send_replace(true);
         info!(
             conn_id = %conn_id,
             total_strategies = strategies.len(),
             "Strategy connection registered"
         );
+    }
+
+    /// Wait until the strategy has connected to the gateway.
+    ///
+    /// The gateway serves a single strategy. Returns immediately if it has
+    /// already connected. The Tektii engine provider awaits this before opening
+    /// its WebSocket: the engine begins replaying its simulation the moment the
+    /// gateway connects, so connecting before the strategy is attached would
+    /// emit the first events into the void and desynchronise the ACK stream.
+    pub async fn wait_for_strategy(&self) {
+        let mut rx = self.strategy_connected.subscribe();
+        // Latch never reverts once true, so a single satisfied check is enough.
+        let _ = rx.wait_for(|connected| *connected).await;
     }
 
     /// Unregister a strategy connection.
@@ -1201,5 +1222,52 @@ impl ProviderRegistry {
 impl crate::trailing_stop::QuoteSubscriber for ProviderRegistry {
     async fn ensure_subscribed(&self, symbol: &str) -> Result<(), crate::error::GatewayError> {
         self.ensure_quote_subscription(symbol).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_registry() -> Arc<ProviderRegistry> {
+        Arc::new(ProviderRegistry::new(
+            Arc::new(WsConnectionManager::new()),
+            SubscriptionFilter::new(&[]),
+            CancellationToken::new(),
+            ReconnectionConfig::default(),
+            Arc::new(CorrelationStore::new()),
+        ))
+    }
+
+    #[tokio::test]
+    async fn wait_for_strategy_blocks_until_the_strategy_connects() {
+        let registry = test_registry();
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.wait_for_strategy().await })
+        };
+
+        // No strategy yet — the waiter must still be parked.
+        assert!(!waiter.is_finished());
+
+        registry.register_strategy_connection(Uuid::new_v4()).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should resolve once the strategy connects")
+            .expect("waiter task panicked");
+    }
+
+    #[tokio::test]
+    async fn wait_for_strategy_returns_immediately_when_already_connected() {
+        let registry = test_registry();
+        registry.register_strategy_connection(Uuid::new_v4()).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_for_strategy(),
+        )
+        .await
+        .expect("should return immediately when the strategy is already connected");
     }
 }

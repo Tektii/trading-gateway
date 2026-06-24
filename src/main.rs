@@ -808,6 +808,16 @@ async fn connect_tektii(
         tektii_params: None,
     };
 
+    // The engine starts replaying its simulation the moment the gateway opens
+    // this WebSocket, so it must be the last thing to happen — every other part
+    // of the gateway is already up by now. The gateway serves a single strategy;
+    // wait for it to attach before connecting, otherwise the engine emits its
+    // first events into the void and the ACK stream desynchronises (engine halts
+    // on consecutive ACK mismatch).
+    info!("Waiting for the strategy to connect before starting the engine");
+    provider_registry.wait_for_strategy().await;
+    info!("Strategy connected — connecting to engine to begin the backtest");
+
     // Connect provider and retrieve the ACK bridge before registering
     let stream = provider
         .connect(provider_config)
