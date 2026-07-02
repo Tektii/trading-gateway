@@ -1,5 +1,5 @@
 ---
-globs:
+paths:
   - "crates/alpaca/src/**"
   - "crates/binance/src/**"
   - "crates/oanda/src/**"
