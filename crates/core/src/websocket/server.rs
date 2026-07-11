@@ -274,9 +274,15 @@ async fn handle_ws_message(
     conn_id: &Uuid,
     registry: &Arc<ProviderRegistry>,
 ) -> Result<(), String> {
-    if let WsMessage::EventAck { .. } = msg {
-        info!("Received EventAck from strategy {}", conn_id);
-        registry.handle_strategy_ack().await;
+    if let WsMessage::EventAck {
+        events_processed, ..
+    } = msg
+    {
+        info!(
+            events_processed = events_processed.len(),
+            "Received EventAck from strategy {}", conn_id
+        );
+        registry.handle_strategy_ack(&events_processed).await;
     } else {
         warn!("Unexpected message type from client {}: {:?}", conn_id, msg);
     }

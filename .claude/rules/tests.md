@@ -1,5 +1,5 @@
 ---
-globs:
+paths:
   - "tests/**"
   - "**/tests/**"
   - "crates/test-support/**"

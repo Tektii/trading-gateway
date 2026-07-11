@@ -1,5 +1,5 @@
 ---
-globs:
+paths:
   - "**/exit_management/**"
 ---
 

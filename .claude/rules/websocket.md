@@ -1,5 +1,5 @@
 ---
-globs:
+paths:
   - "**/websocket/**"
   - "**/websocket.rs"
   - "**/streaming.rs"

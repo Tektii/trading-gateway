@@ -146,8 +146,11 @@ async fn engine_placed_sl_fill_acks_round_trip() {
         other => panic!("expected Order, got {other:?}"),
     }
 
-    // Strategy ACK auto-drains all pending events to the engine.
-    registry.handle_strategy_ack().await;
+    // Strategy ACK for the delivered fill event drains it to the engine. The
+    // non-empty `events_processed` marks this a real backtest ACK (TEK-1312).
+    registry
+        .handle_strategy_ack(&[SL_FILL_EVENT_ID.to_string()])
+        .await;
 
     let raw = timeout(Duration::from_secs(2), engine_rx.recv())
         .await
