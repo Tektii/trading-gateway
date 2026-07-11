@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 use tokio::sync::{RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::adapter::TradingAdapter;
@@ -372,7 +372,22 @@ impl ProviderRegistry {
     ///
     /// One ACK releases the oldest delivered event (FIFO) — strategies ACK
     /// once per event, after handling it, and never track event IDs.
-    pub async fn handle_strategy_ack(&self) {
+    ///
+    /// `events_processed` carries the engine `event_id`s the strategy acked.
+    /// An empty payload is DROPPED without touching the bridge: the SDK emits
+    /// an `event_ack` after every yielded event, and gateway-local events
+    /// (connection / error / rate-limit) carry no engine id, so they produce
+    /// empty ACKs. Forwarding one popped the oldest delivered ENGINE event off
+    /// the FIFO, silently advancing the engine ahead of the strategy — free-run
+    /// sim time and silent 0-trade backtests (TEK-1312 / TEK-1309). The ids only
+    /// distinguish real backtest ACKs from empty ones; FIFO release order still
+    /// comes from delivery position, not the payload.
+    pub async fn handle_strategy_ack(&self, events_processed: &[String]) {
+        if events_processed.is_empty() {
+            trace!("Dropping empty strategy ACK (gateway-local event, no engine id)");
+            return;
+        }
+
         let bridge = self.tektii_ack_bridge.read().await;
         if let Some(ref b) = *bridge {
             info!("Forwarding strategy ACK to bridge");
