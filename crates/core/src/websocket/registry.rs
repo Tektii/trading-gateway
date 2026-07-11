@@ -817,35 +817,63 @@ impl ProviderRegistry {
                                 // class of bug TEK-268 was tracking.
                                 let should_broadcast = filters_events_upstream
                                     || subscription_filter.matches(&event, platform);
-                                if should_broadcast {
+                                let delivered = if should_broadcast {
                                     let strategies = connected_strategies_clone.read().await;
+                                    let mut any_delivered = false;
                                     for conn_id in strategies.iter() {
-                                        let _ = connection_manager
+                                        match connection_manager
                                             .send_to(conn_id, event.clone())
-                                            .await;
+                                            .await
+                                        {
+                                            Ok(()) => any_delivered = true,
+                                            Err(err) => warn!(
+                                                platform = %platform,
+                                                conn_id = %conn_id,
+                                                error = %err,
+                                                "Failed to send engine event to strategy connection"
+                                            ),
+                                        }
                                     }
+                                    any_delivered
                                 } else {
+                                    // Registry filter declined to broadcast. Treat the
+                                    // event as delivered so the engine cannot deadlock
+                                    // waiting on an event the registry deliberately
+                                    // dropped (TEK-270 deadlock avoidance). Moot for
+                                    // tektii backtest mode (filters upstream); live and
+                                    // other providers rely on this branch.
                                     debug!(
                                         platform = %platform,
                                         "Event filtered out by subscription"
                                     );
-                                }
+                                    true
+                                };
 
-                                // TEK-270: mark this engine event as actually
-                                // delivered to the strategy WebSocket. Only
-                                // events with `sent = true` will be drained on
-                                // the next strategy ACK. Called even if
-                                // `should_broadcast` was false (registry has
-                                // finished its work for this event_id) so the
-                                // engine cannot deadlock if the registry
-                                // declines to broadcast.
+                                // TEK-1315: only mark the engine event sent once it was
+                                // actually handed to at least one strategy connection
+                                // (or the registry filter declined it). Only `sent =
+                                // true` events are releasable by a strategy ACK; marking
+                                // an undelivered event sent permanently offsets the ACK
+                                // FIFO and degrades the run into the constant-in-flight
+                                // halt (TEK-1179). Leaving it pending-undelivered lets
+                                // the engine's own ACK timeout surface the stall loudly.
                                 if let Some(id) = engine_event_id {
-                                    let bridge_opt = {
-                                        let guard = tektii_ack_bridge.read().await;
-                                        guard.clone()
-                                    };
-                                    if let Some(bridge) = bridge_opt {
-                                        bridge.mark_sent(vec![id]).await;
+                                    if delivered {
+                                        let bridge_opt = {
+                                            let guard = tektii_ack_bridge.read().await;
+                                            guard.clone()
+                                        };
+                                        if let Some(bridge) = bridge_opt {
+                                            bridge.mark_sent(vec![id]).await;
+                                        }
+                                    } else {
+                                        warn!(
+                                            platform = %platform,
+                                            event_id = %id,
+                                            "Engine event not delivered to any strategy \
+                                             connection; leaving pending-undelivered \
+                                             (not marking sent)"
+                                        );
                                     }
                                 }
 

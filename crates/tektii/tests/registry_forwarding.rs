@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use helpers::{create_ws_provider, minimal_provider_config};
+use helpers::{create_ws_provider, minimal_provider_config, parse_client_message};
 
 fn send_server_message(tx: &tokio::sync::mpsc::UnboundedSender<String>, msg: &ServerMessage) {
     let json = serde_json::to_string(msg).expect("serialize ServerMessage");
@@ -494,5 +494,211 @@ async fn engine_is_not_connected_until_the_strategy_connects() {
         .expect("connected channel closed");
 
     gate.await.ok();
+    server.shutdown().await;
+}
+/// TEK-1315: an engine event that reaches the registry's broadcast loop while
+/// NO strategy connection is attached (mid-run disconnect / reconnect blip)
+/// must NOT be marked sent. Leaving it `sent = false` keeps it un-releasable,
+/// so a later (stale) strategy ACK cannot forward it to the engine — the
+/// engine's own ACK timeout surfaces the stall loudly instead of the FIFO
+/// being silently offset (the TEK-1179 constant-in-flight halt).
+///
+/// Pre-fix, the loop called `mark_sent` unconditionally after broadcasting to
+/// an empty connection set, so the stale ACK below would release evt-candle-2
+/// to the engine and this test would observe a spurious `EventAck`.
+#[tokio::test]
+async fn undelivered_engine_event_with_no_strategy_is_not_marked_sent() {
+    let (server, engine_tx, mut engine_rx) = MockWsServer::start().await;
+
+    let (provider, _broadcast_rx) = create_ws_provider(&server.url());
+    let stream = provider
+        .connect(minimal_provider_config())
+        .await
+        .expect("provider.connect should succeed");
+
+    let bridge = provider
+        .ack_bridge()
+        .await
+        .expect("ack_bridge available after connect");
+
+    let ws_manager = Arc::new(WsConnectionManager::new());
+    let cancel = CancellationToken::new();
+    let registry = Arc::new(ProviderRegistry::new(
+        ws_manager.clone(),
+        SubscriptionFilter::new(&[]),
+        cancel.clone(),
+        ReconnectionConfig::default(),
+        Arc::new(CorrelationStore::new()),
+    ));
+    registry.set_tektii_ack_bridge(bridge.clone()).await;
+    registry
+        .register_provider(
+            TradingPlatform::Tektii,
+            Box::new(provider),
+            stream,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("register_provider should succeed");
+
+    // A strategy attaches and the engine delivers one candle end-to-end. This
+    // establishes a clean synchronised baseline: the queue drains and the
+    // engine ACK is observed before the disconnect scenario begins.
+    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(1024);
+    let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
+    let conn_id = conn.id;
+    ws_manager.add_connection(conn).await;
+    registry.register_strategy_connection(conn_id).await;
+
+    send_server_message(
+        &engine_tx,
+        &ServerMessage::candle(
+            "evt-candle-1",
+            "EUR/USD",
+            "1m",
+            1_775_001_720_000,
+            dec!(1.08),
+            dec!(1.081),
+            dec!(1.079),
+            dec!(1.0805),
+            100.0,
+        ),
+    );
+    timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("strategy never received candle-1")
+        .expect("channel closed before candle-1 arrived");
+    bridge.handle_strategy_ack().await;
+    let ack_raw = timeout(Duration::from_secs(2), engine_rx.recv())
+        .await
+        .expect("engine never received ACK for candle-1")
+        .expect("engine_rx closed");
+    match parse_client_message(&ack_raw) {
+        ClientMessage::EventAck {
+            events_processed, ..
+        } => assert_eq!(events_processed, vec!["evt-candle-1".to_string()]),
+        other => panic!("expected EventAck, got {other:?}"),
+    }
+
+    // The strategy disconnects mid-run.
+    ws_manager.remove_connection(&conn_id).await;
+    registry.unregister_strategy_connection(conn_id).await;
+
+    // The engine emits another candle. The broadcast loop now iterates an
+    // empty connection set, so nothing is actually delivered.
+    send_server_message(
+        &engine_tx,
+        &ServerMessage::candle(
+            "evt-candle-2",
+            "EUR/USD",
+            "1m",
+            1_775_001_780_000,
+            dec!(1.08),
+            dec!(1.081),
+            dec!(1.079),
+            dec!(1.0805),
+            100.0,
+        ),
+    );
+
+    // Let the single-threaded platform loop register + attempt the broadcast
+    // for candle-2 (local processing is sub-millisecond).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A stale strategy ACK arrives (e.g. a late frame from the old
+    // connection). It must NOT release the undelivered candle-2.
+    bridge.handle_strategy_ack().await;
+
+    assert!(
+        timeout(Duration::from_millis(300), engine_rx.recv())
+            .await
+            .is_err(),
+        "undelivered candle-2 must not be released to the engine by a stale strategy ACK",
+    );
+
+    server.shutdown().await;
+}
+
+/// TEK-1315: a `connection_manager.send_to` that returns `Err` (a slow
+/// consumer's full channel, or a closed channel on a dropping strategy) counts
+/// as not-delivered. The event must stay `sent = false` — the registry must
+/// never claim a delivery the WebSocket send did not make.
+///
+/// Pre-fix, `send_to`'s result was discarded (`let _ = ...`) and `mark_sent`
+/// ran regardless, so the stale ACK below would release the never-delivered
+/// event to the engine.
+#[tokio::test]
+async fn failed_strategy_send_does_not_mark_event_sent() {
+    let (server, engine_tx, mut engine_rx) = MockWsServer::start().await;
+
+    let (provider, _broadcast_rx) = create_ws_provider(&server.url());
+    let stream = provider
+        .connect(minimal_provider_config())
+        .await
+        .expect("provider.connect should succeed");
+
+    let bridge = provider
+        .ack_bridge()
+        .await
+        .expect("ack_bridge available after connect");
+
+    let ws_manager = Arc::new(WsConnectionManager::new());
+    let cancel = CancellationToken::new();
+    let registry = Arc::new(ProviderRegistry::new(
+        ws_manager.clone(),
+        SubscriptionFilter::new(&[]),
+        cancel.clone(),
+        ReconnectionConfig::default(),
+        Arc::new(CorrelationStore::new()),
+    ));
+    registry.set_tektii_ack_bridge(bridge.clone()).await;
+    registry
+        .register_provider(
+            TradingPlatform::Tektii,
+            Box::new(provider),
+            stream,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("register_provider should succeed");
+
+    // A strategy connection whose receiver is immediately dropped — every
+    // `send_to` to it returns Err (channel closed).
+    let (out_tx, out_rx) = mpsc::channel::<WsMessage>(1024);
+    drop(out_rx);
+    let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
+    let conn_id = conn.id;
+    ws_manager.add_connection(conn).await;
+    registry.register_strategy_connection(conn_id).await;
+
+    send_server_message(
+        &engine_tx,
+        &ServerMessage::candle(
+            "evt-candle-1",
+            "EUR/USD",
+            "1m",
+            1_775_001_720_000,
+            dec!(1.08),
+            dec!(1.081),
+            dec!(1.079),
+            dec!(1.0805),
+            100.0,
+        ),
+    );
+
+    // Let the loop register the event and hit the failing `send_to`.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    bridge.handle_strategy_ack().await;
+
+    assert!(
+        timeout(Duration::from_millis(300), engine_rx.recv())
+            .await
+            .is_err(),
+        "an event whose WS send failed must not be released to the engine",
+    );
+
     server.shutdown().await;
 }
