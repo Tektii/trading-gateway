@@ -100,6 +100,20 @@ fn parse_timeframe(s: &str) -> Timeframe {
     }
 }
 
+/// Disable Nagle on the engine socket so the gateway's ACK frames aren't held
+/// by TCP delayed-ACK.
+///
+/// The engine paces simulation on `loop.wait_for_ack`. On the multi-symbol path
+/// the gateway writes several small ACK frames back-to-back on this socket; with
+/// Nagle on, the second frame stalls until the engine's delayed-ACK timer fires
+/// (~40 ms), a fixed step independent of payload size. The gateway `AckBridge`
+/// forwards ACKs synchronously, so it is not the source — the socket option is.
+fn set_engine_socket_nodelay(stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>) {
+    if let Err(e) = stream.get_ref().set_nodelay(true) {
+        warn!(error = %e, "Failed to set TCP_NODELAY on engine socket");
+    }
+}
+
 /// Connect to a Tektii Engine WebSocket endpoint with exponential backoff.
 ///
 /// Retries connection-refused errors up to 60 times with delays from 100ms to 2s.
@@ -120,6 +134,7 @@ async fn connect_engine_with_backoff(
         attempt += 1;
         match connect_async(ws_endpoint).await {
             Ok((stream, _response)) => {
+                set_engine_socket_nodelay(stream.get_ref());
                 if attempt > 1 {
                     info!(attempt, "Connected to engine after retry");
                 }
@@ -612,5 +627,45 @@ fn handle_server_message(msg: &ServerMessage, event_router: &Arc<EventRouter>) {
                 "Received end-of-backtest terminal from engine"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::TcpListener;
+
+    use super::connect_engine_with_backoff;
+
+    /// After connecting, the engine socket must have TCP_NODELAY enabled so the
+    /// gateway's ACK frames aren't held ~40ms by TCP delayed-ACK on the
+    /// multi-symbol path. Drives the real connect path against a loopback
+    /// WebSocket server and asserts the option on the returned socket — this
+    /// covers the wiring in `connect_engine_with_backoff`, not just the helper.
+    #[tokio::test]
+    async fn connect_enables_tcp_nodelay_on_engine_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept");
+            tokio_tungstenite::accept_async(tcp)
+                .await
+                .expect("server handshake")
+        });
+
+        let endpoint = format!("ws://{addr}");
+        let stream = connect_engine_with_backoff(&endpoint)
+            .await
+            .expect("connect to loopback engine");
+
+        assert!(
+            stream.get_ref().get_ref().nodelay().expect("read nodelay"),
+            "connect must enable TCP_NODELAY on the engine socket so ACK frames \
+             are not held by delayed-ACK"
+        );
+
+        let _ = server.await;
     }
 }
