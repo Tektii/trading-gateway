@@ -378,6 +378,24 @@ impl StrategyClient {
         }
     }
 
+    /// Receive the next message as the raw JSON text frame.
+    ///
+    /// Unlike [`recv_message`](Self::recv_message), this does not deserialise
+    /// into `WsMessage` — use it to assert on wire-only fields the typed enum
+    /// does not carry (e.g. the engine `event_id` echoed on backtest frames).
+    ///
+    /// Returns `None` if the timeout expires or the connection is closed.
+    pub async fn recv_raw(&mut self, timeout: Duration) -> Option<String> {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let result = tokio::time::timeout(timeout, self.stream.next()).await;
+        match result {
+            Ok(Some(Ok(Message::Text(text)))) => Some(text.to_string()),
+            _ => None,
+        }
+    }
+
     /// Send a JSON-serialised value as a text frame.
     pub async fn send_json(&mut self, value: &serde_json::Value) {
         use futures_util::SinkExt;

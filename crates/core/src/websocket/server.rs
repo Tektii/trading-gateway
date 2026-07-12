@@ -66,8 +66,9 @@ async fn handle_socket(
     // Split socket into sender and receiver
     let (ws_sender, ws_receiver) = socket.split();
 
-    // Create channel for outgoing messages
-    let (tx, rx) = mpsc::channel::<WsMessage>(WS_CLIENT_CHANNEL_CAPACITY);
+    // Create channel for outgoing messages. Each item is a `WsMessage` plus an
+    // optional engine `event_id` injected into the frame at serialization.
+    let (tx, rx) = mpsc::channel::<(WsMessage, Option<String>)>(WS_CLIENT_CHANNEL_CAPACITY);
 
     // Create connection object
     let connection = WsConnection {
@@ -108,7 +109,7 @@ async fn handle_socket(
                 broker: Some(platform.to_string()),
                 timestamp: chrono::Utc::now(),
             };
-            let _ = connection_manager.send_to(&conn_id, msg).await;
+            let _ = connection_manager.send_to(&conn_id, msg, None).await;
         }
     }
 
@@ -125,6 +126,25 @@ async fn handle_socket(
     .await;
 }
 
+/// Serialize an outbound frame, injecting the engine `event_id` when present.
+///
+/// The id is added as a top-level field alongside the internally-tagged `type`
+/// so the backtest SDK's `BaseEvent.event_id` reads it and echoes it back in
+/// `events_processed`, distinguishing engine-paced ACKs from gateway-local ones.
+fn serialize_frame(msg: &WsMessage, event_id: Option<&str>) -> Result<String, serde_json::Error> {
+    let Some(id) = event_id else {
+        return serde_json::to_string(msg);
+    };
+    let mut value = serde_json::to_value(msg)?;
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert(
+            "event_id".to_owned(),
+            serde_json::Value::String(id.to_owned()),
+        );
+    }
+    serde_json::to_string(&value)
+}
+
 /// Handle an established WebSocket connection.
 ///
 /// Manages bidirectional message flow between the strategy and providers.
@@ -132,7 +152,7 @@ async fn handle_connection(
     conn_id: Uuid,
     mut ws_sender: futures_util::stream::SplitSink<WebSocket, Message>,
     mut ws_receiver: futures_util::stream::SplitStream<WebSocket>,
-    mut rx: mpsc::Receiver<WsMessage>,
+    mut rx: mpsc::Receiver<(WsMessage, Option<String>)>,
     connection_manager: Arc<WsConnectionManager>,
     provider_registry: Arc<ProviderRegistry>,
     addr: SocketAddr,
@@ -145,7 +165,7 @@ async fn handle_connection(
     // Spawn task to handle outgoing messages
     let manager_clone = connection_manager.clone();
     let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some((msg, event_id)) = rx.recv().await {
             // Intercept Close variant — send WebSocket close frame, not JSON
             if let WsMessage::Close { code, reason } = msg {
                 debug!("Sending close frame to {} (code={})", conn_id, code);
@@ -157,7 +177,7 @@ async fn handle_connection(
                 break;
             }
 
-            match serde_json::to_string(&msg) {
+            match serialize_frame(&msg, event_id.as_deref()) {
                 Ok(json) => {
                     debug!("Sending message to {}: {:?}", conn_id, msg);
                     if let Err(e) = ws_sender.send(Message::Text(json.into())).await {
@@ -282,7 +302,7 @@ async fn handle_ws_message(
             events_processed = events_processed.len(),
             "Received EventAck from strategy {}", conn_id
         );
-        registry.handle_strategy_ack().await;
+        registry.handle_strategy_ack(&events_processed).await;
     } else {
         warn!("Unexpected message type from client {}: {:?}", conn_id, msg);
     }

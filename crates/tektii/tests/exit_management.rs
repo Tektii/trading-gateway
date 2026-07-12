@@ -65,7 +65,7 @@ async fn setup_pipeline() -> (
     mpsc::UnboundedSender<String>,
     mpsc::UnboundedReceiver<String>,
     Arc<ProviderRegistry>,
-    mpsc::Receiver<WsMessage>,
+    mpsc::Receiver<(WsMessage, Option<String>)>,
 ) {
     let (server, engine_tx, engine_rx) = MockWsServer::start().await;
 
@@ -105,7 +105,7 @@ async fn setup_pipeline() -> (
         .await
         .expect("register_provider should succeed");
 
-    let (out_tx, out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -132,12 +132,14 @@ async fn engine_placed_sl_fill_acks_round_trip() {
     );
     send_server_message(&engine_tx, &fill);
 
-    // Strategy receives the SL/TP fill.
-    let received = timeout(Duration::from_secs(2), out_rx.recv())
+    // Strategy receives the SL/TP fill, with the engine event_id echoed on the
+    // outbound frame.
+    let (received, received_id) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received SL/TP fill (TEK-271)")
         .expect("strategy channel closed before fill arrived");
 
+    assert_eq!(received_id.as_deref(), Some(SL_FILL_EVENT_ID));
     match received {
         WsMessage::Order { event, order, .. } => {
             assert_eq!(order.id, SL_ORDER_ID);
@@ -146,9 +148,12 @@ async fn engine_placed_sl_fill_acks_round_trip() {
         other => panic!("expected Order, got {other:?}"),
     }
 
-    // Strategy ACK for the delivered fill event drains it to the engine
-    // (auto-correlation: one ACK releases the oldest delivered event).
-    registry.handle_strategy_ack().await;
+    // Strategy ACK for the delivered fill event drains it to the engine. The
+    // engine event_id is echoed back (non-empty), marking this a real engine
+    // ACK that paces the FIFO.
+    registry
+        .handle_strategy_ack(&[SL_FILL_EVENT_ID.to_string()])
+        .await;
 
     let raw = timeout(Duration::from_secs(2), engine_rx.recv())
         .await
@@ -189,7 +194,7 @@ async fn missing_strategy_ack_stalls_engine() {
     send_server_message(&engine_tx, &fill);
 
     // Strategy still receives the event — the upstream path is unaffected.
-    let received = timeout(Duration::from_secs(2), out_rx.recv())
+    let (received, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received SL/TP fill")
         .expect("strategy channel closed before fill arrived");

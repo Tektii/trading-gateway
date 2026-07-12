@@ -24,8 +24,9 @@ pub struct WsConnection {
     /// Connection unique identifier
     pub id: Uuid,
 
-    /// Message sender channel
-    pub sender: mpsc::Sender<WsMessage>,
+    /// Message sender channel: the outbound `WsMessage` plus an optional engine
+    /// `event_id` (see [`WsConnection::send`]).
+    pub sender: mpsc::Sender<(WsMessage, Option<String>)>,
 
     /// Client socket address
     pub addr: SocketAddr,
@@ -39,7 +40,7 @@ pub struct WsConnection {
 
 impl WsConnection {
     /// Create a new WebSocket connection
-    pub fn new(sender: mpsc::Sender<WsMessage>, addr: SocketAddr) -> Self {
+    pub fn new(sender: mpsc::Sender<(WsMessage, Option<String>)>, addr: SocketAddr) -> Self {
         Self {
             id: Uuid::new_v4(),
             sender,
@@ -61,15 +62,16 @@ impl WsConnection {
         last_activity.elapsed() > timeout
     }
 
-    /// Send a message to this connection.
+    /// Send a message to this connection, tagged with an optional engine
+    /// `event_id` (`None` for live providers and gateway-local events).
     ///
     /// Uses `try_send` on the bounded channel. If the channel is full, the
     /// strategy is too slow to keep up and will be disconnected — returning
     /// `Err` signals the caller to clean up this connection. This is the
     /// industry-standard approach for trading feeds (silent message drops
     /// would leave the strategy trading on a stale world model).
-    pub fn send(&self, message: WsMessage) -> Result<(), String> {
-        match self.sender.try_send(message) {
+    pub fn send(&self, message: WsMessage, event_id: Option<String>) -> Result<(), String> {
+        match self.sender.try_send((message, event_id)) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 metrics::counter!("gateway_ws_slow_consumer_disconnects").increment(1);
@@ -137,7 +139,7 @@ impl WsConnectionManager {
         let count = connections.len();
 
         for (id, conn) in &*connections {
-            if let Err(e) = conn.send(message.clone()) {
+            if let Err(e) = conn.send(message.clone(), None) {
                 tracing::warn!(
                     connection_id = %id,
                     error = %e,
@@ -154,17 +156,23 @@ impl WsConnectionManager {
         );
     }
 
-    /// Send a message to a specific connection
+    /// Send a message to a specific connection, tagged with an optional engine
+    /// `event_id` echoed in the outbound frame (see [`WsConnection::send`]).
     ///
     /// # Returns
     ///
     /// `Ok(())` if message was sent successfully, `Err` if connection not found or send failed
-    pub async fn send_to(&self, id: &Uuid, message: WsMessage) -> Result<(), String> {
+    pub async fn send_to(
+        &self,
+        id: &Uuid,
+        message: WsMessage,
+        event_id: Option<String>,
+    ) -> Result<(), String> {
         let connections = self.connections.read().await;
         connections.get(id).map_or_else(
             || Err(format!("Connection {id} not found")),
             |conn| {
-                conn.send(message)
+                conn.send(message, event_id)
                     .map_err(|e| format!("Failed to send message: {e}"))
             },
         )
@@ -239,7 +247,7 @@ mod tests {
     use super::*;
 
     /// Create a connection and return its receiver for inspecting sent messages.
-    fn test_connection(addr: &str) -> (WsConnection, mpsc::Receiver<WsMessage>) {
+    fn test_connection(addr: &str) -> (WsConnection, mpsc::Receiver<(WsMessage, Option<String>)>) {
         let (tx, rx) = mpsc::channel(1024);
         let conn = WsConnection {
             id: Uuid::new_v4(),
@@ -264,7 +272,7 @@ mod tests {
 
         // Both receivers should get: Disconnecting, then Close
         for rx in [&mut rx1, &mut rx2] {
-            let msg1 = rx.recv().await.expect("should receive Disconnecting");
+            let (msg1, _) = rx.recv().await.expect("should receive Disconnecting");
             assert!(
                 matches!(
                     msg1,
@@ -276,7 +284,7 @@ mod tests {
                 "expected Disconnecting, got {msg1:?}"
             );
 
-            let msg2 = rx.recv().await.expect("should receive Close");
+            let (msg2, _) = rx.recv().await.expect("should receive Close");
             assert!(
                 matches!(msg2, WsMessage::Close { code: 1001, .. }),
                 "expected Close 1001, got {msg2:?}"
@@ -333,11 +341,11 @@ mod tests {
         };
 
         // Fill the buffer
-        assert!(conn.send(WsMessage::ping()).is_ok());
-        assert!(conn.send(WsMessage::ping()).is_ok());
+        assert!(conn.send(WsMessage::ping(), None).is_ok());
+        assert!(conn.send(WsMessage::ping(), None).is_ok());
 
         // Third send should fail — channel full, slow consumer disconnect
-        let result = conn.send(WsMessage::ping());
+        let result = conn.send(WsMessage::ping(), None);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().contains("slow consumer"),
@@ -357,7 +365,7 @@ mod tests {
             connected_at: Instant::now(),
         };
 
-        let result = conn.send(WsMessage::ping());
+        let result = conn.send(WsMessage::ping(), None);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().contains("closed"),

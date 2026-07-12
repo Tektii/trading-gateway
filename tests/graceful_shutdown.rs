@@ -59,7 +59,7 @@ fn setup() -> (
 }
 
 /// Create a test WsConnection and return the receiver for inspecting sent messages.
-fn test_connection(port: u16) -> (WsConnection, mpsc::Receiver<WsMessage>) {
+fn test_connection(port: u16) -> (WsConnection, mpsc::Receiver<(WsMessage, Option<String>)>) {
     let (tx, rx) = mpsc::channel(1024);
     let addr = format!("127.0.0.1:{port}").parse().unwrap();
     let conn = WsConnection {
@@ -127,7 +127,7 @@ async fn shutdown_sequence_notifies_connected_strategies() {
 
     // Both strategies should receive Disconnecting then Close(1001)
     for rx in [&mut rx1, &mut rx2] {
-        let msg1 = rx.recv().await.expect("should receive Disconnecting");
+        let (msg1, _) = rx.recv().await.expect("should receive Disconnecting");
         assert!(
             matches!(
                 msg1,
@@ -139,7 +139,7 @@ async fn shutdown_sequence_notifies_connected_strategies() {
             "expected Disconnecting, got {msg1:?}"
         );
 
-        let msg2 = rx.recv().await.expect("should receive Close");
+        let (msg2, _) = rx.recv().await.expect("should receive Close");
         assert!(
             matches!(msg2, WsMessage::Close { code: 1001, .. }),
             "expected Close 1001, got {msg2:?}"
