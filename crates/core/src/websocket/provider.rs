@@ -117,9 +117,10 @@ pub fn arc_secret_from_string(value: String) -> Arc<SecretBox<String>> {
 ///
 /// `engine_event_id` is set ONLY by the Tektii engine provider when the
 /// message has a downstream broadcast (so the registry can call
-/// `AckBridge::mark_sent` after `connection_manager.send_to` returns Ok).
-/// All live providers leave it `None`. The field is gateway-internal — it is
-/// never serialized or forwarded to strategy clients.
+/// `AckBridge::mark_sent` after `connection_manager.send_to` returns Ok, and
+/// echo the id in the outbound frame so the SDK returns it in `events_processed`
+/// — distinguishing engine-paced ACKs from gateway-local ones). All live
+/// providers leave it `None`.
 #[derive(Debug, Clone)]
 pub struct ProviderEvent {
     /// The WebSocket message destined for connected strategies.

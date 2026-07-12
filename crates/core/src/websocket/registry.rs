@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 use tokio::sync::{RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::adapter::TradingAdapter;
@@ -370,19 +370,25 @@ impl ProviderRegistry {
 
     /// Handle strategy ACK by forwarding to the ACK bridge.
     ///
-    /// One ACK releases the oldest delivered event (FIFO) — strategies ACK
-    /// once per event, after handling it, and never track event IDs.
+    /// A non-empty ACK releases the oldest delivered event (FIFO) — strategies
+    /// ACK once per event, after handling it. FIFO release order comes from
+    /// delivery position, not the acked id; the id only marks the ACK as
+    /// engine-paced.
     ///
-    /// The `events_processed` payload is intentionally NOT inspected. The
-    /// backtest SDK strips engine `event_id`s from the wire and uses
-    /// auto-correlation, so it legitimately sends ACKs with an empty payload —
-    /// those are the normal per-event ACKs that pace the run. Gating on the
-    /// payload (dropping empty ACKs, the reverted #109) starves the FIFO and
-    /// halts the engine on consecutive candle-ACK timeouts. Do not re-add an
-    /// `is_empty()` short-circuit here — the correct engine-vs-local ACK
-    /// discrimination (echo the engine `event_id` so real ACKs are non-empty)
-    /// is tracked in TEK-1331.
-    pub async fn handle_strategy_ack(&self) {
+    /// `events_processed` carries the engine `event_id`s the strategy acked. An
+    /// empty payload is DROPPED without touching the bridge: the gateway echoes
+    /// the engine `event_id` on outbound engine frames, so real engine ACKs are
+    /// non-empty. Gateway-local events (connection / data-freshness / error /
+    /// rate-limit) carry no engine id, so the SDK ACKs them with an empty
+    /// payload — forwarding one popped the oldest delivered ENGINE event off the
+    /// FIFO, silently advancing the engine ahead of the strategy into free-run
+    /// sim time and silent 0-trade backtests (TEK-1309 / TEK-1312 / TEK-1331).
+    pub async fn handle_strategy_ack(&self, events_processed: &[String]) {
+        if events_processed.is_empty() {
+            trace!("Dropping empty strategy ACK (gateway-local event, no engine id)");
+            return;
+        }
+
         let bridge = self.tektii_ack_bridge.read().await;
         if let Some(ref b) = *bridge {
             info!("Forwarding strategy ACK to bridge");
@@ -817,7 +823,11 @@ impl ProviderRegistry {
                                     let mut any_delivered = false;
                                     for conn_id in strategies.iter() {
                                         match connection_manager
-                                            .send_to(conn_id, event.clone())
+                                            .send_to(
+                                                conn_id,
+                                                event.clone(),
+                                                engine_event_id.clone(),
+                                            )
                                             .await
                                         {
                                             Ok(()) => any_delivered = true,

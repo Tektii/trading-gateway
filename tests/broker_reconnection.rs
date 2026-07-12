@@ -60,7 +60,7 @@ fn setup(
 async fn strategy_connection(
     manager: &WsConnectionManager,
     registry: &ProviderRegistry,
-) -> mpsc::Receiver<WsMessage> {
+) -> mpsc::Receiver<(WsMessage, Option<String>)> {
     let (tx, rx) = mpsc::channel(1024);
     let addr = "127.0.0.1:9999".parse().unwrap();
     let conn = WsConnection::new(tx, addr);
@@ -72,9 +72,9 @@ async fn strategy_connection(
 
 /// Receive the next connection event from the strategy receiver, with timeout.
 async fn recv_connection_event(
-    rx: &mut mpsc::Receiver<WsMessage>,
+    rx: &mut mpsc::Receiver<(WsMessage, Option<String>)>,
 ) -> (ConnectionEventType, Option<String>, Option<u64>) {
-    let msg = timeout(Duration::from_secs(5), rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for message")
         .expect("channel closed");
@@ -176,7 +176,7 @@ async fn reconnect_resumes_event_streaming() {
     let quote = tektii_gateway_test_support::models::test_quote("AAPL");
     tx.send(WsMessage::quote(quote).into()).unwrap();
 
-    let msg = timeout(Duration::from_secs(5), rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timeout")
         .expect("closed");
@@ -198,7 +198,7 @@ async fn reconnect_resumes_event_streaming() {
     let quote2 = tektii_gateway_test_support::models::test_quote("BTCUSD");
     new_tx.send(WsMessage::quote(quote2).into()).unwrap();
 
-    let msg = timeout(Duration::from_secs(5), rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timeout")
         .expect("closed");
@@ -330,7 +330,7 @@ async fn end_of_stream_completion_emits_backtest_complete_not_disconnected() {
     drop(tx);
 
     // The strategy receives a clean end-of-backtest terminal, not a disconnect.
-    let msg = timeout(Duration::from_secs(5), rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for terminal")
         .expect("channel closed");
@@ -384,7 +384,7 @@ async fn in_band_backtest_complete_suppresses_synthesized_terminal() {
     drop(tx);
 
     // Exactly one terminal — the relayed in-band one.
-    let msg = timeout(Duration::from_secs(5), rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("timed out waiting for terminal")
         .expect("channel closed");
@@ -489,7 +489,7 @@ async fn shutdown_during_reconnection_backoff_exits_cleanly() {
     // The channel may close when the task exits
     let result = timeout(Duration::from_secs(2), rx.recv()).await;
     match result {
-        Ok(Some(msg)) => {
+        Ok(Some((msg, _))) => {
             // If we receive a message, it should NOT be BrokerConnectionFailed
             if let WsMessage::Connection { event, .. } = &msg {
                 assert_ne!(

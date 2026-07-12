@@ -73,7 +73,7 @@ async fn candle_from_engine_reaches_registered_strategy() {
 
     // Register a strategy connection — emulates what server.rs does on a
     // successful `/v1/ws` upgrade.
-    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, mut out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -94,7 +94,7 @@ async fn candle_from_engine_reaches_registered_strategy() {
     send_server_message(&engine_tx, &candle);
 
     // The strategy connection should receive the candle.
-    let msg = timeout(Duration::from_secs(2), out_rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received candle (TEK-268)")
         .expect("channel closed before candle arrived");
@@ -150,7 +150,7 @@ async fn candle_reaches_strategy_with_production_subscriptions() {
         .await
         .expect("register_provider should succeed");
 
-    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, mut out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -169,7 +169,7 @@ async fn candle_reaches_strategy_with_production_subscriptions() {
     );
     send_server_message(&engine_tx, &candle);
 
-    let msg = timeout(Duration::from_secs(2), out_rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received candle (TEK-268)")
         .expect("channel closed before candle arrived");
@@ -232,7 +232,7 @@ async fn candle_passes_through_when_subscriptions_target_other_platform() {
         .await
         .expect("register_provider should succeed");
 
-    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, mut out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -251,7 +251,7 @@ async fn candle_passes_through_when_subscriptions_target_other_platform() {
     );
     send_server_message(&engine_tx, &candle);
 
-    let msg = timeout(Duration::from_secs(2), out_rx.recv())
+    let (msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received candle (TEK-268)")
         .expect("channel closed before candle arrived");
@@ -317,7 +317,7 @@ async fn engine_receives_ack_after_strategy_acks_event_delivered_through_registr
         .await
         .expect("register_provider should succeed");
 
-    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, mut out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -337,7 +337,7 @@ async fn engine_receives_ack_after_strategy_acks_event_delivered_through_registr
     send_server_message(&engine_tx, &candle);
 
     // Strategy receives the candle through the registry pipeline.
-    let strategy_msg = timeout(Duration::from_secs(2), out_rx.recv())
+    let (strategy_msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received candle")
         .expect("channel closed before candle arrived");
@@ -482,7 +482,7 @@ async fn engine_is_not_connected_until_the_strategy_connects() {
     );
 
     // The strategy connects — the gate releases and the engine connect proceeds.
-    let (out_tx, _out_rx) = mpsc::channel::<WsMessage>(16);
+    let (out_tx, _out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(16);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -545,7 +545,7 @@ async fn undelivered_engine_event_with_no_strategy_is_not_marked_sent() {
     // A strategy attaches and the engine delivers one candle end-to-end. This
     // establishes a clean synchronised baseline: the queue drains and the
     // engine ACK is observed before the disconnect scenario begins.
-    let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, mut out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
     ws_manager.add_connection(conn).await;
@@ -666,7 +666,7 @@ async fn failed_strategy_send_does_not_mark_event_sent() {
 
     // A strategy connection whose receiver is immediately dropped — every
     // `send_to` to it returns Err (channel closed).
-    let (out_tx, out_rx) = mpsc::channel::<WsMessage>(1024);
+    let (out_tx, out_rx) = mpsc::channel::<(WsMessage, Option<String>)>(1024);
     drop(out_rx);
     let conn = WsConnection::new(out_tx, "127.0.0.1:1".parse().unwrap());
     let conn_id = conn.id;
