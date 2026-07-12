@@ -1,13 +1,12 @@
-//! TEK-1312: the strategy-facing ACK path must DROP `EventAck` frames whose
-//! `events_processed` is empty instead of forwarding them to the ACK bridge.
+//! Auto-correlation: the strategy-facing ACK path forwards EVERY `EventAck` to
+//! the ACK bridge, including ones whose `events_processed` is empty.
 //!
-//! The Python SDK emits an `event_ack` after every yielded event, with
-//! `events_processed: []` for gateway-local events (connection / error /
-//! rate-limit) that carry no engine id. Forwarding those popped the oldest
-//! delivered ENGINE event off the FIFO, silently advancing the engine one
-//! event ahead of the strategy — free-running sim time and producing silent
-//! 0-trade backtests (TEK-1309). Legit backtest ACKs always carry the engine
-//! `event_id`, so pacing is unaffected.
+//! The backtest SDK strips engine `event_id`s from the wire and uses
+//! auto-correlation — one ACK releases the oldest delivered event by delivery
+//! position, so the SDK's per-event ACKs legitimately carry an empty payload.
+//! Dropping empty ACKs (the reverted #109) starved the FIFO and halted the
+//! engine on consecutive candle-ACK timeouts. This test pins the restored
+//! behaviour: an empty-payload ACK releases exactly the oldest delivered event.
 
 use std::sync::Arc;
 
@@ -30,7 +29,7 @@ fn build_registry() -> Arc<ProviderRegistry> {
 }
 
 #[tokio::test]
-async fn empty_events_processed_ack_does_not_release_engine_event() {
+async fn empty_events_processed_ack_releases_oldest_delivered_event() {
     let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
     let registry = build_registry();
     registry.set_tektii_ack_bridge(bridge.clone()).await;
@@ -43,24 +42,26 @@ async fn empty_events_processed_ack_does_not_release_engine_event() {
         .mark_sent(vec!["evt-0".to_string(), "evt-1".to_string()])
         .await;
 
-    // A gateway-local event (ConnectionEvent / ErrorEvent / rate-limit) yields
-    // an empty-payload ACK. It must be dropped — the engine FIFO is untouched.
-    registry.handle_strategy_ack(&[]).await;
-    assert!(
-        engine_ack_rx.try_recv().is_err(),
-        "empty events_processed ACK must not pop the engine FIFO"
-    );
-
-    // A real backtest ACK carries the engine event_id — releases exactly the
-    // oldest delivered event; FIFO release semantics are unchanged.
-    registry.handle_strategy_ack(&["evt-0".to_string()]).await;
+    // The SDK ACKs each delivered event with an empty payload. Under
+    // auto-correlation that ACK must release the oldest delivered event — it
+    // must NOT be dropped.
+    registry.handle_strategy_ack().await;
     let released = engine_ack_rx
         .recv()
         .await
-        .expect("non-empty ACK must release the oldest delivered event");
+        .expect("empty-payload ACK must release the oldest delivered event");
     assert_eq!(released, vec!["evt-0".to_string()]);
+
+    // The next ACK releases the next event — exactly one release per ACK.
+    registry.handle_strategy_ack().await;
+    let released = engine_ack_rx
+        .recv()
+        .await
+        .expect("second ACK releases the next delivered event");
+    assert_eq!(released, vec!["evt-1".to_string()]);
+
     assert!(
         engine_ack_rx.try_recv().is_err(),
-        "exactly one event released per non-empty ACK"
+        "exactly one event released per ACK"
     );
 }

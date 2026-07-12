@@ -282,7 +282,7 @@ async fn handle_ws_message(
             events_processed = events_processed.len(),
             "Received EventAck from strategy {}", conn_id
         );
-        registry.handle_strategy_ack(&events_processed).await;
+        registry.handle_strategy_ack().await;
     } else {
         warn!("Unexpected message type from client {}: {:?}", conn_id, msg);
     }
