@@ -30,10 +30,6 @@ use super::{
     RegisteredExitLegs, opposite_side,
 };
 
-// =============================================================================
-// ExitHandling Trait
-// =============================================================================
-
 /// Trait for exit order (SL/TP) management.
 ///
 /// Implementations handle the lifecycle of exit orders:
@@ -82,10 +78,6 @@ pub trait ExitHandling: Send + Sync {
     fn clear_failed_entries(&self) -> usize;
 }
 
-// =============================================================================
-// ExitHandler Struct
-// =============================================================================
-
 /// A fill that arrived before its order's exits were registered.
 ///
 /// Submission registers exits only after the broker's submit response, so a
@@ -126,10 +118,6 @@ impl std::fmt::Debug for ExitHandler {
             .finish_non_exhaustive()
     }
 }
-
-// =============================================================================
-// ExitHandler Core Implementation
-// =============================================================================
 
 impl ExitHandler {
     #[must_use]
@@ -378,10 +366,6 @@ impl ExitHandler {
         }
     }
 
-    // =========================================================================
-    // Registration Methods
-    // =========================================================================
-
     /// Register pending SL/TP orders for a primary order.
     pub fn register(
         &self,
@@ -574,10 +558,6 @@ impl ExitHandler {
     }
 }
 
-// =============================================================================
-// ExitHandling Trait Implementation
-// =============================================================================
-
 #[async_trait]
 impl ExitHandling for ExitHandler {
     async fn handle_fill(
@@ -642,10 +622,6 @@ impl ExitHandling for ExitHandler {
         self.clear_failed_entries_internal()
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1040,10 +1016,6 @@ mod tests {
             CancelExitResultInternal::AlreadyTerminal { .. }
         ));
     }
-
-    // =========================================================================
-    // Mock adapter for cancel_for_position_close tests
-    // =========================================================================
 
     struct CancelSuccessMockCapabilities;
 

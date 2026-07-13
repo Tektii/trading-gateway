@@ -11,10 +11,6 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{BarParams, Timeframe};
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Quotes
-// =========================================================================
-
 #[tokio::test]
 async fn get_quote_stock() {
     let (server, base_url) = start_mock_server().await;
@@ -82,10 +78,6 @@ async fn get_quote_error() {
         "Expected ProviderError, got: {err:?}"
     );
 }
-
-// =========================================================================
-// Bars
-// =========================================================================
 
 #[tokio::test]
 async fn get_bars_stock() {
@@ -187,7 +179,6 @@ async fn get_bars_timeframe_translation() {
     )
     .await;
 
-    // Verify 1h timeframe works
     let params = BarParams {
         timeframe: Timeframe::OneHour,
         start: None,
@@ -198,7 +189,6 @@ async fn get_bars_timeframe_translation() {
     assert_eq!(bars.len(), 1);
     assert_eq!(bars[0].timeframe, Timeframe::OneHour);
 
-    // Verify 1d timeframe works
     let params = BarParams {
         timeframe: Timeframe::OneDay,
         start: None,

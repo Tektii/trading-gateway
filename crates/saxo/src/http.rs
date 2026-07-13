@@ -18,9 +18,7 @@ use super::error::SaxoError;
 use crate::credentials::SaxoCredentials;
 use tektii_gateway_core::models::TradingPlatform;
 
-/// Base URL for Saxo SIM environment.
 const SAXO_SIM_REST_URL: &str = "https://gateway.saxobank.com/sim/openapi";
-/// Base URL for Saxo LIVE environment.
 const SAXO_LIVE_REST_URL: &str = "https://gateway.saxobank.com/openapi";
 
 /// Authenticated HTTP client for the Saxo Bank OpenAPI.
@@ -202,7 +200,6 @@ impl SaxoHttpClient {
             return Ok(body);
         }
 
-        // Try to parse Saxo error body
         if let Ok(error_body) = serde_json::from_str::<serde_json::Value>(&body) {
             let message = error_body["Message"]
                 .as_str()

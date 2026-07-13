@@ -698,8 +698,6 @@ mod tests {
         OrderRequest::market("AAPL", Side::Buy, dec!(10))
     }
 
-    // --- Market order ---
-
     #[test]
     fn validate_semantics_market_valid() {
         assert!(base_market().validate_semantics().is_ok());
@@ -734,8 +732,6 @@ mod tests {
             matches!(err, GatewayError::InvalidValue { ref field, .. } if field == "trailing_distance")
         );
     }
-
-    // --- Limit order ---
 
     #[test]
     fn validate_semantics_limit_valid() {
@@ -775,8 +771,6 @@ mod tests {
         );
     }
 
-    // --- Stop order ---
-
     #[test]
     fn validate_semantics_stop_valid() {
         assert!(
@@ -806,8 +800,6 @@ mod tests {
         );
     }
 
-    // --- StopLimit order ---
-
     #[test]
     fn validate_semantics_stop_limit_valid() {
         assert!(
@@ -836,8 +828,6 @@ mod tests {
             matches!(err, GatewayError::InvalidRequest { ref field, .. } if field.as_deref() == Some("limit_price"))
         );
     }
-
-    // --- TrailingStop order ---
 
     fn trailing_stop_order() -> OrderRequest {
         let mut o = base_market();
@@ -910,8 +900,6 @@ mod tests {
             matches!(err, GatewayError::InvalidValue { ref field, .. } if field == "stop_price")
         );
     }
-
-    // --- Cross-cutting ---
 
     #[test]
     fn validate_semantics_stop_loss_must_be_positive() {

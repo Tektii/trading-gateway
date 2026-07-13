@@ -22,10 +22,6 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-// ---------------------------------------------------------------------------
-// Submit order
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn submit_order_returns_201_with_handle() {
     let handle = OrderHandle {
@@ -78,10 +74,6 @@ async fn submit_order_validation_rejects_missing_fields() {
     assert_eq!(resp.status(), 400);
 }
 
-// ---------------------------------------------------------------------------
-// Fill event via WebSocket
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn fill_event_reaches_strategy_via_websocket() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
@@ -89,7 +81,6 @@ async fn fill_event_reaches_strategy_via_websocket() {
     let mut client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Inject an order filled event
     let mut filled_order = test_order();
     filled_order.id = "ord-fill-1".into();
     filled_order.symbol = "AAPL".into();
@@ -108,7 +99,6 @@ async fn fill_event_reaches_strategy_via_websocket() {
     let msg = client.recv_message(TIMEOUT).await;
     assert!(msg.is_some(), "expected to receive fill event via WS");
 
-    // Verify it's the correct event type
     if let Some(WsMessage::Order { event, order, .. }) = msg {
         assert_eq!(event, OrderEventType::OrderFilled);
         assert_eq!(order.id, "ord-fill-1");
@@ -150,15 +140,10 @@ async fn cancel_event_reaches_strategy_via_websocket() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Full round-trip: submit → fill → query
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn submit_then_fill_then_query_order() {
     let order_id = "ord-roundtrip-1";
 
-    // Pre-configure: submit response + filled order for GET
     let handle = OrderHandle {
         id: order_id.into(),
         client_order_id: None,
@@ -186,7 +171,6 @@ async fn submit_then_fill_then_query_order() {
     let mut client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Step 1: Submit order via REST
     let resp = http_client()
         .post(format!("{}/orders", gw.base_url()))
         .json(&serde_json::json!({
@@ -200,7 +184,6 @@ async fn submit_then_fill_then_query_order() {
         .unwrap();
     assert_eq!(resp.status(), 201);
 
-    // Step 2: Broker fills order → event reaches strategy
     gw.inject_event(WsMessage::Order {
         event: OrderEventType::OrderFilled,
         order: filled_order,
@@ -211,7 +194,6 @@ async fn submit_then_fill_then_query_order() {
     let msg = client.recv_message(TIMEOUT).await;
     assert!(msg.is_some(), "expected fill event via WS");
 
-    // Step 3: Query order status via REST → sees filled
     let resp = http_client()
         .get(format!("{}/orders/{}", gw.base_url(), order_id))
         .send()
@@ -261,7 +243,6 @@ async fn submit_then_fill_then_query_position() {
     let mut client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Submit order
     let resp = http_client()
         .post(format!("{}/orders", gw.base_url()))
         .json(&serde_json::json!({
@@ -275,7 +256,6 @@ async fn submit_then_fill_then_query_position() {
         .unwrap();
     assert_eq!(resp.status(), 201);
 
-    // Broker fills order → event reaches strategy
     gw.inject_event(WsMessage::Order {
         event: OrderEventType::OrderFilled,
         order: filled_order,
@@ -286,7 +266,6 @@ async fn submit_then_fill_then_query_position() {
     let msg = client.recv_message(TIMEOUT).await;
     assert!(msg.is_some(), "expected fill event via WS");
 
-    // Query positions → sees the resulting position
     let resp = http_client()
         .get(format!("{}/positions", gw.base_url()))
         .send()
@@ -300,10 +279,6 @@ async fn submit_then_fill_then_query_position() {
     assert_eq!(body[0]["side"], "LONG");
     assert_eq!(body[0]["quantity"], "10");
 }
-
-// ---------------------------------------------------------------------------
-// Cancel order via REST
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn cancel_order_returns_cancelled_status() {
@@ -328,10 +303,6 @@ async fn cancel_order_returns_cancelled_status() {
     assert_eq!(body["success"], true);
     assert_eq!(body["order"]["status"], "CANCELLED");
 }
-
-// ---------------------------------------------------------------------------
-// Modify order via REST
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn modify_order_returns_updated_order() {
@@ -482,10 +453,6 @@ async fn modify_order_invalid_json_returns_400() {
 
     assert_eq!(resp.status(), 400);
 }
-
-// ---------------------------------------------------------------------------
-// Cancel all orders via REST
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn cancel_all_orders_cancels_all() {

@@ -26,8 +26,6 @@ use crate::websocket::provider::ProviderEvent;
 /// Unified interface for all trading operations across different providers.
 #[async_trait]
 pub trait TradingAdapter: Send + Sync {
-    // === Identity ===
-
     /// Get provider capabilities.
     fn capabilities(&self) -> &dyn ProviderCapabilities;
 
@@ -56,12 +54,8 @@ pub trait TradingAdapter: Send + Sync {
         None
     }
 
-    // === Account ===
-
     /// Get account information.
     async fn get_account(&self) -> GatewayResult<Account>;
-
-    // === Orders ===
 
     /// Submit a new order.
     async fn submit_order(&self, request: &OrderRequest) -> GatewayResult<OrderHandle>;
@@ -117,12 +111,8 @@ pub trait TradingAdapter: Send + Sync {
         })
     }
 
-    // === Trades ===
-
     /// Get trade history.
     async fn get_trades(&self, params: &TradeQueryParams) -> GatewayResult<Vec<Trade>>;
-
-    // === Positions ===
 
     /// Get open positions.
     async fn get_positions(&self, symbol: Option<&str>) -> GatewayResult<Vec<Position>>;
@@ -152,8 +142,6 @@ pub trait TradingAdapter: Send + Sync {
         Ok(handles)
     }
 
-    // === OCO Orders ===
-
     /// Place a new OCO order pair (stop-loss + take-profit).
     async fn place_oco_order(
         &self,
@@ -164,8 +152,6 @@ pub trait TradingAdapter: Send + Sync {
             provider: self.provider_name().to_string(),
         })
     }
-
-    // === Market Data ===
 
     /// Get current quote for symbol.
     async fn get_quote(&self, symbol: &str) -> GatewayResult<Quote>;
@@ -182,17 +168,11 @@ pub trait TradingAdapter: Send + Sync {
     /// Get historical bars.
     async fn get_bars(&self, symbol: &str, params: &BarParams) -> GatewayResult<Vec<Bar>>;
 
-    // === Capabilities ===
-
     /// Get provider capabilities at runtime.
     async fn get_capabilities(&self) -> GatewayResult<Capabilities>;
 
-    // === Connection Status ===
-
     /// Get current connection status.
     async fn get_connection_status(&self) -> GatewayResult<ConnectionStatus>;
-
-    // === Circuit Breaker ===
 
     /// Get the adapter circuit breaker status as a point-in-time snapshot.
     ///

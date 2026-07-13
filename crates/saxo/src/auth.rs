@@ -12,9 +12,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-/// Token URL for SIM environment.
 const SAXO_SIM_TOKEN_URL: &str = "https://sim.logonvalidation.net";
-/// Token URL for LIVE environment.
 const SAXO_LIVE_TOKEN_URL: &str = "https://live.logonvalidation.net";
 
 /// Buffer before expiry to trigger refresh (60 seconds).
@@ -290,7 +288,6 @@ mod tests {
         creds.refresh_token = None;
         let auth = SaxoAuth::new(&creds, TradingPlatform::SaxoSim).unwrap();
 
-        // Set token as expired
         {
             let mut state = auth.state.lock().await;
             state.expires_at = Instant::now();

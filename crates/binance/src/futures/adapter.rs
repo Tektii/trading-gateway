@@ -345,7 +345,6 @@ impl TradingAdapter for BinanceFuturesAdapter {
             format!("type={otype}"),
             format!("quantity={}", order.quantity),
         ];
-        // Trailing stop parameters
         if otype == "TRAILING_STOP_MARKET" {
             if let Some(ref trailing_type) = order.trailing_type {
                 match trailing_type {

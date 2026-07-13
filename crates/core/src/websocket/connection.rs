@@ -214,7 +214,6 @@ impl WsConnectionManager {
 
         tracing::info!(count, "Broadcasting shutdown to connected strategies");
 
-        // 1. Send Disconnecting event
         self.broadcast(WsMessage::Connection {
             event: ConnectionEventType::Disconnecting,
             error: None,
@@ -224,10 +223,9 @@ impl WsConnectionManager {
         })
         .await;
 
-        // 2. Brief pause for TCP delivery
+        // Brief pause so the Disconnecting event reaches the client before the close frame.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // 3. Send close frame
         self.broadcast(WsMessage::Close {
             code: 1001,
             reason: "Gateway shutting down".to_string(),
@@ -270,7 +268,6 @@ mod tests {
 
         mgr.broadcast_shutdown().await;
 
-        // Both receivers should get: Disconnecting, then Close
         for rx in [&mut rx1, &mut rx2] {
             let (msg1, _) = rx.recv().await.expect("should receive Disconnecting");
             assert!(
@@ -340,7 +337,6 @@ mod tests {
             connected_at: Instant::now(),
         };
 
-        // Fill the buffer
         assert!(conn.send(WsMessage::ping(), None).is_ok());
         assert!(conn.send(WsMessage::ping(), None).is_ok());
 

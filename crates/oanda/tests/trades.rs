@@ -8,10 +8,6 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{Side, TradeQueryParams};
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Trades: Success
-// =========================================================================
-
 #[tokio::test]
 async fn get_trades_success() {
     let (server, base_url) = start_mock_server().await;

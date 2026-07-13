@@ -126,7 +126,7 @@ pub struct ProviderEvent {
     /// The WebSocket message destined for connected strategies.
     pub msg: WsMessage,
 
-    /// Engine event_id for two-phase ACK pacing (TEK-270). `None` for live
+    /// Engine event_id for two-phase ACK pacing. `None` for live
     /// providers; `Some` only for Tektii engine events that produce a
     /// downstream broadcast.
     pub engine_event_id: Option<String>,
@@ -305,7 +305,7 @@ pub trait WebSocketProvider: Send + Sync {
     /// resolved subscriptions validated at startup). When `true`, the gateway's
     /// `ProviderRegistry` skips its own subscription filter and rebroadcasts
     /// every event the provider yields — re-filtering at the gateway with
-    /// weaker pattern semantics is exactly where TEK-268 silent drops creep in.
+    /// weaker pattern semantics is exactly where silent drops creep in.
     ///
     /// Default `false`: live brokers may push unsolicited events (account
     /// updates, exchange status, etc.); the gateway filter gates which of

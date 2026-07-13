@@ -785,7 +785,6 @@ async fn stream_won_partial_ioc_delivers_wire_shape_pair_and_suppresses_rest() {
     let provider = test_provider(&base_url).with_event_tx(adapter.provider_event_tx_handle());
     let mut rx = provider.connect(provider_config()).await.unwrap();
 
-    // Record everything up to and including the terminal cancel.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut events = Vec::new();
     loop {

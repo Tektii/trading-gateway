@@ -13,10 +13,6 @@ use tektii_gateway_core::models::{
 };
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Submit order
-// =========================================================================
-
 #[tokio::test]
 async fn submit_market_order() {
     let (server, base_url) = start_mock_server().await;
@@ -243,10 +239,6 @@ async fn submit_order_unknown_symbol() {
     assert!(matches!(err, GatewayError::SymbolNotFound { .. }));
 }
 
-// =========================================================================
-// Get orders
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_success() {
     let (server, base_url) = start_mock_server().await;
@@ -358,19 +350,13 @@ async fn get_orders_with_symbol_filter() {
     assert_eq!(orders[0].symbol, "EURUSD:FxSpot");
 }
 
-// =========================================================================
-// Modify order
-// =========================================================================
-
 #[tokio::test]
 async fn modify_order_success() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&server, &base_url).await;
 
-    // PATCH to modify
     mount_json(&server, "PATCH", "/trade/v2/orders/ORD-123", 200, json!({})).await;
 
-    // GET to fetch updated order
     mount_json(
         &server,
         "GET",
@@ -398,10 +384,6 @@ async fn modify_order_success() {
     assert_eq!(result.order.limit_price, Some(dec!(1.12)));
     assert!(result.previous_order_id.is_none()); // In-place PATCH, not cancel+replace
 }
-
-// =========================================================================
-// Cancel order
-// =========================================================================
 
 #[tokio::test]
 async fn cancel_order_success() {

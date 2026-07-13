@@ -8,10 +8,6 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{BarParams, Timeframe};
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Quotes
-// =========================================================================
-
 #[tokio::test]
 async fn get_quote_success() {
     let (server, base_url) = start_mock_server().await;
@@ -89,10 +85,6 @@ async fn get_quote_error() {
     let err = adapter.get_quote("EUR_USD").await.unwrap_err();
     assert!(matches!(err, GatewayError::ProviderError { .. }));
 }
-
-// =========================================================================
-// Bars (candles)
-// =========================================================================
 
 #[tokio::test]
 async fn get_bars_success() {

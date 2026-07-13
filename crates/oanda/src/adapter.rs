@@ -39,7 +39,6 @@ use crate::credentials::OandaCredentials;
 use crate::dedupe::PUBLISHED_TRANSACTIONS;
 use crate::streaming::{ACCOUNT_FETCH_TIMEOUT, AccountFetcher, parse_transaction_time};
 
-// Import trading models
 use tektii_gateway_core::adapter::{ProviderCapabilities, TradingAdapter};
 use tektii_gateway_core::models::{
     Account, Bar, BarParams, CancelOrderResult, Capabilities, ClosePositionRequest,
@@ -48,18 +47,10 @@ use tektii_gateway_core::models::{
     TradingPlatform,
 };
 
-// ============================================================================
-// Constants
-// ============================================================================
-
 /// Base URL for Oanda practice (demo) accounts.
 const OANDA_PRACTICE_REST_URL: &str = "https://api-fxpractice.oanda.com";
 /// Base URL for Oanda live (real money) accounts.
 const OANDA_LIVE_REST_URL: &str = "https://api-fxtrade.oanda.com";
-
-// ============================================================================
-// Adapter
-// ============================================================================
 
 /// Oanda REST API adapter implementing `TradingAdapter`.
 pub struct OandaAdapter {
@@ -76,14 +67,11 @@ pub struct OandaAdapter {
     /// Lazily detected hedging mode from the account API.
     hedging_mode: OnceCell<bool>,
 
-    // === Event Infrastructure ===
     /// State Manager for caching orders and positions.
     state_manager: Arc<StateManager>,
     /// Exit Handler for managing stop-loss and take-profit orders.
     exit_handler: Arc<ExitHandler>,
-    /// Event Router for processing events.
     event_router: Arc<EventRouter>,
-    /// Platform identifier for this adapter instance.
     platform: TradingPlatform,
     /// Circuit breaker for detecting provider outages.
     circuit_breaker: Arc<RwLock<AdapterCircuitBreaker>>,
@@ -431,39 +419,27 @@ impl OandaAdapter {
         self
     }
 
-    // =========================================================================
-    // Event Infrastructure Accessors
-    // =========================================================================
-
-    /// Returns a reference to the `StateManager`.
     #[must_use]
     #[allow(dead_code)]
     pub fn state_manager(&self) -> Arc<StateManager> {
         Arc::clone(&self.state_manager)
     }
 
-    /// Returns a reference to the `ExitHandler`.
     #[must_use]
     pub fn exit_handler(&self) -> Arc<ExitHandler> {
         Arc::clone(&self.exit_handler)
     }
 
-    /// Returns a reference to the `EventRouter`.
     #[must_use]
     pub fn event_router(&self) -> Arc<EventRouter> {
         Arc::clone(&self.event_router)
     }
 
-    /// Returns the platform identifier for this adapter.
     #[must_use]
     #[allow(dead_code)]
     pub fn platform_id(&self) -> TradingPlatform {
         self.platform
     }
-
-    // =========================================================================
-    // Circuit Breaker
-    // =========================================================================
 
     async fn check_circuit_breaker(&self) -> GatewayResult<()> {
         let breaker = self.circuit_breaker.read().await;
@@ -480,10 +456,6 @@ impl OandaAdapter {
         }
     }
 
-    // =========================================================================
-    // URL Helpers
-    // =========================================================================
-
     /// Build an account-scoped URL: `{base}/v3/accounts/{id}{path}`.
     fn account_url(&self, path: &str) -> String {
         format!("{}/v3/accounts/{}{}", self.base_url, self.account_id, path)
@@ -498,14 +470,6 @@ impl OandaAdapter {
     fn auth_header(&self) -> String {
         format!("Bearer {}", self.api_token.expose_secret())
     }
-
-    // =========================================================================
-    // Symbol Mapping
-    // =========================================================================
-
-    // =========================================================================
-    // Unit Conversion (signed units <-> side + quantity)
-    // =========================================================================
 
     /// Convert gateway `Side` + `Decimal` quantity to Oanda signed units string.
     fn to_oanda_units(side: Side, quantity: Decimal) -> String {
@@ -529,10 +493,6 @@ impl OandaAdapter {
             Ok((Side::Buy, d))
         }
     }
-
-    // =========================================================================
-    // Order Type Mapping
-    // =========================================================================
 
     /// Convert gateway `OrderType` to Oanda order type string.
     fn to_oanda_order_type(
@@ -610,10 +570,6 @@ impl OandaAdapter {
             }),
         }
     }
-
-    // =========================================================================
-    // Translation Helpers
-    // =========================================================================
 
     /// Translate an `OandaOrder` to a gateway `Order`.
     fn translate_oanda_order(oanda_order: OandaOrder) -> GatewayResult<Order> {
@@ -705,7 +661,6 @@ impl OandaAdapter {
         let mut positions = Vec::new();
         let symbol = oanda_pos.instrument.clone();
 
-        // Long side
         if oanda_pos.long.units != "0" {
             let quantity = Decimal::from_str(&oanda_pos.long.units).unwrap_or_default();
             let avg_price = oanda_pos
@@ -738,7 +693,6 @@ impl OandaAdapter {
             });
         }
 
-        // Short side
         if oanda_pos.short.units != "0" {
             let quantity = Decimal::from_str(&oanda_pos.short.units).unwrap_or_default();
             let avg_price = oanda_pos
@@ -801,10 +755,6 @@ impl OandaAdapter {
             timestamp,
         })
     }
-
-    // =========================================================================
-    // HTTP Error Mapping
-    // =========================================================================
 
     /// Map HTTP status + response body to `GatewayError`.
     fn map_http_error(status: reqwest::StatusCode, body: &serde_json::Value) -> GatewayError {
@@ -947,10 +897,6 @@ fn map_oanda_reject_code(reason: &str) -> &str {
     }
 }
 
-// ============================================================================
-// TradingAdapter Implementation
-// ============================================================================
-
 #[async_trait]
 impl TradingAdapter for OandaAdapter {
     fn capabilities(&self) -> &dyn ProviderCapabilities {
@@ -970,10 +916,6 @@ impl TradingAdapter for OandaAdapter {
     ) -> Option<Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>> {
         Some(Arc::clone(&self.provider_event_tx))
     }
-
-    // =========================================================================
-    // Account
-    // =========================================================================
 
     #[instrument(skip(self), name = "oanda_get_account")]
     async fn get_account(&self) -> GatewayResult<Account> {
@@ -999,10 +941,6 @@ impl TradingAdapter for OandaAdapter {
         })
     }
 
-    // =========================================================================
-    // Orders
-    // =========================================================================
-
     #[instrument(skip(self, request), name = "oanda_submit_order")]
     async fn submit_order(
         &self,
@@ -1020,7 +958,6 @@ impl TradingAdapter for OandaAdapter {
             Self::to_oanda_tif(request.time_in_force)
         };
 
-        // Build price field (for limit/stop orders)
         let price = request
             .limit_price
             .or(request.stop_price)
@@ -1118,7 +1055,6 @@ impl TradingAdapter for OandaAdapter {
             .await
             .map_err(|e| GatewayError::internal(format!("Failed to parse order response: {e}")))?;
 
-        // Check for rejection
         if let Some(ref reject) = resp.order_reject_transaction {
             let reason = reject
                 .reject_reason
@@ -1131,7 +1067,6 @@ impl TradingAdapter for OandaAdapter {
             });
         }
 
-        // Get order ID from create or fill transaction
         let (order_id, order_status) = if let Some(ref fill) = resp.order_fill_transaction {
             // Market order filled immediately. Publish the fill onto the
             // provider's event stream — the same path candles/quotes take to
@@ -1276,7 +1211,6 @@ impl TradingAdapter for OandaAdapter {
 
         let mut url = self.account_url("/orders");
 
-        // Add symbol filter if provided
         if let Some(ref symbol) = params.symbol {
             url = format!("{url}?instrument={symbol}");
         }
@@ -1331,7 +1265,6 @@ impl TradingAdapter for OandaAdapter {
         self.check_circuit_breaker().await?;
 
         // Oanda modify is a full replacement via PUT.
-        // First, fetch the current order to merge changes.
         let current = self.get_order(order_id).await?;
 
         let oanda_type = Self::to_oanda_order_type(current.order_type)?;
@@ -1411,7 +1344,6 @@ impl TradingAdapter for OandaAdapter {
             .await
             .map_err(|e| GatewayError::internal(format!("Failed to parse modify response: {e}")))?;
 
-        // Get the replacement order ID from the create transaction
         let order = if let Some(create_tx) = resp_body.get("orderCreateTransaction") {
             if let Some(new_id) = create_tx.get("id").and_then(|v| v.as_str()) {
                 self.get_order(new_id).await?
@@ -1419,7 +1351,6 @@ impl TradingAdapter for OandaAdapter {
                 self.get_order(order_id).await?
             }
         } else {
-            // Fallback: return the order we built from the modification
             self.get_order(order_id).await?
         };
 
@@ -1471,7 +1402,6 @@ impl TradingAdapter for OandaAdapter {
             return Err(error);
         }
 
-        // Build a minimal cancelled order response
         let order = Order {
             id: order_id.to_string(),
             client_order_id: None,
@@ -1508,10 +1438,6 @@ impl TradingAdapter for OandaAdapter {
         })
     }
 
-    // =========================================================================
-    // Trades
-    // =========================================================================
-
     #[instrument(skip(self, params), name = "oanda_get_trades")]
     async fn get_trades(&self, params: &TradeQueryParams) -> GatewayResult<Vec<Trade>> {
         self.check_circuit_breaker().await?;
@@ -1535,16 +1461,11 @@ impl TradingAdapter for OandaAdapter {
             .collect()
     }
 
-    // =========================================================================
-    // Positions
-    // =========================================================================
-
     #[instrument(skip(self), name = "oanda_get_positions")]
     async fn get_positions(&self, symbol: Option<&str>) -> GatewayResult<Vec<Position>> {
         self.check_circuit_breaker().await?;
 
         if let Some(sym) = symbol {
-            // Get single position by instrument
             let pos = self.get_position(sym).await?;
             return Ok(vec![pos]);
         }
@@ -1588,7 +1509,6 @@ impl TradingAdapter for OandaAdapter {
         let resp = result?;
         let positions = Self::translate_oanda_position(&resp.position);
 
-        // Filter to requested side if specified
         if let Some(side) = requested_side {
             positions
                 .into_iter()
@@ -1672,7 +1592,6 @@ impl TradingAdapter for OandaAdapter {
             return Err(error);
         }
 
-        // Parse response to get transaction IDs
         let resp_body: serde_json::Value = response.json().await.map_err(|e| {
             GatewayError::internal(format!("Failed to parse close position response: {e}"))
         })?;
@@ -1697,10 +1616,6 @@ impl TradingAdapter for OandaAdapter {
             status: tektii_gateway_core::models::OrderStatus::Filled,
         })
     }
-
-    // =========================================================================
-    // Market Data
-    // =========================================================================
 
     #[instrument(skip(self), name = "oanda_get_quote")]
     async fn get_quote(&self, symbol: &str) -> GatewayResult<Quote> {
@@ -1814,10 +1729,6 @@ impl TradingAdapter for OandaAdapter {
         Ok(bars)
     }
 
-    // =========================================================================
-    // Capabilities & Status
-    // =========================================================================
-
     async fn get_capabilities(&self) -> GatewayResult<Capabilities> {
         // Lazy-detect hedging mode from the account API on first call.
         let hedging = *self
@@ -1892,10 +1803,6 @@ impl OandaAdapter {
         (position_id.to_string(), None)
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -2185,10 +2092,6 @@ mod tests {
     fn empty_oanda_reason_returns_order_rejected() {
         assert_eq!(map_oanda_reject_code(""), "ORDER_REJECTED");
     }
-
-    // =====================================================================
-    // map_http_error
-    // =====================================================================
 
     #[test]
     fn http_error_429_rate_limited() {

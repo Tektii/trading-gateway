@@ -97,16 +97,11 @@ fn registry_with_pending(n: usize) -> Arc<ExitHandlerRegistry> {
     Arc::new(registry)
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[tokio::test]
 async fn shutdown_sequence_notifies_connected_strategies() {
     let (ws_manager, gateway_state, exit_handler_registry, provider_registry, cancel_token) =
         setup();
 
-    // Add two strategy connections
     let (conn1, mut rx1) = test_connection(9001);
     let (conn2, mut rx2) = test_connection(9002);
     ws_manager.add_connection(conn1).await;
@@ -125,7 +120,6 @@ async fn shutdown_sequence_notifies_connected_strategies() {
     )
     .await;
 
-    // Both strategies should receive Disconnecting then Close(1001)
     for rx in [&mut rx1, &mut rx2] {
         let (msg1, _) = rx.recv().await.expect("should receive Disconnecting");
         assert!(
@@ -190,7 +184,6 @@ async fn shutdown_sequence_writes_exit_state_with_pending_entries() {
     )
     .await;
 
-    // File should exist with 3 entries
     assert!(path.exists(), "exit state snapshot should be written");
 
     let content = tokio::fs::read_to_string(&path).await.unwrap();

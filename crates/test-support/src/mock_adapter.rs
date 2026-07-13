@@ -31,7 +31,6 @@ pub struct MockTradingAdapter {
     positions: Mutex<Vec<Position>>,
     get_orders_error: Mutex<Option<GatewayError>>,
     get_positions_error: Mutex<Option<GatewayError>>,
-    // E2E harness fields
     account: Mutex<Account>,
     quotes: Mutex<HashMap<String, Quote>>,
     bars: Mutex<HashMap<String, Vec<Bar>>>,
@@ -70,10 +69,6 @@ impl MockTradingAdapter {
         }
     }
 
-    // =========================================================================
-    // Builder methods — existing
-    // =========================================================================
-
     /// Add an order that `get_order()` and `get_orders()` will return.
     #[must_use]
     pub fn with_order(self, order: Order) -> Self {
@@ -111,10 +106,6 @@ impl MockTradingAdapter {
         self.bracket_strategy = strategy;
         self
     }
-
-    // =========================================================================
-    // Builder methods — E2E harness
-    // =========================================================================
 
     /// Set the account returned by `get_account()`.
     #[must_use]
@@ -201,10 +192,6 @@ impl MockTradingAdapter {
             .insert(order_id.to_string(), response);
         self
     }
-
-    // =========================================================================
-    // Assertion helpers
-    // =========================================================================
 
     /// Get all order requests that were passed to `submit_order()`.
     pub fn submitted_orders(&self) -> Vec<OrderRequest> {
@@ -339,7 +326,6 @@ impl TradingAdapter for MockTradingAdapter {
             return response;
         }
 
-        // Fallback: apply modifications to the stored order.
         let mut order = self
             .orders
             .lock()
@@ -369,7 +355,6 @@ impl TradingAdapter for MockTradingAdapter {
             order.trailing_distance = Some(trailing_distance);
         }
 
-        // Update stored order so subsequent queries reflect the change.
         self.orders
             .lock()
             .expect("lock")
@@ -396,7 +381,6 @@ impl TradingAdapter for MockTradingAdapter {
             return response;
         }
 
-        // Default: return a cancelled version of the stored order, or a synthetic one.
         let order = self
             .orders
             .lock()

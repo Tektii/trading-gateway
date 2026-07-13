@@ -15,8 +15,6 @@ use tracing::warn;
 use super::error::SaxoError;
 use super::http::SaxoHttpClient;
 
-// --- DTOs for Saxo API response ---
-
 /// Response from `GET /ref/v1/instruments`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -52,8 +50,6 @@ pub struct SaxoInstrumentData {
     pub price_decimals: Option<u8>,
 }
 
-// --- Instrument info stored in the map ---
-
 /// Resolved Saxo instrument info for a symbol.
 #[derive(Debug, Clone)]
 pub struct SaxoInstrumentInfo {
@@ -66,8 +62,6 @@ pub struct SaxoInstrumentInfo {
     /// Price decimal places.
     pub price_decimals: Option<u8>,
 }
-
-// --- Immutable instrument map ---
 
 /// Bidirectional map between symbols and Saxo UICs.
 ///

@@ -191,7 +191,6 @@ impl ExitHandler {
         symbol: &str,
         adapter: &dyn TradingAdapter,
     ) -> Vec<CancelledExitInfo> {
-        // Find all pending entries for this symbol
         let entries_to_cancel: Vec<(String, String, Vec<ActualOrder>)> = self
             .pending_by_placeholder
             .iter()
@@ -240,7 +239,6 @@ impl ExitHandler {
         let mut cancelled_entries = Vec::new();
 
         for (placeholder_id, _primary_id, actual_orders) in entries_to_cancel {
-            // Cancel any placed orders at the exchange
             for actual_order in &actual_orders {
                 match adapter.cancel_order(&actual_order.order_id).await {
                     Ok(_result) => {
@@ -261,7 +259,6 @@ impl ExitHandler {
                 }
             }
 
-            // Mark entry as cancelled
             if let Some(mut entry) = self.pending_by_placeholder.get_mut(&placeholder_id) {
                 cancelled_entries.push(CancelledExitInfo {
                     placeholder_id: placeholder_id.clone(),

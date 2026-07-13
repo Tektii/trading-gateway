@@ -7,8 +7,7 @@
 //! This test glues them through the real axum server + `ProviderRegistry` +
 //! `TektiiAckBridge`, so a field-name mismatch between what the gateway writes
 //! (`event_id`) and what it reads back off an inbound `EventAck`
-//! (`events_processed`) is caught — the exact class of regression behind
-//! TEK-1309 / TEK-1312 / TEK-1331.
+//! (`events_processed`) is caught.
 
 use std::time::Duration;
 
@@ -101,7 +100,6 @@ async fn ack_releases_the_exact_echoed_id_not_the_queue_head() {
     let mut client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Two engine events delivered back-to-back.
     for id in ["evt-a", "evt-b"] {
         bridge.register_pending(id.to_string()).await;
         gw.event_tx

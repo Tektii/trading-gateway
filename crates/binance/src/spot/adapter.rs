@@ -39,12 +39,8 @@ use crate::credentials::BinanceCredentials;
 
 /// Binance Spot adapter implementation.
 pub struct BinanceSpotAdapter {
-    /// HTTP client for authenticated Binance API requests
     http_client: BinanceHttpClient,
-    /// Provider capabilities for determining order type support
     capabilities: BinanceSpotCapabilities,
-
-    // === Event Infrastructure ===
     state_manager: Arc<StateManager>,
     exit_handler: Arc<ExitHandler>,
     event_router: Arc<EventRouter>,

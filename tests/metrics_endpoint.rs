@@ -43,7 +43,6 @@ async fn metrics_recorded_through_event_router() {
 
     let (router, _rx) = create_router();
 
-    // Process a filled order event through the router
     let order = tektii_gateway_core::models::Order {
         status: OrderStatus::Filled,
         filled_quantity: dec!(1),
@@ -57,7 +56,6 @@ async fn metrics_recorded_through_event_router() {
 
     let output = handle.render();
 
-    // Verify order events counter includes the platform label and event type
     assert!(
         output.contains("gateway_order_events_total"),
         "Missing gateway_order_events_total in metrics output:\n{output}"

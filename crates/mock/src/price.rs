@@ -65,7 +65,6 @@ impl PriceGenerator {
         let close = self.get_price(symbol);
         let mut rng = rand::rng();
 
-        // Small random variation for open/high/low
         let open_delta: f64 = rng.random_range(-0.002..0.002);
         let open =
             (close * Decimal::try_from(1.0 + open_delta).unwrap_or(Decimal::ONE)).max(dec!(0.01));

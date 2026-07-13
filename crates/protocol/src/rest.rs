@@ -6,10 +6,6 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-// =============================================================================
-// Enums
-// =============================================================================
-
 /// Order side (buy or sell).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,10 +94,6 @@ pub enum AccountEventType {
     /// Margin call - positions were liquidated due to insufficient margin.
     MarginCall,
 }
-
-// =============================================================================
-// Request Types
-// =============================================================================
 
 /// Request body for submitting a new order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,10 +248,6 @@ pub struct CancelAllQueryParams {
     pub symbol: Option<String>,
 }
 
-// =============================================================================
-// Response Types
-// =============================================================================
-
 /// Minimal order handle returned from order creation/cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderHandle {
@@ -390,7 +378,7 @@ pub struct Trade {
     /// Whether this trade was a system-initiated liquidation.
     ///
     /// Absent in JSON ≡ `false`. Engine emits this field only on liquidation
-    /// closes (TEK-286), so the gateway omits it on serialize when `false` to
+    /// closes, so the gateway omits it on serialize when `false` to
     /// round-trip the wire shape.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub liquidation: bool,
@@ -456,10 +444,6 @@ pub struct CancelAllResult {
     pub failed_count: u32,
 }
 
-// =============================================================================
-// Response Wrappers
-// =============================================================================
-
 /// Response containing a list of orders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrdersResponse {
@@ -477,10 +461,6 @@ pub struct TradesResponse {
 pub struct PositionsResponse {
     pub positions: Vec<Position>,
 }
-
-// =============================================================================
-// Bars Types
-// =============================================================================
 
 /// Query parameters for getting historical bars.
 #[derive(Debug, Clone, Deserialize)]
@@ -523,10 +503,6 @@ pub struct BarsResponse {
     pub bars: Vec<Bar>,
 }
 
-// =============================================================================
-// Quote Types
-// =============================================================================
-
 /// Query parameters for getting a quote.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GetQuoteQueryParams {
@@ -549,10 +525,6 @@ pub struct Quote {
     /// Quote timestamp (Unix milliseconds).
     pub timestamp: u64,
 }
-
-// =============================================================================
-// Symbol Info Types
-// =============================================================================
 
 /// Information about a tradeable symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,8 +566,8 @@ mod tests {
         assert_eq!(value["time_in_force"], "ioc");
     }
 
-    /// Engine emits a normal-close `Trade` without the `liquidation` field
-    /// (TEK-286). The gateway must accept it as `liquidation: false` rather
+    /// Engine emits a normal-close `Trade` without the `liquidation` field.
+    /// The gateway must accept it as `liquidation: false` rather
     /// than failing to deserialize.
     #[test]
     fn trade_deserializes_with_liquidation_field_omitted() {

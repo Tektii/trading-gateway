@@ -8,10 +8,6 @@ use tektii_gateway_test_support::wiremock_helpers::{mount_json, mount_text, star
 
 const ACCOUNT_PATH: &str = "/v3/accounts/test-account-123/summary";
 
-// =========================================================================
-// HTTP Status Code Mapping
-// =========================================================================
-
 #[tokio::test]
 async fn error_429_rate_limited() {
     let (server, base_url) = start_mock_server().await;
@@ -126,10 +122,6 @@ async fn error_400_invalid_request() {
     assert!(matches!(err, GatewayError::InvalidRequest { .. }));
 }
 
-// =========================================================================
-// 422 with Reject Reasons
-// =========================================================================
-
 #[tokio::test]
 async fn error_422_insufficient_margin() {
     let (server, base_url) = start_mock_server().await;
@@ -199,10 +191,6 @@ async fn error_422_empty_reason() {
     }
 }
 
-// =========================================================================
-// Unknown Status Code
-// =========================================================================
-
 #[tokio::test]
 async fn error_unknown_status() {
     let (server, base_url) = start_mock_server().await;
@@ -229,16 +217,11 @@ async fn error_unknown_status() {
     }
 }
 
-// =========================================================================
-// Circuit Breaker
-// =========================================================================
-
 #[tokio::test]
 async fn circuit_breaker_trips_after_repeated_failures() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Mount 500 error
     mount_json(
         &server,
         "GET",
@@ -248,20 +231,15 @@ async fn circuit_breaker_trips_after_repeated_failures() {
     )
     .await;
 
-    // Trip the circuit breaker with 3 failures
     for _ in 0..3 {
         let _ = adapter.get_account().await;
     }
 
-    // 4th call should fail with ProviderUnavailable from circuit breaker
-    // (before making HTTP request)
+    // 4th call should fail with ProviderUnavailable from circuit breaker,
+    // before making an HTTP request
     let err = adapter.get_account().await.unwrap_err();
     assert!(matches!(err, GatewayError::ProviderUnavailable { .. }));
 }
-
-// =========================================================================
-// Malformed Broker Responses
-// =========================================================================
 
 #[tokio::test]
 async fn error_malformed_json_non_json_body() {

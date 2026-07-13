@@ -43,7 +43,6 @@ fn truncate_to_char_boundary(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         return s;
     }
-    // Find the largest char boundary <= max_len
     let mut end = max_len;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;

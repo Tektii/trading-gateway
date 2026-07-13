@@ -90,10 +90,6 @@ async fn recv_connection_event(
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[tokio::test]
 async fn disconnect_emits_broker_disconnected_to_strategies() {
     let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());
@@ -140,11 +136,9 @@ async fn successful_reconnect_emits_broker_reconnected_with_gap() {
 
     drop(tx);
 
-    // First event: BrokerDisconnected
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerDisconnected);
 
-    // Second event: BrokerReconnected with gap duration
     let (event, broker, gap_ms) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerReconnected);
     assert_eq!(broker.as_deref(), Some("alpaca-paper"));
@@ -172,7 +166,6 @@ async fn reconnect_resumes_event_streaming() {
         .await
         .unwrap();
 
-    // Send an event on the original stream, verify it arrives
     let quote = tektii_gateway_test_support::models::test_quote("AAPL");
     tx.send(WsMessage::quote(quote).into()).unwrap();
 
@@ -185,16 +178,13 @@ async fn reconnect_resumes_event_streaming() {
         "expected QuoteData, got {msg:?}"
     );
 
-    // Disconnect
     drop(tx);
 
-    // Drain disconnect + reconnect events
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerDisconnected);
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerReconnected);
 
-    // Send event on the NEW stream — should arrive at strategy
     let quote2 = tektii_gateway_test_support::models::test_quote("BTCUSD");
     new_tx.send(WsMessage::quote(quote2).into()).unwrap();
 
@@ -231,7 +221,6 @@ async fn max_retry_exceeded_emits_broker_connection_failed() {
 
     drop(tx);
 
-    // BrokerDisconnected
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerDisconnected);
 
@@ -263,7 +252,6 @@ async fn permanent_auth_error_stops_retries_immediately() {
 
     drop(tx);
 
-    // BrokerDisconnected
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerDisconnected);
 
@@ -271,7 +259,6 @@ async fn permanent_auth_error_stops_retries_immediately() {
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerConnectionFailed);
 
-    // Only 1 reconnect attempt
     assert_eq!(handle.reconnect_call_count(), 1);
 }
 
@@ -295,10 +282,8 @@ async fn no_reconnection_support_emits_disconnected_and_exits() {
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerDisconnected);
 
-    // No reconnection attempted
     assert_eq!(handle.reconnect_call_count(), 0);
 
-    // No further events
     let result = timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(
         result.is_err(),
@@ -348,7 +333,6 @@ async fn end_of_stream_completion_emits_backtest_complete_not_disconnected() {
         other => panic!("expected BacktestComplete, got {other:?}"),
     }
 
-    // No reconnection attempted.
     assert_eq!(handle.reconnect_call_count(), 0);
 
     // No further events — the task exits after the terminal.
@@ -363,7 +347,7 @@ async fn end_of_stream_completion_emits_backtest_complete_not_disconnected() {
 /// its stream closes (the tektii end-of-backtest handshake), the stream-close
 /// path must NOT synthesize a second terminal. The strategy must see exactly
 /// one `BacktestComplete` — relaying the real one then synthesizing a fallback
-/// would double-fire the terminal (TEK-758).
+/// would double-fire the terminal.
 #[tokio::test]
 async fn in_band_backtest_complete_suppresses_synthesized_terminal() {
     let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());
@@ -419,13 +403,11 @@ async fn instruments_marked_stale_on_disconnect_cleared_on_fresh_tick() {
         .await
         .unwrap();
 
-    // Disconnect
     drop(tx);
 
     // Wait for reconnect to complete (BrokerReconnected means staleness is marked and reconnect done)
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Both instruments should be stale after disconnect
     let stale = registry.get_staleness(PLATFORM).await.unwrap();
     assert!(
         stale.contains(&"AAPL".to_string()),
@@ -436,7 +418,6 @@ async fn instruments_marked_stale_on_disconnect_cleared_on_fresh_tick() {
         "BTCUSD should be stale before tick"
     );
 
-    // Send a quote for AAPL — should clear its staleness
     let quote = tektii_gateway_test_support::models::test_quote("AAPL");
     new_tx.send(WsMessage::quote(quote).into()).unwrap();
 
@@ -477,7 +458,6 @@ async fn shutdown_during_reconnection_backoff_exits_cleanly() {
 
     drop(tx);
 
-    // Receive BrokerDisconnected
     let (event, _, _) = recv_connection_event(&mut rx).await;
     assert_eq!(event, ConnectionEventType::BrokerDisconnected);
 
@@ -490,7 +470,6 @@ async fn shutdown_during_reconnection_backoff_exits_cleanly() {
     let result = timeout(Duration::from_secs(2), rx.recv()).await;
     match result {
         Ok(Some((msg, _))) => {
-            // If we receive a message, it should NOT be BrokerConnectionFailed
             if let WsMessage::Connection { event, .. } = &msg {
                 assert_ne!(
                     *event,
@@ -518,7 +497,6 @@ async fn reconnect_triggers_reconciliation() {
     let (ws_manager, registry, _cancel) = setup(fast_reconnection_config());
     let mut rx = strategy_connection(&ws_manager, &registry).await;
 
-    // Set up EventRouter with MockTradingAdapter
     let state_manager = Arc::new(StateManager::new());
     let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> = Arc::new(
         ExitHandler::with_defaults(Arc::clone(&state_manager), PLATFORM),
@@ -531,7 +509,6 @@ async fn reconnect_triggers_reconciliation() {
         PLATFORM,
     ));
 
-    // Pre-populate StateManager with an Open order
     let open_order = tektii_gateway_core::models::Order {
         id: "order-1".into(),
         status: OrderStatus::Open,
@@ -562,7 +539,6 @@ async fn reconnect_triggers_reconciliation() {
         .await
         .unwrap();
 
-    // Register provider with reconnect result
     let provider = MockWebSocketProvider::new(true);
     let (new_tx, new_stream) = MockWebSocketProvider::make_event_stream();
     provider.push_reconnect_result(Ok(new_stream));
@@ -573,10 +549,8 @@ async fn reconnect_triggers_reconciliation() {
         .await
         .unwrap();
 
-    // Disconnect
     drop(tx);
 
-    // Collect events: expect BrokerDisconnected, then BrokerReconnected
     // Reconciliation events go through the broadcast channel, not the strategy WS.
     // But BrokerReconnected after reconciliation confirms reconciliation ran.
     let (event, _, _) = recv_connection_event(&mut rx).await;

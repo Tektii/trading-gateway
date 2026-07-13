@@ -30,22 +30,18 @@ impl SaxoCapabilities {
 
 impl ProviderCapabilities for SaxoCapabilities {
     fn supports_bracket_orders(&self, _symbol: &str) -> bool {
-        // Saxo supports native related orders (entry + SL + TP) for ALL instruments
         true
     }
 
     fn supports_oco_orders(&self, _symbol: &str) -> bool {
-        // Saxo supports OCO (two entry orders, one cancels other)
         true
     }
 
     fn supports_oto_orders(&self, _symbol: &str) -> bool {
-        // Saxo supports OTO via IfDoneMaster/Slave related orders
         true
     }
 
     fn bracket_strategy(&self, order: &OrderRequest) -> BracketStrategy {
-        // No SL/TP requested - nothing to handle
         if order.stop_loss.is_none() && order.take_profit.is_none() {
             return BracketStrategy::None;
         }

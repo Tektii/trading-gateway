@@ -289,10 +289,6 @@ mod tests {
         }
     }
 
-    // =====================================================================
-    // map_saxo_reject_code — remaining branches
-    // =====================================================================
-
     #[test]
     fn reject_code_unknown_passthrough() {
         assert_eq!(map_saxo_reject_code(Some("FooBar")), "FooBar");
@@ -302,10 +298,6 @@ mod tests {
     fn reject_code_none_returns_order_rejected() {
         assert_eq!(map_saxo_reject_code(None), "ORDER_REJECTED");
     }
-
-    // =====================================================================
-    // SaxoError → GatewayError — remaining conversion paths
-    // =====================================================================
 
     #[test]
     fn api_error_below_500_maps_to_invalid_request_with_code() {

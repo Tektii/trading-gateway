@@ -15,10 +15,6 @@ use tokio::sync::broadcast;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-// =========================================================================
-// Adapter factories
-// =========================================================================
-
 /// Create a `SaxoAdapter` pointed at a wiremock server (precheck disabled).
 pub async fn test_adapter(server: &MockServer, base_url: &str) -> SaxoAdapter {
     mount_startup_mocks(server).await;
@@ -50,7 +46,6 @@ async fn mount_startup_mocks(server: &MockServer) {
         .mount(server)
         .await;
 
-    // Client key
     Mock::given(method("GET"))
         .and(path("/port/v1/clients/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(saxo_client_json()))
@@ -75,10 +70,6 @@ async fn build_adapter(base_url: &str, precheck: bool) -> SaxoAdapter {
         .await
         .expect("Failed to create test SaxoAdapter")
 }
-
-// =========================================================================
-// Saxo JSON response builders (all PascalCase)
-// =========================================================================
 
 /// Instrument page response for `GET /ref/v1/instruments`.
 pub fn saxo_instruments_json(entries: &[(u32, &str, &str)]) -> Value {
@@ -225,10 +216,6 @@ pub fn saxo_precheck_error_json(error_code: &str, message: &str) -> Value {
         }
     })
 }
-
-// =========================================================================
-// Order request helper
-// =========================================================================
 
 /// Build an `OrderRequest` with sensible defaults for Saxo forex testing.
 pub fn forex_order(symbol: &str, side: Side, order_type: OrderType, qty: Decimal) -> OrderRequest {

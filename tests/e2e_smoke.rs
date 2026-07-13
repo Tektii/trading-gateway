@@ -12,10 +12,6 @@ use tektii_gateway_test_support::models::{test_order, test_quote};
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 
-// ---------------------------------------------------------------------------
-// Health endpoints
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn livez_returns_200() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
@@ -35,10 +31,6 @@ async fn readyz_returns_200_when_adapter_registered() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 }
-
-// ---------------------------------------------------------------------------
-// REST API via mock adapter
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn rest_get_orders_returns_200() {
@@ -111,10 +103,6 @@ async fn rest_get_quote_not_found() {
     assert_eq!(resp.status(), 404);
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket + event injection
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn ws_client_connects_successfully() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
@@ -139,13 +127,11 @@ async fn injected_event_reaches_strategy_client() {
     // Also register as a strategy connection so events flow
     // (The WS handler already does this via handle_socket)
 
-    // Inject a quote event
     let quote = test_quote("AAPL");
     gw.inject_event(tektii_gateway_core::websocket::messages::WsMessage::quote(
         quote,
     ));
 
-    // Strategy should receive the event
     let msg = client.recv_message(TIMEOUT).await;
     assert!(msg.is_some(), "Expected to receive the injected event");
 }

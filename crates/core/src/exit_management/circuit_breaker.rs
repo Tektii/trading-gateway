@@ -84,7 +84,6 @@ impl ExitOrderCircuitBreaker {
     pub fn record_failure(&mut self) {
         let now = Instant::now();
 
-        // Prune old failures outside the window
         while let Some(ts) = self.recent_failures.front() {
             if now.duration_since(*ts) > self.failure_window {
                 self.recent_failures.pop_front();
@@ -95,7 +94,6 @@ impl ExitOrderCircuitBreaker {
 
         self.recent_failures.push_back(now);
 
-        // Check if threshold reached
         if self.recent_failures.len() >= self.failure_threshold {
             self.state = CircuitState::Open;
             error!(

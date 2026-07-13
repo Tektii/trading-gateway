@@ -12,7 +12,6 @@ async fn get_capabilities_returns_correct_features() {
 
     let caps = adapter.get_capabilities().await.unwrap();
 
-    // Check order types
     assert!(caps.supported_order_types.contains(&OrderType::Market));
     assert!(caps.supported_order_types.contains(&OrderType::Limit));
     assert!(caps.supported_order_types.contains(&OrderType::Stop));
@@ -22,7 +21,6 @@ async fn get_capabilities_returns_correct_features() {
             .contains(&OrderType::TrailingStop)
     );
 
-    // Check features
     assert!(caps.features.contains(&"bracket_orders".to_string()));
     assert!(caps.features.contains(&"oco".to_string()));
     assert!(caps.features.contains(&"trailing_stop".to_string()));

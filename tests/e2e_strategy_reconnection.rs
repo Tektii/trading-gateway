@@ -61,14 +61,8 @@ async fn wait_for_strategy_count(registry: &ProviderRegistry, expected: usize, d
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
-    // --- Setup: adapter with submit response, pre-populated order + position ---
-
     let handle = OrderHandle {
         id: "ord-reconnect-1".into(),
         client_order_id: None,
@@ -97,8 +91,6 @@ async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
     );
     let gw = spawn_test_gateway_with_adapter(Arc::clone(&adapter)).await;
 
-    // --- Phase 1: Connect and place order ---
-
     let client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -120,8 +112,6 @@ async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
         "adapter should have received the order"
     );
 
-    // --- Phase 2: Disconnect — verify no cancel calls ---
-
     client.close().await;
     wait_for_connection_count(gw.state.ws_connection_manager(), 0, TIMEOUT).await;
     wait_for_strategy_count(gw.state.provider_registry(), 0, TIMEOUT).await;
@@ -131,8 +121,6 @@ async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
         "disconnect must NOT trigger cancel calls; got: {:?}",
         adapter.cancelled_orders()
     );
-
-    // --- Phase 3: Reconnect ---
 
     let mut new_client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -150,8 +138,6 @@ async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
         1,
         "reconnected strategy should be registered"
     );
-
-    // --- Phase 4: REST queries show accurate state ---
 
     let resp = http_client()
         .get(format!("{}/orders", gw.base_url()))
@@ -179,8 +165,6 @@ async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
         "position should persist after disconnect/reconnect; got: {body}"
     );
 
-    // --- Phase 5: Events resume flowing ---
-
     gw.inject_event(WsMessage::quote(test_quote("AAPL")));
 
     let msg = new_client.recv_message(TIMEOUT).await;
@@ -195,7 +179,6 @@ async fn strategy_disconnect_preserves_state_and_reconnect_resumes_events() {
         panic!("expected WsMessage::QuoteData, got: {msg:?}");
     }
 
-    // Verify still no cancel calls after full scenario
     assert!(
         adapter.cancelled_orders().is_empty(),
         "no cancel calls should have been made at any point"

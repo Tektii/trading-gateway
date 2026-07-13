@@ -9,10 +9,6 @@ use tektii_gateway_core::websocket::messages::WsMessage;
 use tektii_gateway_test_support::wiremock_helpers::start_mock_server;
 use tokio::sync::broadcast;
 
-// =========================================================================
-// Alpaca
-// =========================================================================
-
 fn alpaca_adapter(platform: TradingPlatform) -> impl TradingAdapter {
     let creds = tektii_gateway_alpaca::AlpacaCredentials::new("test-key", "test-secret");
     let (tx, _) = broadcast::channel::<WsMessage>(1);
@@ -45,10 +41,6 @@ fn alpaca_capabilities_include_brackets_and_trailing_stop() {
     assert!(caps.supports_feature("trailing_stop"));
     assert_eq!(caps.position_mode, PositionMode::Netting);
 }
-
-// =========================================================================
-// Binance
-// =========================================================================
 
 #[test]
 fn binance_spot_has_correct_platform_and_capabilities() {
@@ -86,10 +78,6 @@ fn binance_futures_has_correct_platform_and_hedging() {
     assert_eq!(caps.position_mode, PositionMode::Hedging);
 }
 
-// =========================================================================
-// Oanda
-// =========================================================================
-
 #[test]
 fn oanda_has_correct_platform() {
     let creds = tektii_gateway_oanda::OandaCredentials::new("test-token", "test-account");
@@ -116,10 +104,7 @@ fn oanda_capabilities_include_expected_order_types() {
     assert_eq!(caps.position_mode, PositionMode::Netting);
 }
 
-// =========================================================================
-// Saxo (async constructor — needs wiremock for startup API calls)
-// =========================================================================
-
+// Saxo: async constructor — needs wiremock for startup API calls.
 #[tokio::test]
 async fn saxo_has_correct_platform_and_capabilities() {
     let (server, base_url) = start_mock_server().await;

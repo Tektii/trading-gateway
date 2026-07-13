@@ -18,10 +18,6 @@ fn market_buy_request() -> OrderRequest {
     }
 }
 
-// =========================================================================
-// Submit Order
-// =========================================================================
-
 #[tokio::test]
 async fn submit_market_order() {
     let (server, base_url) = start_mock_server().await;
@@ -91,10 +87,6 @@ async fn submit_order_rejected() {
     );
 }
 
-// =========================================================================
-// Get Order
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_success() {
     let (server, base_url) = start_mock_server().await;
@@ -141,10 +133,6 @@ async fn get_order_not_found() {
     );
 }
 
-// =========================================================================
-// Get Orders
-// =========================================================================
-
 #[tokio::test]
 async fn get_orders_open() {
     let (server, base_url) = start_mock_server().await;
@@ -170,10 +158,6 @@ async fn get_orders_open() {
     assert_eq!(orders.len(), 2);
 }
 
-// =========================================================================
-// Modify Order
-// =========================================================================
-
 #[tokio::test]
 async fn modify_order_unsupported() {
     let (_, base_url) = start_mock_server().await;
@@ -194,10 +178,6 @@ async fn modify_order_unsupported() {
         "Expected UnsupportedOperation, got: {err:?}"
     );
 }
-
-// =========================================================================
-// Cancel Order
-// =========================================================================
 
 #[tokio::test]
 async fn cancel_order_success() {

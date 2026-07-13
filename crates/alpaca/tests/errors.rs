@@ -8,10 +8,6 @@ use tektii_gateway_test_support::wiremock_helpers::{
     mount_json, mount_text, mount_with_headers, start_mock_server,
 };
 
-// =========================================================================
-// HTTP Error Mapping
-// =========================================================================
-
 #[tokio::test]
 async fn error_429_with_retry_after_header() {
     let (server, base_url) = start_mock_server().await;
@@ -180,16 +176,11 @@ async fn error_unknown_status() {
     }
 }
 
-// =========================================================================
-// Circuit Breaker
-// =========================================================================
-
 #[tokio::test]
 async fn circuit_breaker_trips_after_repeated_failures() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Mount a 500 error that will trip the circuit breaker
     mount_json(
         &server,
         "GET",
@@ -226,10 +217,6 @@ async fn circuit_breaker_trips_after_repeated_failures() {
         "Expected between 1 and 12 requests, got {request_count}"
     );
 }
-
-// =========================================================================
-// Malformed Broker Responses
-// =========================================================================
 
 #[tokio::test]
 async fn error_malformed_json_non_json_body() {

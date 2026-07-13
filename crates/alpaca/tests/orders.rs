@@ -23,10 +23,6 @@ fn market_buy(symbol: &str, qty: rust_decimal::Decimal) -> OrderRequest {
     }
 }
 
-// =========================================================================
-// Submit Order
-// =========================================================================
-
 #[tokio::test]
 async fn submit_market_order() {
     let (server, base_url) = start_mock_server().await;
@@ -97,7 +93,6 @@ async fn submit_bracket_order_stock() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Bracket order returns with legs
     mount_json(
         &server,
         "POST",
@@ -221,10 +216,6 @@ async fn submit_order_rejected() {
     }
 }
 
-// =========================================================================
-// Get Order
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_success() {
     // Adapter validates that order_id is a UUID before hitting Alpaca, so tests must
@@ -302,10 +293,6 @@ async fn get_order_filled() {
     assert_eq!(order.remaining_quantity, dec!(0));
 }
 
-// =========================================================================
-// Get Orders
-// =========================================================================
-
 #[tokio::test]
 async fn get_orders_open() {
     let (server, base_url) = start_mock_server().await;
@@ -344,10 +331,6 @@ async fn get_orders_empty() {
     assert!(orders.is_empty());
 }
 
-// =========================================================================
-// Get Order History
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_history() {
     let (server, base_url) = start_mock_server().await;
@@ -369,10 +352,6 @@ async fn get_order_history() {
     let orders = adapter.get_order_history(&params).await.unwrap();
     assert_eq!(orders.len(), 2);
 }
-
-// =========================================================================
-// Modify Order
-// =========================================================================
 
 #[tokio::test]
 async fn modify_order_success() {
@@ -436,10 +415,6 @@ async fn modify_order_not_found() {
     );
 }
 
-// =========================================================================
-// Cancel Order
-// =========================================================================
-
 #[tokio::test]
 async fn cancel_order_success() {
     const ORDER_ID: &str = "44444444-4444-4444-4444-444444444444";
@@ -466,10 +441,6 @@ async fn cancel_order_success() {
     assert!(result.success);
     assert_eq!(result.order.status, OrderStatus::Cancelled);
 }
-
-// =========================================================================
-// Cancel All Orders
-// =========================================================================
 
 #[tokio::test]
 async fn cancel_all_orders() {

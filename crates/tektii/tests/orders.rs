@@ -83,7 +83,6 @@ async fn submit_order_tracks_oco_group() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Mount POST for submit and GET for subsequent get_order
     mount_json(
         &server,
         "POST",
@@ -107,7 +106,6 @@ async fn submit_order_tracks_oco_group() {
     };
     adapter.submit_order(&request).await.unwrap();
 
-    // Verify OCO group is enriched on get_order
     let order = adapter.get_order("order-abc-123").await.unwrap();
     assert_eq!(order.oco_group_id.as_deref(), Some("group-1"));
 }
@@ -376,7 +374,6 @@ async fn get_order_enriches_oco_group() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Pre-populate StateManager with OCO group
     adapter
         .state_manager()
         .add_to_oco_group("order-abc-123", "group-42");
@@ -512,10 +509,6 @@ async fn cancel_all_orders_with_symbol() {
     assert_eq!(result.cancelled_count, 1);
 }
 
-// =========================================================================
-// modify_order (cancel + replace) tests
-// =========================================================================
-
 /// Helper: mount the full cancel+replace sequence for modify_order.
 ///
 /// `modify_order` calls: GET original → DELETE → GET (inside cancel_order) → POST new → GET new.
@@ -646,7 +639,6 @@ async fn modify_order_replacement_fails() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // GET → Open (persistent)
     mount_json(
         &server,
         "GET",
@@ -656,10 +648,8 @@ async fn modify_order_replacement_fails() {
     )
     .await;
 
-    // DELETE → 204
     mount_empty(&server, "DELETE", "/api/v1/orders/order-abc-123", 204).await;
 
-    // POST → 500 (replacement fails)
     mount_json(
         &server,
         "POST",
@@ -810,7 +800,6 @@ async fn modify_order_preserves_unmodified_fields() {
 
     mount_modify_sequence(
         &server,
-        // Original is a limit order with specific fields
         engine_order_json(&json!({
             "order_type": "limit",
             "price": "150",
@@ -820,7 +809,6 @@ async fn modify_order_preserves_unmodified_fields() {
             "client_order_id": "my-client-id"
         })),
         engine_order_handle_json(&json!({"id": "new-order-456"})),
-        // New order reflects the preserved fields + modified quantity
         engine_order_json(&json!({
             "id": "new-order-456",
             "order_type": "limit",

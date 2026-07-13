@@ -1,4 +1,4 @@
-//! Reproduction for TEK-268: gateway tektii adapter doesn't forward provider
+//! Reproduction for a bug where the tektii adapter didn't forward provider
 //! events to subscribed strategies in backtest mode.
 //!
 //! Sets up the full provider→registry→strategy pipeline using
@@ -35,14 +35,13 @@ fn send_server_message(tx: &tokio::sync::mpsc::UnboundedSender<String>, msg: &Se
     tx.send(json).expect("send to MockWsServer");
 }
 
-/// TEK-268: candle events from the engine reach a strategy registered with
+/// Candle events from the engine reach a strategy registered with
 /// the `ProviderRegistry`. Baseline transparency assertion — Tektii declares
 /// `filters_events_upstream() = true`, registry forwards every event.
 #[tokio::test]
 async fn candle_from_engine_reaches_registered_strategy() {
     let (server, engine_tx, _engine_rx) = MockWsServer::start().await;
 
-    // Build the Tektii provider and connect it to the mock engine.
     let (provider, _broadcast_rx) = create_ws_provider(&server.url());
     let stream = provider
         .connect(minimal_provider_config())
@@ -93,10 +92,9 @@ async fn candle_from_engine_reaches_registered_strategy() {
     );
     send_server_message(&engine_tx, &candle);
 
-    // The strategy connection should receive the candle.
     let (msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
-        .expect("strategy never received candle (TEK-268)")
+        .expect("strategy never received candle")
         .expect("channel closed before candle arrived");
 
     match msg {
@@ -109,7 +107,7 @@ async fn candle_from_engine_reaches_registered_strategy() {
     server.shutdown().await;
 }
 
-/// TEK-268 reproduction with EXACT production config: subscriptions for
+/// Reproduction with EXACT production config: subscriptions for
 /// platform=tektii, instrument="F:EURUSD", events=["candle_1m"], engine emits
 /// Candle with symbol="F:EURUSD" timeframe="1m".
 #[tokio::test]
@@ -171,7 +169,7 @@ async fn candle_reaches_strategy_with_production_subscriptions() {
 
     let (msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
-        .expect("strategy never received candle (TEK-268)")
+        .expect("strategy never received candle")
         .expect("channel closed before candle arrived");
 
     match msg {
@@ -184,7 +182,7 @@ async fn candle_reaches_strategy_with_production_subscriptions() {
     server.shutdown().await;
 }
 
-/// TEK-268: even when `SUBSCRIPTIONS` would otherwise gate the candle's
+/// Even when `SUBSCRIPTIONS` would otherwise gate the candle's
 /// platform, the registry must forward Tektii events because the provider
 /// declares it filters upstream. Pre-fix, the registry's filter silently
 /// dropped these — exact production symptom: provider connected, strategy
@@ -253,7 +251,7 @@ async fn candle_passes_through_when_subscriptions_target_other_platform() {
 
     let (msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
-        .expect("strategy never received candle (TEK-268)")
+        .expect("strategy never received candle")
         .expect("channel closed before candle arrived");
 
     match msg {
@@ -266,7 +264,7 @@ async fn candle_passes_through_when_subscriptions_target_other_platform() {
     server.shutdown().await;
 }
 
-/// TEK-270 (registry path): once an event has flowed through the registry's
+/// Registry path: once an event has flowed through the registry's
 /// broadcast loop and `connection_manager.send_to` has returned Ok, the
 /// registry must call `AckBridge::mark_sent`. The strategy's subsequent ACK
 /// then drains the event and the engine receives an `EventAck` over the
@@ -336,7 +334,6 @@ async fn engine_receives_ack_after_strategy_acks_event_delivered_through_registr
     );
     send_server_message(&engine_tx, &candle);
 
-    // Strategy receives the candle through the registry pipeline.
     let (strategy_msg, _) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
         .expect("strategy never received candle")
@@ -372,7 +369,7 @@ async fn engine_receives_ack_after_strategy_acks_event_delivered_through_registr
     server.shutdown().await;
 }
 
-/// TEK-270 (race fix, end-to-end): events that have NOT yet completed registry
+/// Race fix, end-to-end: events that have NOT yet completed registry
 /// broadcast must remain pending across a strategy ACK. Validates that
 /// `provider.handle_ack` (the path actually wired up to incoming strategy
 /// EventAck frames) correctly drains only `sent = true` entries — events
@@ -499,12 +496,12 @@ async fn engine_is_not_connected_until_the_strategy_connects() {
     gate.await.ok();
     server.shutdown().await;
 }
-/// TEK-1315: an engine event that reaches the registry's broadcast loop while
+/// An engine event that reaches the registry's broadcast loop while
 /// NO strategy connection is attached (mid-run disconnect / reconnect blip)
 /// must NOT be marked sent. Leaving it `sent = false` keeps it un-releasable,
 /// so a later (stale) strategy ACK cannot forward it to the engine — the
 /// engine's own ACK timeout surfaces the stall loudly instead of the FIFO
-/// being silently offset (the TEK-1179 constant-in-flight halt).
+/// being silently offset (the constant-in-flight halt).
 ///
 /// Pre-fix, the loop called `mark_sent` unconditionally after broadcasting to
 /// an empty connection set, so the stale ACK below would release evt-candle-2
@@ -629,7 +626,7 @@ async fn undelivered_engine_event_with_no_strategy_is_not_marked_sent() {
     server.shutdown().await;
 }
 
-/// TEK-1315: a `connection_manager.send_to` that returns `Err` (a slow
+/// A `connection_manager.send_to` that returns `Err` (a slow
 /// consumer's full channel, or a closed channel on a dropping strategy) counts
 /// as not-delivered. The event must stay `sent = false` — the registry must
 /// never claim a delivery the WebSocket send did not make.

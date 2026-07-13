@@ -162,7 +162,6 @@ async fn circuit_breaker_trips() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&server, &base_url).await;
 
-    // Mount 500 for all balance requests
     mount_json(
         &server,
         "GET",
@@ -184,10 +183,6 @@ async fn circuit_breaker_trips() {
         "Expected ProviderUnavailable after circuit breaker trip, got: {err:?}"
     );
 }
-
-// =========================================================================
-// Malformed Broker Responses
-// =========================================================================
 
 #[tokio::test]
 async fn error_malformed_json_non_json_body() {

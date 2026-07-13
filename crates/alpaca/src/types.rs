@@ -24,11 +24,8 @@ pub struct AlpacaAccount {
 /// Alpaca-specific order structure
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AlpacaOrder {
-    /// Order ID
     pub id: String,
-    /// Client-provided order ID (optional)
     pub client_order_id: Option<String>,
-    /// Trading symbol
     pub symbol: String,
     /// Quantity as string
     pub qty: String,
@@ -49,9 +46,7 @@ pub struct AlpacaOrder {
     pub limit_price: Option<String>,
     /// Stop price as string (optional, for stop orders)
     pub stop_price: Option<String>,
-    /// Order creation timestamp
     pub created_at: String,
-    /// Order last update timestamp
     pub updated_at: String,
     /// Leg orders for bracket/OTO orders (stop-loss, take-profit)
     #[serde(default)]
@@ -62,7 +57,6 @@ pub struct AlpacaOrder {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct AlpacaPosition {
-    /// Trading symbol
     pub symbol: String,
     /// Position quantity as string
     pub qty: String,
@@ -81,14 +75,11 @@ pub struct AlpacaPosition {
 /// Alpaca trade activity (fill)
 #[derive(Debug, Deserialize)]
 pub struct AlpacaActivity {
-    /// Activity ID
     pub id: String,
     /// Activity type (e.g., "FILL")
     #[allow(dead_code)] // Required for deserialization from Alpaca API
     pub activity_type: String,
-    /// Associated order ID
     pub order_id: String,
-    /// Trading symbol
     pub symbol: String,
     /// Trade side: "buy" or "sell"
     pub side: String,
@@ -96,14 +87,12 @@ pub struct AlpacaActivity {
     pub qty: String,
     /// Execution price as string
     pub price: String,
-    /// Transaction timestamp
     pub transaction_time: String,
 }
 
 /// Alpaca order request
 #[derive(Debug, Clone, Serialize)]
 pub struct AlpacaOrderRequest {
-    /// Trading symbol
     pub symbol: String,
     /// Quantity as string
     pub qty: String,
@@ -138,14 +127,12 @@ pub struct AlpacaOrderRequest {
 /// Alpaca stop loss configuration for bracket orders
 #[derive(Debug, Clone, Serialize)]
 pub struct AlpacaStopLoss {
-    /// Stop price at which to trigger the stop loss
     pub stop_price: String,
 }
 
 /// Alpaca take profit configuration for bracket orders
 #[derive(Debug, Clone, Serialize)]
 pub struct AlpacaTakeProfit {
-    /// Limit price for take profit order
     pub limit_price: String,
 }
 
@@ -157,16 +144,12 @@ pub struct AlpacaModifyOrderRequest {
     /// New quantity (must be >= filled quantity)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qty: Option<String>,
-    /// New time in force
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_in_force: Option<String>,
-    /// New limit price
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_price: Option<String>,
-    /// New stop price
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_price: Option<String>,
-    /// Optional new client order ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_order_id: Option<String>,
 }
@@ -175,7 +158,6 @@ pub struct AlpacaModifyOrderRequest {
 /// Format: {"quote": {...}, "symbol": "AAPL"}
 #[derive(Debug, Deserialize)]
 pub struct AlpacaQuoteResponse {
-    /// Quote data
     pub quote: AlpacaQuote,
 }
 
@@ -183,26 +165,20 @@ pub struct AlpacaQuoteResponse {
 /// Format: {"quotes": {"BTC/USD": {...}}}
 #[derive(Debug, Deserialize)]
 pub struct AlpacaCryptoQuotesResponse {
-    /// Map of symbol to quote data
     pub quotes: std::collections::HashMap<String, AlpacaQuote>,
 }
 
 /// Alpaca quote data
 #[derive(Debug, Deserialize)]
 pub struct AlpacaQuote {
-    /// Quote timestamp
     #[serde(rename = "t")]
     pub timestamp: String,
-    /// Bid price
     #[serde(rename = "bp")]
     pub bid_price: f64,
-    /// Ask price
     #[serde(rename = "ap")]
     pub ask_price: f64,
-    /// Bid size
     #[serde(rename = "bs")]
     pub bid_size: f64,
-    /// Ask size
     #[serde(rename = "as")]
     pub ask_size: f64,
 }
@@ -228,29 +204,22 @@ where
 /// Crypto API returns bars grouped by symbol: {"bars": {"BTC/USD": [...]}}
 #[derive(Debug, Deserialize)]
 pub struct AlpacaCryptoBarsResponse {
-    /// Map of symbol to bars
     pub bars: std::collections::HashMap<String, Vec<AlpacaBar>>,
 }
 
 /// Alpaca bar data (OHLCV candlestick)
 #[derive(Debug, Deserialize)]
 pub struct AlpacaBar {
-    /// Bar timestamp
     #[serde(rename = "t")]
     pub timestamp: String,
-    /// Open price
     #[serde(rename = "o")]
     pub open: f64,
-    /// High price
     #[serde(rename = "h")]
     pub high: f64,
-    /// Low price
     #[serde(rename = "l")]
     pub low: f64,
-    /// Close price
     #[serde(rename = "c")]
     pub close: f64,
-    /// Volume
     #[serde(rename = "v")]
     pub volume: f64,
 }

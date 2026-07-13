@@ -45,12 +45,7 @@ use crate::websocket_types::{
     WsKlineEvent,
 };
 
-// Type alias for the WebSocket write half.
 type WsWriteHalf = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-
-// ============================================================================
-// Connection State
-// ============================================================================
 
 #[derive(Debug, Clone, Default)]
 enum ConnectionState {
@@ -63,15 +58,10 @@ enum ConnectionState {
     Error(String),
 }
 
-/// Tracks current subscription state.
 #[derive(Debug, Clone, Default)]
 struct SubscriptionState {
     symbols: std::collections::HashMap<String, Vec<String>>,
 }
-
-// ============================================================================
-// Subscribe / Unsubscribe Messages
-// ============================================================================
 
 #[derive(Debug, Serialize)]
 struct BinanceSubscribeMessage {
@@ -80,10 +70,6 @@ struct BinanceSubscribeMessage {
     id: u64,
 }
 
-// ============================================================================
-// BinanceWebSocketProvider
-// ============================================================================
-
 /// Binance WebSocket provider for real-time market data and trading events.
 ///
 /// Manages two separate connections:
@@ -91,29 +77,21 @@ struct BinanceSubscribeMessage {
 /// - **User data** (private): listen key authenticated stream for order/account events
 #[derive(Clone)]
 pub struct BinanceWebSocketProvider {
-    /// Trading platform (determines URLs).
     platform: TradingPlatform,
-    /// User data stream config (URLs, listen key path, API key).
     user_data_stream: Arc<BinanceUserDataStream>,
-    /// Market data WebSocket base URL.
     market_ws_base_url: String,
-    /// Current subscription state.
     subscriptions: Arc<RwLock<SubscriptionState>>,
-    /// Market data connection state.
     connection_state: Arc<RwLock<ConnectionState>>,
-    /// Market data write half for sending subscribe/unsubscribe.
     market_write_half: Arc<Mutex<Option<WsWriteHalf>>>,
-    /// Cancellation token to stop background tasks on disconnect.
+    /// Stops background read/keepalive tasks on disconnect.
     cancellation_token: CancellationToken,
-    /// Stored config from initial `connect()` for reconnection.
+    /// Stored config from initial `connect()`, needed to re-establish streams on `reconnect()`.
     stored_config: Arc<RwLock<Option<ProviderConfig>>>,
-    /// Current listen key (if user data stream is connected).
+    /// Set only once the user data stream is connected.
     listen_key: Arc<RwLock<Option<String>>>,
-    /// When the listen key was created (for expiry tracking).
+    /// Used to decide whether a listen key is still fresh enough to reuse on reconnect.
     listen_key_created: Arc<RwLock<Option<Instant>>>,
-    /// HTTP client for listen key REST calls.
     http_client: reqwest::Client,
-    /// Monotonic message ID for subscribe/unsubscribe requests.
     next_msg_id: Arc<AtomicU64>,
 }
 
@@ -158,10 +136,6 @@ impl BinanceWebSocketProvider {
         }
     }
 
-    // ========================================================================
-    // Market Data Connection
-    // ========================================================================
-
     /// Connect to the combined market data stream.
     ///
     /// Returns `(tx, rx)` where events are sent via `tx` and consumed via `rx`.
@@ -188,7 +162,6 @@ impl BinanceWebSocketProvider {
         let (write, mut read) = ws_stream.split();
         *self.market_write_half.lock().await = Some(write);
 
-        // Update subscription state
         {
             let mut subs = self.subscriptions.write().await;
             for symbol in &config.symbols {
@@ -203,7 +176,6 @@ impl BinanceWebSocketProvider {
         let connection_state = self.connection_state.clone();
         let platform = self.platform;
 
-        // Spawn read task for market data
         let tx_clone = tx.clone();
         tokio::spawn(async move {
             loop {
@@ -224,7 +196,6 @@ impl BinanceWebSocketProvider {
                             Some(Ok(Message::Close(frame))) => {
                                 info!(platform = ?platform, "Market data WebSocket closed: {frame:?}");
                                 *connection_state.write().await = ConnectionState::Disconnected;
-                                // Emit disconnect event
                                 let _ = tx_clone.send(WsMessage::Connection {
                                     event: ConnectionEventType::BrokerDisconnected,
                                     error: Some("Market data stream closed".to_string()),
@@ -260,10 +231,6 @@ impl BinanceWebSocketProvider {
         Ok((tx, rx))
     }
 
-    // ========================================================================
-    // User Data Stream Connection
-    // ========================================================================
-
     /// Connect to the user data stream (listen key authenticated).
     ///
     /// Spawns background tasks for:
@@ -294,7 +261,6 @@ impl BinanceWebSocketProvider {
             TradingPlatformKind::BinanceFutures | TradingPlatformKind::BinanceCoinFutures
         );
 
-        // Spawn read task for user data
         let tx_read = tx.clone();
         let cancel_token_read = cancel_token.clone();
         tokio::spawn(async move {
@@ -326,16 +292,13 @@ impl BinanceWebSocketProvider {
             }
         });
 
-        // Spawn listen key keepalive task (every 20 minutes + jitter)
         let uds = self.user_data_stream.clone();
         let http_client = self.http_client.clone();
         let listen_key_ref = self.listen_key.clone();
         let listen_key_created_ref = self.listen_key_created.clone();
         tokio::spawn(async move {
-            // 20 minutes base interval
             let base_interval = Duration::from_secs(20 * 60);
             loop {
-                // Add jitter: 0-60 seconds
                 let jitter = Duration::from_secs(rand_jitter_secs());
                 let interval = base_interval + jitter;
 
@@ -365,10 +328,6 @@ impl BinanceWebSocketProvider {
 
         Ok(())
     }
-
-    // ========================================================================
-    // Helpers
-    // ========================================================================
 
     /// Connect to a WebSocket URL with retry + exponential backoff.
     async fn connect_with_retry(
@@ -433,28 +392,20 @@ impl BinanceWebSocketProvider {
     }
 }
 
-// ============================================================================
-// WebSocketProvider Trait Implementation
-// ============================================================================
-
 #[async_trait]
 impl WebSocketProvider for BinanceWebSocketProvider {
     async fn connect(&self, config: ProviderConfig) -> Result<EventStream, WebSocketError> {
-        // Store config for reconnection
         *self.stored_config.write().await = Some(config.clone());
 
-        // Connect market data stream
         let (tx, rx) = self.connect_market_data(&config).await?;
 
-        // Connect user data stream if credentials provided
         if config.credentials.is_some()
             && let Err(e) = self.connect_user_data(tx).await
         {
+            // Market data still works — log but don't fail connect().
             warn!(platform = ?self.platform, "Failed to connect user data stream: {e}");
-            // Market data still works — log but don't fail
         }
 
-        // Emit connected event
         info!(platform = ?self.platform, "Binance WebSocket provider connected");
 
         Ok(rx)
@@ -489,7 +440,6 @@ impl WebSocketProvider for BinanceWebSocketProvider {
             .map_err(|e| WebSocketError::SendError(format!("Failed to send subscribe: {e}")))?;
         drop(write_guard);
 
-        // Update subscription state
         let mut subs = self.subscriptions.write().await;
         for symbol in symbols {
             subs.symbols.insert(symbol, event_types.clone());
@@ -557,7 +507,6 @@ impl WebSocketProvider for BinanceWebSocketProvider {
         *self.connection_state.write().await = ConnectionState::Disconnected;
         *self.market_write_half.lock().await = None;
 
-        // Delete listen key if we have one
         let current_key = self.listen_key.read().await.clone();
         if let Some(key) = current_key {
             if let Err(e) = self
@@ -581,16 +530,13 @@ impl WebSocketProvider for BinanceWebSocketProvider {
             )
         })?;
 
-        // Clear stale state
         *self.connection_state.write().await = ConnectionState::Disconnected;
         *self.market_write_half.lock().await = None;
 
-        // Re-establish market data
         let (tx, rx) = self.connect_market_data(&config).await?;
 
-        // Re-establish user data stream if credentials present
         if config.credentials.is_some() {
-            // Reuse listen key if it's less than 50 minutes old
+            // Keys expire after 60 minutes; reuse if there's still margin before that.
             let should_reuse = {
                 let created = self.listen_key_created.read().await;
                 let key = self.listen_key.read().await;
@@ -601,7 +547,6 @@ impl WebSocketProvider for BinanceWebSocketProvider {
             };
 
             if !should_reuse {
-                // Need a new listen key
                 *self.listen_key.write().await = None;
             }
 
@@ -614,10 +559,6 @@ impl WebSocketProvider for BinanceWebSocketProvider {
         Ok(rx)
     }
 }
-
-// ============================================================================
-// Message Processing (free functions for testability)
-// ============================================================================
 
 /// Process a market data message from the combined stream.
 pub fn process_market_message(text: &str, platform: TradingPlatform) -> Vec<WsMessage> {
@@ -695,7 +636,6 @@ pub fn process_user_data_message(
     platform: TradingPlatform,
     is_futures: bool,
 ) -> Vec<WsMessage> {
-    // Peek at event type first
     let envelope: UserDataEventEnvelope = match serde_json::from_str(text) {
         Ok(e) => e,
         Err(e) => {
@@ -705,15 +645,12 @@ pub fn process_user_data_message(
     };
 
     match envelope.event_type.as_str() {
-        // Spot / Margin
         "executionReport" if !is_futures => parse_spot_execution_report(text, platform),
         "outboundAccountPosition" if !is_futures => parse_spot_account_update(text, platform),
 
-        // Futures / Coin-Futures
         "ORDER_TRADE_UPDATE" if is_futures => parse_futures_order_update(text, platform),
         "ACCOUNT_UPDATE" if is_futures => parse_futures_account_update(text, platform),
 
-        // Events we don't handle yet
         "balanceUpdate" | "ACCOUNT_CONFIG_UPDATE" | "STRATEGY_UPDATE" | "listenKeyExpired" => {
             if envelope.event_type == "listenKeyExpired" {
                 warn!(platform = ?platform, "Listen key expired — user data stream will disconnect");
@@ -729,10 +666,6 @@ pub fn process_user_data_message(
         }
     }
 }
-
-// ============================================================================
-// Spot / Margin Parsers
-// ============================================================================
 
 fn parse_spot_execution_report(text: &str, platform: TradingPlatform) -> Vec<WsMessage> {
     let report: SpotExecutionReport = match serde_json::from_str(text) {
@@ -792,10 +725,6 @@ fn parse_spot_account_update(text: &str, platform: TradingPlatform) -> Vec<WsMes
     }]
 }
 
-// ============================================================================
-// Futures / Coin-Futures Parsers
-// ============================================================================
-
 fn parse_futures_order_update(text: &str, platform: TradingPlatform) -> Vec<WsMessage> {
     let update: FuturesOrderTradeUpdate = match serde_json::from_str(text) {
         Ok(u) => u,
@@ -836,7 +765,6 @@ fn parse_futures_account_update(text: &str, platform: TradingPlatform) -> Vec<Ws
 
     let mut events = Vec::new();
 
-    // Balance update
     if let Some(balance) = update.account.balances.first() {
         let wallet = Decimal::from_str(&balance.wallet_balance).unwrap_or_default();
         events.push(WsMessage::Account {
@@ -856,10 +784,6 @@ fn parse_futures_account_update(text: &str, platform: TradingPlatform) -> Vec<Ws
     events
 }
 
-// ============================================================================
-// Order Building Helpers
-// ============================================================================
-
 fn build_order_from_spot_report(report: &SpotExecutionReport, status: OrderStatus) -> Order {
     let side = match report.side.as_str() {
         "BUY" => Side::Buy,
@@ -871,7 +795,8 @@ fn build_order_from_spot_report(report: &SpotExecutionReport, status: OrderStatu
     let filled_quantity = Decimal::from_str(&report.cumulative_filled_qty).unwrap_or_default();
     let remaining = (quantity - filled_quantity).max(Decimal::ZERO);
 
-    // For cancels, use the original client order ID
+    // On a cancel, Binance echoes the cancelled order's original client order ID here,
+    // not the report's own client_order_id.
     let client_order_id =
         if report.execution_type == "CANCELED" && !report.original_client_order_id.is_empty() {
             Some(report.original_client_order_id.clone())
@@ -881,7 +806,6 @@ fn build_order_from_spot_report(report: &SpotExecutionReport, status: OrderStatu
             None
         };
 
-    // Calculate average fill price from last executed price for fills
     let average_fill_price = if filled_quantity > Decimal::ZERO {
         Decimal::from_str(&report.last_executed_price).ok()
     } else {
@@ -948,7 +872,6 @@ fn build_order_from_futures_data(o: &FuturesOrderData, status: OrderStatus) -> O
         .ok()
         .filter(|p| *p > Decimal::ZERO);
 
-    // Trailing stop fields
     let trailing_distance = o
         .callback_rate
         .as_ref()
@@ -997,10 +920,6 @@ fn build_order_from_futures_data(o: &FuturesOrderData, status: OrderStatus) -> O
         updated_at: now,
     }
 }
-
-// ============================================================================
-// Mapping Helpers
-// ============================================================================
 
 /// Map Binance execution type + order status to gateway `OrderEventType`.
 fn binance_execution_to_event_type(execution_type: &str, order_status: &str) -> OrderEventType {

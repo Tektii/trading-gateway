@@ -158,7 +158,6 @@ async fn close_position_success() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&server, &base_url).await;
 
-    // GET positions to find the one to close
     mount_json(
         &server,
         "GET",
@@ -170,7 +169,6 @@ async fn close_position_success() {
     )
     .await;
 
-    // POST market close order
     mount_json(
         &server,
         "POST",

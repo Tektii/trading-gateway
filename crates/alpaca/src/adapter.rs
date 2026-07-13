@@ -44,7 +44,6 @@ use tektii_gateway_core::models::{
     OrderHandle, OrderQueryParams, Position, Quote, Trade, TradeQueryParams, TradingPlatform,
 };
 
-/// Alpaca data API base URL.
 const ALPACA_DATA_URL: &str = "https://data.alpaca.markets";
 
 /// Alpaca adapter implementation
@@ -57,14 +56,10 @@ pub struct AlpacaAdapter {
     data_url: String,
     /// Provider capabilities for determining order type support
     capabilities: AlpacaCapabilities,
-    /// API key for authentication
     api_key: Arc<SecretBox<String>>,
-    /// API secret for authentication
     api_secret: Arc<SecretBox<String>>,
-    /// Retry configuration for transient failure handling
     retry_config: RetryConfig,
 
-    // === Event Infrastructure ===
     /// State Manager for caching orders and positions.
     state_manager: Arc<StateManager>,
 
@@ -74,10 +69,8 @@ pub struct AlpacaAdapter {
     /// Event Router for processing WebSocket events.
     event_router: Arc<EventRouter>,
 
-    /// Provider identifier for this adapter instance.
     platform: TradingPlatform,
 
-    /// Circuit breaker for detecting provider outages.
     circuit_breaker: Arc<RwLock<AdapterCircuitBreaker>>,
 
     /// Data feed for market data requests (`"iex"` free tier, `"sip"` paid).
@@ -118,7 +111,6 @@ impl AlpacaAdapter {
             .clone()
             .unwrap_or_else(|| ALPACA_DATA_URL.to_string());
 
-        // Configure client with connection pooling for optimal performance
         let client = Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
@@ -127,16 +119,13 @@ impl AlpacaAdapter {
             .connect_timeout(Duration::from_secs(10))
             .build()?;
 
-        // Create shared StateManager
         let state_manager = Arc::new(StateManager::new());
 
-        // Create ExitHandler (customize via with_exit_handler if needed)
         let exit_handler = Arc::new(ExitHandler::with_defaults(
             Arc::clone(&state_manager),
             platform,
         ));
 
-        // Create EventRouter with references to other components
         let event_router = Arc::new(EventRouter::new(
             Arc::clone(&state_manager),
             Arc::clone(&exit_handler) as Arc<dyn ExitHandling>,
@@ -144,7 +133,6 @@ impl AlpacaAdapter {
             platform,
         ));
 
-        // Create circuit breaker (3 failures in 5 minutes trips the breaker)
         let circuit_breaker = Arc::new(RwLock::new(AdapterCircuitBreaker::new(
             3,
             Duration::from_secs(300),
@@ -184,7 +172,6 @@ impl AlpacaAdapter {
     #[must_use]
     #[allow(dead_code)] // Public API - not yet used by callers
     pub fn with_exit_handler(mut self, config: ExitHandlerConfig) -> Self {
-        // Create new ExitHandler with custom config
         let exit_handler = Arc::new(ExitHandler::new(
             Arc::clone(&self.state_manager),
             self.platform,
@@ -193,10 +180,6 @@ impl AlpacaAdapter {
         self.exit_handler = exit_handler;
         self
     }
-
-    // =========================================================================
-    // Event Infrastructure Accessors
-    // =========================================================================
 
     /// Returns a reference to the `StateManager`.
     #[must_use]
@@ -224,11 +207,6 @@ impl AlpacaAdapter {
         self.platform
     }
 
-    // =========================================================================
-    // Circuit Breaker Methods
-    // =========================================================================
-
-    /// Check if the circuit breaker is open and return an error if so.
     async fn check_circuit_breaker(&self) -> GatewayResult<()> {
         let breaker = self.circuit_breaker.read().await;
         if breaker.is_open() {
@@ -237,17 +215,12 @@ impl AlpacaAdapter {
         Ok(())
     }
 
-    /// Record a failure if the error indicates a provider outage.
     async fn record_if_outage(&self, error: &GatewayError) {
         if is_outage_error(error) {
             let mut breaker = self.circuit_breaker.write().await;
             breaker.record_failure();
         }
     }
-
-    // =========================================================================
-    // Original Methods
-    // =========================================================================
 
     /// Returns a reference to the provider capabilities.
     #[must_use]
@@ -256,7 +229,6 @@ impl AlpacaAdapter {
         &self.capabilities
     }
 
-    /// Get credentials stored in this adapter.
     fn credentials(&self) -> (String, String) {
         (
             self.api_key.expose_secret().clone(),
@@ -279,7 +251,6 @@ impl AlpacaAdapter {
     /// Slippage percentage for crypto stop-limit orders (2%).
     const CRYPTO_STOP_LIMIT_SLIPPAGE: Decimal = Decimal::from_parts(2, 0, 0, false, 2);
 
-    /// Transform a stop order to `stop_limit` for Alpaca crypto.
     fn transform_crypto_stop_order(
         order_type: &str,
         stop_price: Option<Decimal>,
@@ -301,7 +272,6 @@ impl AlpacaAdapter {
             return ("limit".to_string(), limit_price);
         }
 
-        // Transform stop/stop_loss orders to stop_limit for crypto
         let is_stop_order = order_type == "stop" || order_type == "stop_loss";
         if is_stop_order
             && limit_price.is_none()
@@ -327,7 +297,6 @@ impl AlpacaAdapter {
         (order_type.to_string(), limit_price)
     }
 
-    /// Transform a `market_close` order to market for Alpaca crypto.
     fn transform_crypto_market_close_order(order_type: &str, is_crypto: bool) -> String {
         if is_crypto && order_type == "market_close" {
             debug!(
@@ -339,7 +308,6 @@ impl AlpacaAdapter {
         order_type.to_string()
     }
 
-    /// Translate an Alpaca position to gateway Position type.
     fn translate_alpaca_position(pos: AlpacaPosition) -> Position {
         use rust_decimal::Decimal;
         use std::str::FromStr;
@@ -349,7 +317,6 @@ impl AlpacaAdapter {
         let current_price = Decimal::from_str(&pos.current_price).unwrap_or_default();
         let unrealized_pnl = Decimal::from_str(&pos.unrealized_pl).unwrap_or_default();
 
-        // Determine position side based on quantity
         let side = if quantity >= Decimal::ZERO {
             tektii_gateway_core::models::PositionSide::Long
         } else {
@@ -374,7 +341,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Translate Alpaca order status string to `OrderStatus`.
     fn translate_order_status(
         status: &str,
     ) -> Result<tektii_gateway_core::models::OrderStatus, GatewayError> {
@@ -397,7 +363,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Parse a string side to Side enum.
     fn parse_side(side_str: &str) -> Result<tektii_gateway_core::models::Side, GatewayError> {
         match side_str.to_lowercase().as_str() {
             "buy" => Ok(tektii_gateway_core::models::Side::Buy),
@@ -410,7 +375,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Parse a string order type to `OrderType` enum.
     fn parse_order_type(
         type_str: &str,
     ) -> Result<tektii_gateway_core::models::OrderType, GatewayError> {
@@ -428,7 +392,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Convert Side to string.
     fn side_to_string(side: tektii_gateway_core::models::Side) -> String {
         match side {
             tektii_gateway_core::models::Side::Buy => "buy".to_string(),
@@ -436,7 +399,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Convert `OrderType` to string.
     fn order_type_to_string(order_type: tektii_gateway_core::models::OrderType) -> String {
         match order_type {
             tektii_gateway_core::models::OrderType::Market => "market".to_string(),
@@ -447,7 +409,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Convert `TimeInForce` to string.
     fn time_in_force_to_string(tif: tektii_gateway_core::models::TimeInForce) -> String {
         match tif {
             tektii_gateway_core::models::TimeInForce::Gtc => "gtc".to_string(),
@@ -457,7 +418,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Convert `OrderStatus` enum to Alpaca's string representation.
     #[allow(dead_code)]
     fn order_status_to_string(status: tektii_gateway_core::models::OrderStatus) -> String {
         match status {
@@ -474,7 +434,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Parse string `TimeInForce` to `TimeInForce` enum.
     fn parse_time_in_force(
         tif_str: &str,
     ) -> Result<tektii_gateway_core::models::TimeInForce, GatewayError> {
@@ -491,7 +450,6 @@ impl AlpacaAdapter {
         }
     }
 
-    /// Translate an `AlpacaOrder` to a gateway Order.
     fn translate_alpaca_order(alpaca_order: AlpacaOrder) -> Result<Order, GatewayError> {
         use rust_decimal::Decimal;
         use std::str::FromStr;
@@ -504,7 +462,6 @@ impl AlpacaAdapter {
         let updated_at = DateTime::parse_from_rfc3339(&alpaca_order.updated_at)
             .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
 
-        // Parse limit and stop prices
         let limit_price = alpaca_order
             .limit_price
             .as_ref()
@@ -547,7 +504,6 @@ impl AlpacaAdapter {
         })
     }
 
-    /// Map HTTP status code and body to `GatewayError`.
     fn map_http_error(
         status: reqwest::StatusCode,
         body: &serde_json::Value,
@@ -1241,7 +1197,6 @@ struct AlpacaTranslatedParams {
     has_sl_tp: bool,
 }
 
-// Internal methods that maintain existing proxy logic
 impl AlpacaAdapter {
     #[instrument(skip(self, order), fields(symbol = %order.symbol, side = ?order.side, quantity = ?order.quantity), name = "alpaca_place_order")]
     async fn place_order_internal(&self, order: &OrderRequest) -> GatewayResult<Order> {
@@ -1741,7 +1696,6 @@ impl AlpacaAdapter {
             format!("{}/v2/stocks/{}/bars", self.data_url, alpaca_symbol)
         };
 
-        // Translate timeframe to Alpaca format
         let alpaca_timeframe = match params.timeframe.as_str() {
             "1m" => "1Min",
             "2m" => "2Min",
@@ -1859,7 +1813,6 @@ impl AlpacaAdapter {
         ))
     }
 
-    /// Translate a list of Alpaca bars into gateway `Bar` models.
     fn translate_alpaca_bars(
         alpaca_bars: Vec<AlpacaBar>,
         symbol: &str,
@@ -1890,7 +1843,6 @@ impl AlpacaAdapter {
     async fn get_trades_internal(&self, symbol: Option<&str>) -> GatewayResult<Vec<Trade>> {
         let (api_key, api_secret) = self.credentials();
 
-        // Get trade activities (fills)
         let downstream_start = Instant::now();
         let activities_response = self
             .client
@@ -2057,7 +2009,6 @@ impl AlpacaAdapter {
         Ok(orders)
     }
 
-    /// Cancel all open orders, optionally filtered by symbol.
     #[instrument(skip(self), fields(symbol = ?symbol), name = "alpaca_cancel_all_orders")]
     async fn cancel_all_orders_internal(
         &self,
@@ -2152,7 +2103,6 @@ impl AlpacaAdapter {
 mod tests {
     use super::*;
 
-    /// Helper to create test credentials
     fn test_credentials() -> AlpacaCredentials {
         AlpacaCredentials::new("test-key", "test-secret")
     }
@@ -2296,10 +2246,6 @@ mod tests {
     fn empty_alpaca_code_returns_order_rejected() {
         assert_eq!(map_alpaca_reject_code(""), "ORDER_REJECTED");
     }
-
-    // =====================================================================
-    // map_http_error
-    // =====================================================================
 
     #[test]
     fn http_error_429_rate_limited_header_priority() {

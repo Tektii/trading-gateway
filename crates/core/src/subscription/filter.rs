@@ -108,19 +108,16 @@ impl SubscriptionFilter {
         };
 
         for sub in subscriptions {
-            // Track account subscriptions at platform level
             if sub.events.iter().any(|e| e == "account_update" || e == "*") {
                 filter.account_subscriptions.insert(sub.platform, true);
             }
 
             if sub.instrument == "*" {
-                // Wildcard instrument
                 let events = filter.platform_wildcards.entry(sub.platform).or_default();
                 for event in &sub.events {
                     events.add_event(event);
                 }
             } else {
-                // Specific instrument
                 let platform_subs = filter.subscriptions.entry(sub.platform).or_default();
                 let events = platform_subs.entry(sub.instrument.clone()).or_default();
                 for event in &sub.events {
@@ -147,7 +144,6 @@ impl SubscriptionFilter {
             return true;
         }
 
-        // System events always pass through
         if Self::is_system_event(event) {
             return true;
         }
@@ -198,7 +194,6 @@ impl SubscriptionFilter {
         symbol: &str,
         timeframe: Timeframe,
     ) -> bool {
-        // Check exact instrument match
         if let Some(platform_subs) = self.subscriptions.get(&platform)
             && let Some(events) = platform_subs.get(symbol)
             && events.matches_candle(timeframe)
@@ -206,7 +201,6 @@ impl SubscriptionFilter {
             return true;
         }
 
-        // Check wildcard
         if let Some(events) = self.platform_wildcards.get(&platform)
             && events.matches_candle(timeframe)
         {
@@ -218,7 +212,6 @@ impl SubscriptionFilter {
 
     #[inline]
     fn matches_simple(&self, platform: TradingPlatform, symbol: &str, kind: EventKind) -> bool {
-        // Check exact instrument match
         if let Some(platform_subs) = self.subscriptions.get(&platform)
             && let Some(events) = platform_subs.get(symbol)
             && events.matches_event(kind)
@@ -226,7 +219,6 @@ impl SubscriptionFilter {
             return true;
         }
 
-        // Check wildcard
         if let Some(events) = self.platform_wildcards.get(&platform)
             && events.matches_event(kind)
         {
@@ -383,10 +375,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // System events always pass
-    // =========================================================================
-
     #[test]
     fn test_system_events_always_pass() {
         let filter = SubscriptionFilter::new(&[]);
@@ -432,10 +420,6 @@ mod tests {
         assert!(filter.matches(&WsMessage::Pong, TradingPlatform::AlpacaPaper));
     }
 
-    // =========================================================================
-    // Exact instrument match
-    // =========================================================================
-
     #[test]
     fn test_exact_instrument_match() {
         let subs = vec![test_subscription(
@@ -472,10 +456,6 @@ mod tests {
         assert!(!filter.matches(&position_event, TradingPlatform::AlpacaPaper));
     }
 
-    // =========================================================================
-    // Multiple event types
-    // =========================================================================
-
     #[test]
     fn test_multiple_event_types() {
         let subs = vec![test_subscription(
@@ -504,10 +484,6 @@ mod tests {
             TradingPlatform::AlpacaPaper
         ));
     }
-
-    // =========================================================================
-    // Wildcard instrument
-    // =========================================================================
 
     #[test]
     fn test_wildcard_instrument() {
@@ -550,10 +526,6 @@ mod tests {
         ));
     }
 
-    // =========================================================================
-    // Wildcard event
-    // =========================================================================
-
     #[test]
     fn test_wildcard_event() {
         let subs = vec![test_subscription(
@@ -591,10 +563,6 @@ mod tests {
             TradingPlatform::AlpacaPaper
         ));
     }
-
-    // =========================================================================
-    // Candle events
-    // =========================================================================
 
     #[test]
     fn test_candle_specific_timeframe() {
@@ -695,10 +663,6 @@ mod tests {
         ));
     }
 
-    // =========================================================================
-    // Quote events
-    // =========================================================================
-
     #[test]
     fn test_quote_events() {
         let subs = vec![test_subscription(
@@ -725,10 +689,6 @@ mod tests {
         ));
     }
 
-    // =========================================================================
-    // Trade events
-    // =========================================================================
-
     #[test]
     fn test_trade_events() {
         let subs = vec![test_subscription(
@@ -747,10 +707,6 @@ mod tests {
             TradingPlatform::AlpacaPaper
         ));
     }
-
-    // =========================================================================
-    // Financing events (gated on the same trade_update subscription)
-    // =========================================================================
 
     #[test]
     fn test_financing_events_match_under_trade_update() {
@@ -792,10 +748,6 @@ mod tests {
         ));
     }
 
-    // =========================================================================
-    // Account events (global, no symbol)
-    // =========================================================================
-
     #[test]
     fn test_account_events() {
         let subs = vec![test_subscription(
@@ -836,10 +788,6 @@ mod tests {
         ));
     }
 
-    // =========================================================================
-    // Platform isolation
-    // =========================================================================
-
     #[test]
     fn test_platform_isolation() {
         let subs = vec![test_subscription(
@@ -860,10 +808,6 @@ mod tests {
             TradingPlatform::BinanceSpotLive
         ));
     }
-
-    // =========================================================================
-    // Multiple subscriptions
-    // =========================================================================
 
     #[test]
     fn test_multiple_subscriptions() {
@@ -918,10 +862,6 @@ mod tests {
             TradingPlatform::BinanceSpotLive
         ));
     }
-
-    // =========================================================================
-    // Empty filter
-    // =========================================================================
 
     #[test]
     fn test_empty_filter_passes_all() {

@@ -130,7 +130,6 @@ impl AckManager {
             timeout
         );
 
-        // Take the receiver to await on it
         let mut receiver_guard = self.ack_receiver.write().await;
         let mut receiver = receiver_guard
             .take()
@@ -138,18 +137,15 @@ impl AckManager {
 
         drop(receiver_guard); // Release lock before waiting
 
-        // Wait for ACK message or timeout
         let result = tokio::select! {
             Some(ack) = receiver.recv() => {
                 debug!("Received ACK for {} events", ack.events_processed.len());
 
-                // Verify ACK matches expected events
                 let all_matched = expected_event_ids.iter().all(|expected_id| {
                     ack.events_processed.contains(expected_id)
                 });
 
                 if all_matched {
-                    // Mark as acknowledged
                     self.mark_acknowledged_internal(&ack.events_processed).await;
                     Ok(ack)
                 } else {
@@ -170,7 +166,6 @@ impl AckManager {
             }
         };
 
-        // Return the receiver
         let mut receiver_guard = self.ack_receiver.write().await;
         *receiver_guard = Some(receiver);
 
@@ -199,22 +194,19 @@ impl AckManager {
         Ok(())
     }
 
-    /// Internal method to mark events as acknowledged
     async fn mark_acknowledged_internal(&self, event_ids: &[String]) {
         let mut pending = self.pending_acks.write().await;
 
-        // Remove matching entries
         pending.retain(|conn_id, pending_event_ids| {
-            // Check if this connection's pending events match the ACK
             let matched = event_ids
                 .iter()
                 .all(|ack_id| pending_event_ids.contains(ack_id));
 
             if matched {
                 debug!("Cleared pending ACKs for connection {}", conn_id);
-                false // Remove this entry
+                false
             } else {
-                true // Keep this entry
+                true
             }
         });
     }
@@ -251,14 +243,11 @@ impl AckManager {
         messages
             .iter()
             .filter_map(|msg| {
-                // Only extract IDs from event messages that require acknowledgment
-                // Note: WsMessage types don't have correlation_ids.
-                // For order events, we use the order ID.
-                // For market data events, we use None (no ACK required for live trading).
+                // WsMessage carries no correlation id, so order/position events key
+                // off their own id; market data and control events need no ACK.
                 match msg {
                     WsMessage::Order { order, .. } => Some(order.id.clone()),
                     WsMessage::Position { position, .. } => Some(position.id.clone()),
-                    // Market data and control messages don't require ACK
                     _ => None,
                 }
             })
@@ -279,8 +268,7 @@ impl Default for AckManager {
 ///
 /// # Two-phase pending lifecycle
 ///
-/// Pending events are tracked in two phases to avoid the race documented in
-/// TEK-270:
+/// Pending events are tracked in two phases to avoid a delivery race:
 ///
 /// 1. `register_pending` is called at WS-read time, BEFORE the event has been
 ///    delivered to the strategy WebSocket. The event is tracked but NOT yet

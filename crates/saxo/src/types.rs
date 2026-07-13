@@ -6,10 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
-// Auth Types
-// ============================================================================
-
 /// Successful token response from `POST /connect/token`.
 #[derive(Debug, Deserialize)]
 pub struct SaxoTokenResponse {
@@ -33,10 +29,6 @@ pub struct SaxoTokenErrorResponse {
     /// Human-readable error description.
     pub error_description: Option<String>,
 }
-
-// ============================================================================
-// Account Types
-// ============================================================================
 
 /// Response from `GET /port/v1/balances/me`.
 #[derive(Debug, Deserialize)]
@@ -72,10 +64,6 @@ pub struct SaxoClientResponse {
     #[serde(default)]
     pub default_account_key: Option<String>,
 }
-
-// ============================================================================
-// Order Types — Responses
-// ============================================================================
 
 /// Response from `GET /port/v1/orders/me`.
 #[derive(Debug, Deserialize)]
@@ -178,10 +166,6 @@ pub struct SaxoRelatedOpenOrder {
     pub status: String,
 }
 
-// ============================================================================
-// Order Types — Requests
-// ============================================================================
-
 /// Request body for `POST /trade/v2/orders`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -278,10 +262,6 @@ pub struct SaxoOrderResponse {
     pub order_id: String,
 }
 
-// ============================================================================
-// Position Types
-// ============================================================================
-
 /// Response from `GET /port/v1/netpositions/me`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -331,10 +311,6 @@ pub struct SaxoNetPositionBase {
     pub current_price: f64,
 }
 
-// ============================================================================
-// Quote Types
-// ============================================================================
-
 /// Response from `GET /trade/v1/infoprices`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -367,10 +343,6 @@ pub struct SaxoQuote {
     #[serde(default)]
     pub market_state: Option<String>,
 }
-
-// ============================================================================
-// Chart/Bar Types
-// ============================================================================
 
 /// Response from `GET /chart/v3/charts`.
 #[derive(Debug, Deserialize)]
@@ -441,10 +413,6 @@ impl SaxoChartDataPoint {
     }
 }
 
-// ============================================================================
-// Trade History Types
-// ============================================================================
-
 /// Response from `GET /port/v1/closedpositions`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -496,10 +464,6 @@ pub struct SaxoClosedPositionDetail {
     pub execution_time_close: Option<String>,
 }
 
-// ============================================================================
-// Order Precheck Types
-// ============================================================================
-
 /// Response from `POST /trade/v2/orders/precheck`.
 ///
 /// Same request body as a real order, but Saxo validates without placing.
@@ -532,10 +496,6 @@ pub struct SaxoPrecheckError {
     pub message: Option<String>,
 }
 
-// ============================================================================
-// WebSocket Subscription Types — Portfolio (Balance / Orders)
-// ============================================================================
-
 /// Request body for creating a portfolio subscription (balances or orders).
 ///
 /// Used for `POST /port/v1/balances/subscriptions` and
@@ -560,10 +520,6 @@ pub struct SaxoPortfolioSubscriptionArguments {
     /// Saxo account key to subscribe to.
     pub account_key: String,
 }
-
-// ============================================================================
-// WebSocket Subscription Types — Price
-// ============================================================================
 
 /// Request body for creating a price subscription via
 /// `POST /trade/v1/infoprices/subscriptions`.
@@ -605,15 +561,9 @@ pub struct SaxoSubscriptionResponse {
     pub inactivity_timeout: Option<u32>,
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- Auth tests ---
 
     #[test]
     fn deserialize_token_response() {
@@ -656,8 +606,6 @@ mod tests {
             Some("The refresh token has expired")
         );
     }
-
-    // --- REST DTO tests ---
 
     #[test]
     fn deserialize_balance_response_pascal_case() {

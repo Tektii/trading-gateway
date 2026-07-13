@@ -53,7 +53,6 @@ impl MockWsServer {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel::<String>();
 
         let task = tokio::spawn(async move {
-            // Accept one connection.
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
@@ -65,7 +64,6 @@ impl MockWsServer {
 
             let (mut sink, mut stream) = ws_stream.split();
 
-            // Bridge: outgoing channel → WS sink, WS stream → incoming channel.
             let write_task = tokio::spawn(async move {
                 while let Some(msg) = outgoing_rx.recv().await {
                     if sink.send(Message::Text(msg.into())).await.is_err() {
@@ -82,7 +80,6 @@ impl MockWsServer {
                 }
             });
 
-            // Wait for either side to finish.
             tokio::select! {
                 () = async { write_task.await.ok(); } => {},
                 () = async { read_task.await.ok(); } => {},

@@ -51,23 +51,18 @@ struct AdapterInfo {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
-    // 1. Load config
     let config = GatewayConfig::from_env()?;
 
-    // 2. Init telemetry
     init_tracing("tektii-gateway", env!("CARGO_PKG_VERSION"));
 
-    // 3. Bind port early
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on {}", addr);
 
-    // 4. Init metrics
     let metrics_handle = Arc::new(MetricsHandle::try_init().ok_or_else(|| {
         anyhow::anyhow!("Failed to initialise metrics — is another recorder already installed?")
     })?);
 
-    // 5. Create shared infrastructure
     let cancel_token = CancellationToken::new();
     let ws_connection_manager = Arc::new(WsConnectionManager::new());
     let subscription_filter = SubscriptionFilter::new(&config.subscriptions);
@@ -82,14 +77,12 @@ async fn main() -> anyhow::Result<()> {
     ));
     let exit_handler_registry = Arc::new(ExitHandlerRegistry::new());
 
-    // 6. Read provider config
     let provider = read_provider()?;
     let mode = read_mode()?;
     let platform = provider.to_platform(mode);
     check_feature_enabled(provider)?;
     let credentials = load_required_env_vars(provider)?;
 
-    // Diagnostic: log parsed subscriptions and platforms
     info!(
         subscription_count = config.subscriptions.len(),
         platforms = ?config.platforms_used(),
@@ -126,22 +119,19 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 7. Register adapter
     let (adapter, event_routers_to_register) =
         register_adapter(provider, platform, &credentials, &exit_handler_registry).await?;
     let adapter_registry = AdapterRegistry::new(adapter, platform);
     info!(?platform, "Gateway configured for single provider");
 
-    // 7-8. Wire EventRouters and trailing stop handlers
     wire_event_routers_and_trailing_stops(&provider_registry, &event_routers_to_register).await?;
 
-    // 9. Spawn position synthesis task
     provider_registry.spawn_position_synthesis_task();
 
-    // 10. Connect provider WebSocket streams in background (non-blocking)
-    //     This allows the gateway to accept strategy connections before the
-    //     upstream provider (e.g., engine) is available. Critical for backtest
-    //     mode where startup order is: gateway → strategy → engine.
+    // Connect provider WebSocket streams in the background (non-blocking) so the
+    // gateway can accept strategy connections before the upstream provider
+    // (e.g., engine) is available. Critical for backtest mode where startup
+    // order is: gateway → strategy → engine.
     {
         let config = config.clone();
         let provider_registry = provider_registry.clone();
@@ -151,7 +141,6 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(not(feature = "mock"))]
         let mock_provider = false;
         tokio::spawn(async move {
-            // Mock mode: auto-connect with default symbols if no subscriptions set
             #[cfg(feature = "mock")]
             if mock_provider && config.platforms_used().is_empty() {
                 let default_symbols = vec![
@@ -189,14 +178,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 11. Spawn TTL cleanup tasks
     let ttl_duration = Duration::from_secs(config.sl_tp_ttl_hours * 3600);
     let _cleanup_handles = exit_handler_registry.spawn_cleanup_tasks(&cancel_token, ttl_duration);
 
-    // 12. Check for previous exit state snapshot
     tektii_gateway_core::shutdown::read_exit_state_on_startup(&config.exit_state_file).await;
 
-    // 13. Build router and serve
     let gateway_state = GatewayState::new(
         adapter_registry,
         ws_connection_manager.clone(),
@@ -265,8 +251,7 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
 
-    // 13. Graceful shutdown sequence
-    // (Axum graceful shutdown already drained in-flight requests above)
+    // Axum graceful shutdown already drained in-flight requests above.
     tektii_gateway_core::shutdown::run_shutdown_sequence(
         &ws_connection_manager,
         &shutdown_state,
@@ -393,9 +378,6 @@ async fn register_adapter(
     exit_handler_registry: &Arc<ExitHandlerRegistry>,
 ) -> anyhow::Result<(Arc<dyn TradingAdapter>, Vec<AdapterInfo>)> {
     match provider {
-        // =====================================================================
-        // Alpaca
-        // =====================================================================
         #[cfg(feature = "alpaca")]
         TradingPlatformKind::Alpaca => {
             use tektii_gateway_alpaca::{AlpacaAdapter, AlpacaCredentials};
@@ -424,9 +406,6 @@ async fn register_adapter(
             Ok((adapter, vec![info]))
         }
 
-        // =====================================================================
-        // Binance
-        // =====================================================================
         #[cfg(feature = "binance")]
         TradingPlatformKind::BinanceSpot => {
             use tektii_gateway_binance::{BinanceCredentials, BinanceSpotAdapter};
@@ -464,9 +443,6 @@ async fn register_adapter(
             );
         }
 
-        // =====================================================================
-        // Oanda
-        // =====================================================================
         #[cfg(feature = "oanda")]
         TradingPlatformKind::Oanda => {
             use tektii_gateway_oanda::{OandaAdapter, OandaCredentials};
@@ -492,9 +468,6 @@ async fn register_adapter(
             Ok((adapter, vec![info]))
         }
 
-        // =====================================================================
-        // Saxo
-        // =====================================================================
         #[cfg(feature = "saxo")]
         TradingPlatformKind::Saxo => {
             use secrecy::SecretBox;
@@ -529,9 +502,6 @@ async fn register_adapter(
             Ok((adapter, vec![info]))
         }
 
-        // =====================================================================
-        // Tektii (backtesting engine adapter)
-        // =====================================================================
         #[cfg(feature = "tektii")]
         TradingPlatformKind::Tektii => {
             use tektii_gateway_tektii::{TektiiAdapter, TektiiCredentials};
@@ -554,9 +524,6 @@ async fn register_adapter(
             Ok((adapter, vec![info]))
         }
 
-        // =====================================================================
-        // Mock (local development)
-        // =====================================================================
         #[cfg(feature = "mock")]
         TradingPlatformKind::Mock => {
             use tektii_gateway_mock::MockProviderAdapter;
@@ -818,7 +785,6 @@ async fn connect_tektii(
     provider_registry.wait_for_strategy().await;
     info!("Strategy connected — connecting to engine to begin the backtest");
 
-    // Connect provider and retrieve the ACK bridge before registering
     let stream = provider
         .connect(provider_config)
         .await
@@ -901,17 +867,11 @@ async fn connect_providers(
         );
 
         let result: Result<(), String> = match platform.kind() {
-            // -----------------------------------------------------------------
-            // Alpaca
-            // -----------------------------------------------------------------
             #[cfg(feature = "alpaca")]
             tektii_gateway_core::models::TradingPlatformKind::Alpaca => {
                 connect_alpaca(platform, symbols, event_types, provider_registry).await
             }
 
-            // -----------------------------------------------------------------
-            // Binance variants
-            // -----------------------------------------------------------------
             #[cfg(feature = "binance")]
             tektii_gateway_core::models::TradingPlatformKind::BinanceSpot
             | tektii_gateway_core::models::TradingPlatformKind::BinanceFutures
@@ -920,25 +880,16 @@ async fn connect_providers(
                 connect_binance(platform, symbols, event_types, provider_registry).await
             }
 
-            // -----------------------------------------------------------------
-            // Oanda
-            // -----------------------------------------------------------------
             #[cfg(feature = "oanda")]
             tektii_gateway_core::models::TradingPlatformKind::Oanda => {
                 connect_oanda(platform, symbols, event_types, provider_registry).await
             }
 
-            // -----------------------------------------------------------------
-            // Saxo
-            // -----------------------------------------------------------------
             #[cfg(feature = "saxo")]
             tektii_gateway_core::models::TradingPlatformKind::Saxo => {
                 connect_saxo(platform, symbols, event_types, provider_registry).await
             }
 
-            // -----------------------------------------------------------------
-            // Tektii (backtesting engine adapter)
-            // -----------------------------------------------------------------
             #[cfg(feature = "tektii")]
             tektii_gateway_core::models::TradingPlatformKind::Tektii => {
                 connect_tektii(
@@ -951,9 +902,6 @@ async fn connect_providers(
                 .await
             }
 
-            // -----------------------------------------------------------------
-            // Mock (local development)
-            // -----------------------------------------------------------------
             #[cfg(feature = "mock")]
             tektii_gateway_core::models::TradingPlatformKind::Mock => {
                 connect_mock(

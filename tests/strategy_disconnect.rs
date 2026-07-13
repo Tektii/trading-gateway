@@ -20,10 +20,6 @@ use tektii_gateway_core::websocket::registry::ProviderRegistry;
 use tektii_gateway_core::websocket::server::ws_handler;
 use tektii_gateway_test_support::mock_state::test_gateway_state;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Spawn a minimal gateway server on a random port.
 ///
 /// Returns the shared state (for inspecting connection counts), the bound
@@ -112,10 +108,6 @@ async fn wait_for_strategy_count(registry: &ProviderRegistry, expected: usize, d
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn disconnect_unregisters_from_connection_manager() {
     let (state, addr, _server) = spawn_gateway().await;
@@ -195,12 +187,10 @@ async fn multiple_strategies_disconnect_independently() {
     wait_for_connection_count(manager, 2, TIMEOUT).await;
     assert_eq!(registry.connected_strategy_count().await, 2);
 
-    // Drop A — B remains.
     drop(client_a);
     wait_for_connection_count(manager, 1, TIMEOUT).await;
     assert_eq!(registry.connected_strategy_count().await, 1);
 
-    // Drop B — none remain.
     drop(client_b);
     wait_for_connection_count(manager, 0, TIMEOUT).await;
     assert_eq!(registry.connected_strategy_count().await, 0);

@@ -33,8 +33,6 @@ use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
 use crate::price::PriceGenerator;
 use crate::websocket::EventSink;
 
-// ── In-memory state ──────────────────────────────────────────────────
-
 struct MockState {
     orders: RwLock<HashMap<String, Order>>,
     /// Positions keyed by symbol (netting mode: one position per symbol).
@@ -63,20 +61,17 @@ impl MockState {
 
         if let Some(pos) = positions.get_mut(symbol) {
             if pos.side == fill_side {
-                // Same side: accumulate with weighted average
                 let total_cost = pos.average_entry_price * pos.quantity + fill_price * quantity;
                 pos.quantity += quantity;
                 pos.average_entry_price = total_cost / pos.quantity;
             } else {
                 // Opposite side: reduce
                 if quantity >= pos.quantity {
-                    // Full close or flip
                     let remainder = quantity - pos.quantity;
                     if remainder.is_zero() {
                         positions.remove(symbol);
                         return;
                     }
-                    // Flip to opposite side
                     pos.side = fill_side;
                     pos.quantity = remainder;
                     pos.average_entry_price = fill_price;
@@ -89,7 +84,6 @@ impl MockState {
                 pos.updated_at = Utc::now();
             }
         } else {
-            // New position
             let position_id = format!("mock-pos-{symbol}");
             positions.insert(
                 symbol.to_string(),
@@ -112,8 +106,6 @@ impl MockState {
         }
     }
 }
-
-// ── Capabilities ─────────────────────────────────────────────────────
 
 struct MockCapabilities;
 
@@ -163,8 +155,6 @@ impl ProviderCapabilities for MockCapabilities {
         }
     }
 }
-
-// ── Adapter ──────────────────────────────────────────────────────────
 
 pub struct MockProviderAdapter {
     platform: TradingPlatform,
@@ -231,8 +221,6 @@ impl MockProviderAdapter {
         )
     }
 
-    /// Spawn a task that fills an order after a short delay.
-    /// For limit/stop orders, checks price conditions before filling.
     /// Send an event through the provider's event stream so it reaches strategy clients.
     fn send_event(event_sink: &EventSink, msg: WsMessage) {
         if let Some(ref sender) = *event_sink.read() {
@@ -260,7 +248,6 @@ impl MockProviderAdapter {
 
             let fill_price = price_gen.get_price(&symbol);
 
-            // Check price conditions for non-market orders
             let should_fill = match order_type {
                 OrderType::Market | OrderType::TrailingStop => true,
                 OrderType::Limit => match (side, limit_price) {
@@ -274,7 +261,6 @@ impl MockProviderAdapter {
                     _ => true,
                 },
                 OrderType::StopLimit => {
-                    // Check stop trigger, then limit condition
                     let stop_met = match (side, stop_price) {
                         (Side::Buy, Some(sp)) => fill_price >= sp,
                         (Side::Sell, Some(sp)) => fill_price <= sp,
@@ -299,7 +285,6 @@ impl MockProviderAdapter {
                 return;
             }
 
-            // Check order still exists and isn't cancelled
             let order = {
                 let mut orders = state.orders.write();
                 let Some(order) = orders.get_mut(&order_id) else {
@@ -316,7 +301,6 @@ impl MockProviderAdapter {
                 order.clone()
             };
 
-            // Create trade
             let trade = Trade {
                 id: Uuid::new_v4().to_string(),
                 order_id: order_id.clone(),
@@ -340,10 +324,8 @@ impl MockProviderAdapter {
                 "Mock: order filled"
             );
 
-            // Upsert position with netting semantics
             state.upsert_position(&symbol, side, quantity, fill_price);
 
-            // Send fill event through the provider's event stream
             Self::send_event(
                 &event_sink,
                 WsMessage::Order {
@@ -371,8 +353,6 @@ impl TradingAdapter for MockProviderAdapter {
         "mock"
     }
 
-    // ── Account ──────────────────────────────────────────────────────
-
     async fn get_account(&self) -> GatewayResult<Account> {
         Ok(Account {
             balance: dec!(100_000),
@@ -384,13 +364,10 @@ impl TradingAdapter for MockProviderAdapter {
         })
     }
 
-    // ── Orders ───────────────────────────────────────────────────────
-
     async fn submit_order(
         &self,
         request: &tektii_gateway_core::models::OrderRequest,
     ) -> GatewayResult<OrderHandle> {
-        // Validate the request (returns proper GatewayError on bad payload)
         request.validate_semantics()?;
 
         let order_id = Uuid::new_v4().to_string();
@@ -431,7 +408,6 @@ impl TradingAdapter for MockProviderAdapter {
             .write()
             .insert(order_id.clone(), order.clone());
 
-        // Send OrderCreated through provider's event stream
         Self::send_event(
             &self.event_sink,
             WsMessage::Order {
@@ -442,7 +418,6 @@ impl TradingAdapter for MockProviderAdapter {
             },
         );
 
-        // Schedule async fill
         self.schedule_fill(
             order_id.clone(),
             request.symbol.clone(),
@@ -629,7 +604,6 @@ impl TradingAdapter for MockProviderAdapter {
             order: order.clone(),
         };
 
-        // Send cancel event through provider's event stream
         Self::send_event(
             &self.event_sink,
             WsMessage::Order {
@@ -642,8 +616,6 @@ impl TradingAdapter for MockProviderAdapter {
 
         Ok(result)
     }
-
-    // ── Trades ───────────────────────────────────────────────────────
 
     async fn get_trades(&self, params: &TradeQueryParams) -> GatewayResult<Vec<Trade>> {
         let trades = self.state.trades.read();
@@ -681,8 +653,6 @@ impl TradingAdapter for MockProviderAdapter {
         Ok(result)
     }
 
-    // ── Positions ────────────────────────────────────────────────────
-
     async fn get_positions(&self, symbol: Option<&str>) -> GatewayResult<Vec<Position>> {
         let positions = self.state.positions.read();
         Ok(positions
@@ -712,7 +682,6 @@ impl TradingAdapter for MockProviderAdapter {
     ) -> GatewayResult<OrderHandle> {
         let mut positions = self.state.positions.write();
 
-        // Find position by ID or symbol key
         let (key, position) = positions
             .iter()
             .find(|(_, p)| p.id == position_id)
@@ -721,7 +690,6 @@ impl TradingAdapter for MockProviderAdapter {
                 id: position_id.to_string(),
             })?;
 
-        // Determine close quantity (partial or full)
         let close_qty = request.quantity.unwrap_or(position.quantity);
         let close_qty = close_qty.min(position.quantity);
 
@@ -777,7 +745,6 @@ impl TradingAdapter for MockProviderAdapter {
             .write()
             .insert(order_id.clone(), order.clone());
 
-        // Create trade record for the close
         let trade = Trade {
             id: Uuid::new_v4().to_string(),
             order_id: order_id.clone(),
@@ -792,7 +759,6 @@ impl TradingAdapter for MockProviderAdapter {
         };
         self.state.trades.write().push(trade);
 
-        // Send fill event for the close through provider's event stream
         Self::send_event(
             &self.event_sink,
             WsMessage::Order {
@@ -811,8 +777,6 @@ impl TradingAdapter for MockProviderAdapter {
         })
     }
 
-    // ── Market Data ──────────────────────────────────────────────────
-
     async fn get_quote(&self, symbol: &str) -> GatewayResult<Quote> {
         Ok(self.price_generator.get_quote(symbol))
     }
@@ -823,8 +787,6 @@ impl TradingAdapter for MockProviderAdapter {
             .price_generator
             .generate_bars(symbol, params.timeframe, count))
     }
-
-    // ── Capabilities & Status ────────────────────────────────────────
 
     async fn get_capabilities(&self) -> GatewayResult<Capabilities> {
         Ok(self.capabilities.capabilities())
@@ -919,7 +881,6 @@ mod tests {
     async fn position_netting_accumulates_same_side() {
         let adapter = make_adapter();
 
-        // Two buys for the same symbol should net into one position
         let req1 = OrderRequest::market("AAPL", Side::Buy, dec!(5));
         let req2 = OrderRequest::market("AAPL", Side::Buy, dec!(3));
         adapter.submit_order(&req1).await.unwrap();
@@ -937,7 +898,6 @@ mod tests {
     async fn close_position_creates_trade_and_order() {
         let adapter = make_adapter();
 
-        // Create a position via order fill
         let request = OrderRequest::market("MSFT", Side::Buy, dec!(10));
         adapter.submit_order(&request).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
@@ -946,18 +906,15 @@ mod tests {
         assert_eq!(positions.len(), 1);
         let pos_id = positions[0].id.clone();
 
-        // Close the position
         let handle = adapter
             .close_position(&pos_id, &ClosePositionRequest::default())
             .await
             .unwrap();
         assert_eq!(handle.status, OrderStatus::Filled);
 
-        // Position should be removed
         let positions = adapter.get_positions(Some("MSFT")).await.unwrap();
         assert!(positions.is_empty());
 
-        // Trade record should exist for the close
         let trades = adapter
             .get_trades(&TradeQueryParams {
                 symbol: Some("MSFT".to_string()),
@@ -967,7 +924,6 @@ mod tests {
             .unwrap();
         assert!(trades.len() >= 2); // Opening trade + closing trade
 
-        // Closing order should exist in state
         let close_order = adapter.get_order(&handle.id).await.unwrap();
         assert_eq!(close_order.status, OrderStatus::Filled);
         assert_eq!(close_order.side, Side::Sell);

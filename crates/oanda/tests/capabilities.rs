@@ -6,16 +6,11 @@ use tektii_gateway_core::adapter::TradingAdapter;
 use tektii_gateway_core::models::{OrderType, PositionMode};
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Capabilities
-// =========================================================================
-
 #[tokio::test]
 async fn capabilities_features_netting_account() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Mount account summary with hedgingEnabled: false
     mount_json(
         &server,
         "GET",
@@ -27,7 +22,6 @@ async fn capabilities_features_netting_account() {
 
     let caps = adapter.get_capabilities().await.unwrap();
 
-    // Supported order types
     assert!(caps.supported_order_types.contains(&OrderType::Market));
     assert!(caps.supported_order_types.contains(&OrderType::Limit));
     assert!(caps.supported_order_types.contains(&OrderType::Stop));
@@ -39,13 +33,11 @@ async fn capabilities_features_netting_account() {
             .contains(&OrderType::TrailingStop)
     );
 
-    // Features
     assert!(caps.features.contains(&"bracket_orders".to_string()));
     assert!(caps.features.contains(&"trailing_stop".to_string()));
     assert!(caps.features.contains(&"get_quote".to_string()));
     assert!(caps.features.contains(&"short_selling".to_string()));
 
-    // Position mode detected from account API
     assert_eq!(caps.position_mode, PositionMode::Netting);
 }
 
@@ -54,7 +46,6 @@ async fn capabilities_hedging_account() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // Mount account summary with hedgingEnabled: true
     mount_json(
         &server,
         "GET",
@@ -96,10 +87,6 @@ async fn capabilities_fallback_on_api_failure() {
     let caps = adapter.get_capabilities().await.unwrap();
     assert_eq!(caps.position_mode, PositionMode::Netting);
 }
-
-// =========================================================================
-// Connection Status
-// =========================================================================
 
 #[tokio::test]
 async fn connection_status_connected() {

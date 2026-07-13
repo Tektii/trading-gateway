@@ -80,11 +80,9 @@ impl WebSocketPriceSource {
     /// * `price` - Mid price (bid+ask)/2
     /// * `timestamp_ms` - Timestamp in milliseconds since epoch
     pub fn handle_quote(&self, symbol: &str, price: Decimal, timestamp_ms: u64) {
-        // Update cache
         self.latest_prices
             .insert(symbol.to_string(), (price, timestamp_ms));
 
-        // Fan out to subscribers (if any)
         // Clone the sender outside the DashMap ref to avoid holding ref across send
         let sender = self.channels.get(symbol).map(|r| r.clone());
         if let Some(sender) = sender {
@@ -123,7 +121,6 @@ impl Default for WebSocketPriceSource {
 #[async_trait]
 impl PriceSource for WebSocketPriceSource {
     async fn subscribe(&self, symbol: &str) -> Result<mpsc::Receiver<PriceUpdate>, GatewayError> {
-        // Get or create broadcast channel for this symbol
         let broadcast_rx = {
             let sender = self
                 .channels

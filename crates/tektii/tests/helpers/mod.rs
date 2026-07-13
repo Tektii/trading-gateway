@@ -23,10 +23,6 @@ pub fn test_adapter(base_url: &str) -> TektiiAdapter {
     TektiiAdapter::new(&credentials, broadcaster).expect("Failed to build HTTP client")
 }
 
-// =========================================================================
-// Engine JSON response builders
-// =========================================================================
-
 /// Engine `OrderHandle` response with optional overrides.
 pub fn engine_order_handle_json(overrides: &Value) -> Value {
     let mut base = json!({
@@ -127,10 +123,6 @@ pub fn engine_trade_json(overrides: &Value) -> Value {
     base
 }
 
-// =========================================================================
-// WebSocket provider helpers
-// =========================================================================
-
 /// Create a `TektiiWebSocketProvider`.
 pub fn create_ws_provider(
     ws_url: &str,
@@ -163,10 +155,6 @@ pub fn minimal_provider_config() -> ProviderConfig {
         tektii_params: None,
     }
 }
-
-// =========================================================================
-// Engine protocol type builders (for constructing ServerMessage)
-// =========================================================================
 
 /// Minimal engine `Order` struct for WebSocket event testing.
 pub fn make_engine_order() -> tektii_protocol::rest::Order {

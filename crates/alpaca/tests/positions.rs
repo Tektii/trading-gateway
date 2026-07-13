@@ -10,10 +10,6 @@ use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_serve
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
 
-// =========================================================================
-// Get Positions
-// =========================================================================
-
 #[tokio::test]
 async fn get_positions_all() {
     let (server, base_url) = start_mock_server().await;
@@ -44,10 +40,6 @@ async fn get_positions_empty() {
     let positions = adapter.get_positions(None).await.unwrap();
     assert!(positions.is_empty());
 }
-
-// =========================================================================
-// Get Position
-// =========================================================================
 
 #[tokio::test]
 async fn get_position_success() {
@@ -122,10 +114,6 @@ async fn get_position_not_found() {
         "Expected PositionNotFound, got: {err:?}"
     );
 }
-
-// =========================================================================
-// Close Position
-// =========================================================================
 
 #[tokio::test]
 async fn close_position_full() {
@@ -210,10 +198,6 @@ async fn close_position_not_found() {
         "Expected PositionNotFound, got: {err:?}"
     );
 }
-
-// =========================================================================
-// Close All Positions
-// =========================================================================
 
 #[tokio::test]
 async fn close_all_positions() {

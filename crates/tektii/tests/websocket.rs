@@ -20,15 +20,10 @@ use helpers::{
     make_engine_trade, minimal_provider_config, parse_client_message,
 };
 
-/// Helper: send a ServerMessage as JSON text through the mock server.
 fn send_server_message(tx: &tokio::sync::mpsc::UnboundedSender<String>, msg: &ServerMessage) {
     let json = serde_json::to_string(msg).expect("Failed to serialize ServerMessage");
     tx.send(json).expect("Failed to send to MockWsServer");
 }
-
-// =========================================================================
-// Event Routing Tests
-// =========================================================================
 
 #[tokio::test]
 async fn order_event_routed_to_event_stream() {
@@ -92,7 +87,7 @@ async fn trade_event_routed_to_event_stream() {
     server.shutdown().await;
 }
 
-/// Regression for TEK-286: the engine omits `liquidation` on normal-close
+/// Regression: the engine omits `liquidation` on normal-close
 /// trade payloads. The gateway must accept the message rather than silently
 /// dropping the broadcast on a serde parse failure.
 #[tokio::test]
@@ -243,10 +238,6 @@ async fn candle_event_routed_to_event_stream() {
     server.shutdown().await;
 }
 
-// =========================================================================
-// Non-Broadcast Event Tests
-// =========================================================================
-
 #[tokio::test]
 async fn error_event_produces_no_ws_message() {
     let (server, tx, mut rx) = MockWsServer::start().await;
@@ -257,11 +248,9 @@ async fn error_event_produces_no_ws_message() {
         .await
         .expect("connect failed");
 
-    // Send error event (should not appear on EventStream)
     let error_msg = ServerMessage::error("evt-err", "E001", "something broke");
     send_server_message(&tx, &error_msg);
 
-    // Send a valid order event after (should appear)
     let order_msg = ServerMessage::order("evt-ok", OrderEventType::Created, make_engine_order());
     send_server_message(&tx, &order_msg);
 
@@ -271,7 +260,6 @@ async fn error_event_produces_no_ws_message() {
         .expect("stream closed")
         .msg;
 
-    // First message on EventStream should be the order, not the error
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
 
     // Verify ACK was sent for the error's event_id (immediate ack since Error → None → immediate)
@@ -307,11 +295,9 @@ async fn pong_produces_no_ws_message_and_no_ack() {
     let pong_msg = ServerMessage::pong();
     send_server_message(&tx, &pong_msg);
 
-    // Send a valid order after
     let order_msg = ServerMessage::order("evt-ok", OrderEventType::Created, make_engine_order());
     send_server_message(&tx, &order_msg);
 
-    // First message on EventStream should be the order
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout")
@@ -320,7 +306,6 @@ async fn pong_produces_no_ws_message_and_no_ack() {
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
 
     // Drain ACKs — we should only see ACK for "evt-ok", not for pong
-    // Give tasks time to process
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let mut ack_event_ids = Vec::new();
@@ -344,10 +329,6 @@ async fn pong_produces_no_ws_message_and_no_ack() {
 
     server.shutdown().await;
 }
-
-// =========================================================================
-// ACK Flow Tests
-// =========================================================================
 
 #[tokio::test]
 async fn subscribed_event_acked_only_after_strategy_ack() {
@@ -379,7 +360,7 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
     );
 
     // Simulate the registry calling `mark_sent` after `connection_manager.send_to`
-    // returns Ok (TEK-270). In production this happens inside
+    // returns Ok. In production this happens inside
     // `ProviderRegistry::spawn_provider_event_task`; here the test consumes the
     // EventStream directly so we mark it manually.
     let bridge = provider
@@ -388,7 +369,6 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
         .expect("ack_bridge available after connect");
     bridge.mark_sent(vec!["evt-1".to_string()]).await;
 
-    // Now send strategy ACK
     provider
         .handle_ack(EventAckMessage {
             correlation_id: "test-corr".to_string(),
@@ -398,7 +378,6 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
         .await
         .expect("handle_ack failed");
 
-    // Now the engine ACK should appear
     let ack_raw = timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("timeout waiting for engine ACK")
@@ -424,7 +403,7 @@ async fn subscribed_event_acked_only_after_strategy_ack() {
 /// as `WsMessage::BacktestComplete`, and the strategy's resulting ACK (the
 /// flush-ack) must be forwarded back to the engine carrying the terminal's
 /// `event_id`. This is the end-of-backtest flush-ack handshake the canary
-/// capture relies on to flush its dataset before teardown (TEK-758).
+/// capture relies on to flush its dataset before teardown.
 #[tokio::test]
 async fn backtest_complete_relayed_and_flush_ack_forwarded() {
     let (server, tx, mut rx) = MockWsServer::start().await;
@@ -460,7 +439,7 @@ async fn backtest_complete_relayed_and_flush_ack_forwarded() {
         "flush-ack should NOT be sent before the strategy ACKs the terminal"
     );
 
-    // Registry marks the terminal delivered (TEK-270), then the strategy's
+    // Registry marks the terminal delivered, then the strategy's
     // flush-ack arrives.
     let bridge = provider
         .ack_bridge()
@@ -509,7 +488,6 @@ async fn multiple_pending_events_released_one_per_ack() {
         .await
         .expect("connect failed");
 
-    // Send 3 events
     for i in 1..=3 {
         let msg = ServerMessage::order(
             format!("evt-{i}"),
@@ -519,7 +497,6 @@ async fn multiple_pending_events_released_one_per_ack() {
         send_server_message(&tx, &msg);
     }
 
-    // Wait for all 3 to arrive on EventStream
     for _ in 0..3 {
         timeout(Duration::from_secs(5), event_stream.recv())
             .await
@@ -527,7 +504,6 @@ async fn multiple_pending_events_released_one_per_ack() {
             .expect("stream closed");
     }
 
-    // No ACKs yet (all pending)
     let no_ack = timeout(Duration::from_millis(200), rx.recv()).await;
     assert!(
         no_ack.is_err(),
@@ -535,7 +511,7 @@ async fn multiple_pending_events_released_one_per_ack() {
     );
 
     // Simulate the registry calling `mark_sent` for each event after
-    // `connection_manager.send_to` returns Ok (TEK-270).
+    // `connection_manager.send_to` returns Ok.
     let bridge = provider
         .ack_bridge()
         .await
@@ -588,10 +564,6 @@ async fn multiple_pending_events_released_one_per_ack() {
     server.shutdown().await;
 }
 
-// =========================================================================
-// Graceful Shutdown Tests
-// =========================================================================
-
 #[tokio::test]
 async fn disconnect_closes_event_stream() {
     let (server, tx, _rx) = MockWsServer::start().await;
@@ -602,7 +574,6 @@ async fn disconnect_closes_event_stream() {
         .await
         .expect("connect failed");
 
-    // Verify connection works
     let msg = ServerMessage::order("evt-1", OrderEventType::Created, make_engine_order());
     send_server_message(&tx, &msg);
 
@@ -613,10 +584,8 @@ async fn disconnect_closes_event_stream() {
         .msg;
     assert!(matches!(ws_msg, WsMessage::Order { .. }));
 
-    // Disconnect
     provider.disconnect().await.expect("disconnect failed");
 
-    // EventStream should close (recv returns None)
     let result = timeout(Duration::from_secs(2), event_stream.recv())
         .await
         .expect("timeout — event stream should close promptly");
@@ -648,10 +617,6 @@ async fn handle_ack_before_connect_does_not_panic() {
     server.shutdown().await;
 }
 
-// =========================================================================
-// Edge Case Tests
-// =========================================================================
-
 #[tokio::test]
 async fn malformed_json_skipped_without_crash() {
     let (server, tx, _rx) = MockWsServer::start().await;
@@ -662,15 +627,12 @@ async fn malformed_json_skipped_without_crash() {
         .await
         .expect("connect failed");
 
-    // Send malformed JSON
     tx.send("this is not valid json {".to_string())
         .expect("send failed");
 
-    // Send valid event after
     let msg = ServerMessage::order("evt-ok", OrderEventType::Created, make_engine_order());
     send_server_message(&tx, &msg);
 
-    // Valid event should still arrive — provider didn't crash
     let ws_msg = timeout(Duration::from_secs(5), event_stream.recv())
         .await
         .expect("timeout — provider may have crashed on malformed JSON")

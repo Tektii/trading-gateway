@@ -43,29 +43,24 @@ pub fn binance_error_mapper(
     retry_after: Option<u64>,
     provider: &str,
 ) -> GatewayError {
-    // Handle Binance-specific HTTP 400 error codes
     if status == StatusCode::BAD_REQUEST
         && let Some(code) = body.get("code").and_then(serde_json::Value::as_i64)
     {
         let msg = extract_message(&body);
         return match code {
-            // -1013: Filter failure (LOT_SIZE, MIN_NOTIONAL, etc.)
             -1013 => GatewayError::OrderRejected {
                 reason: msg,
                 reject_code: Some(reject_codes::INVALID_QUANTITY.to_string()),
                 details: Some(body),
             },
-            // -1015: Too many orders
             -1015 => GatewayError::RateLimited {
                 retry_after_seconds: retry_after,
                 reset_at: None,
             },
-            // -1121: Invalid symbol
             -1121 => GatewayError::InvalidRequest {
                 message: msg,
                 field: Some("symbol".to_string()),
             },
-            // -2010: Order rejected — parse msg for specific reason
             -2010 => {
                 let reject_code = reject_code_from_2010_msg(&msg);
                 GatewayError::OrderRejected {
@@ -74,21 +69,17 @@ pub fn binance_error_mapper(
                     details: Some(body),
                 }
             }
-            // -2013: Order does not exist
             -2013 => GatewayError::OrderNotFound {
                 id: "unknown".to_string(),
             },
-            // -2014/-2015: Invalid API key
             -2014 | -2015 => GatewayError::Unauthorized {
                 reason: msg,
                 code: code.to_string(),
             },
-            // Other Binance error codes - fall through to default
             _ => default_error_mapper(status, body, retry_after, provider),
         };
     }
 
-    // All other status codes use the default mapper
     default_error_mapper(status, body, retry_after, provider)
 }
 
@@ -97,7 +88,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -2010 with message parsing
     #[test]
     fn maps_2010_insufficient_balance_to_canonical_code() {
         let body = json!({
@@ -157,7 +147,6 @@ mod tests {
         }
     }
 
-    // -1013: filter failure
     #[test]
     fn maps_1013_to_invalid_quantity() {
         let body = json!({
@@ -175,7 +164,6 @@ mod tests {
         }
     }
 
-    // -1015: rate limited
     #[test]
     fn maps_1015_to_rate_limited() {
         let body = json!({
@@ -188,7 +176,6 @@ mod tests {
         assert!(matches!(error, GatewayError::RateLimited { .. }));
     }
 
-    // -1121: invalid symbol
     #[test]
     fn maps_1121_to_invalid_request() {
         let body = json!({
@@ -206,7 +193,6 @@ mod tests {
         }
     }
 
-    // Existing tests (preserved)
     #[test]
     fn maps_order_not_found_error() {
         let body = json!({

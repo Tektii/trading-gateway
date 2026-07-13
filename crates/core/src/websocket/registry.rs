@@ -182,16 +182,13 @@ impl ProviderRegistry {
     ) -> Result<(), crate::error::GatewayError> {
         let mut providers = self.shared_providers.write().await;
 
-        // Find any provider that can handle this symbol
         for (_, shared) in providers.iter_mut() {
-            // Check if already subscribed to quotes for this symbol
             if shared.symbols.contains(&symbol.to_string())
                 && shared.event_types.iter().any(|e| e == "quote")
             {
                 return Ok(());
             }
 
-            // Try to subscribe dynamically
             if let Err(e) = shared
                 .provider
                 .subscribe(vec![symbol.to_string()], vec!["quote".to_string()])
@@ -205,7 +202,6 @@ impl ProviderRegistry {
                 continue;
             }
 
-            // Update subscription state
             if !shared.symbols.contains(&symbol.to_string()) {
                 shared.symbols.push(symbol.to_string());
             }
@@ -225,10 +221,6 @@ impl ProviderRegistry {
         tracing::debug!(symbol, "No provider available for quote subscription");
         Ok(())
     }
-
-    // =========================================================================
-    // Provider Registration
-    // =========================================================================
 
     /// Register an already-connected provider.
     ///
@@ -255,7 +247,6 @@ impl ProviderRegistry {
         symbols: Vec<String>,
         event_types: Vec<String>,
     ) -> Result<(), WebSocketError> {
-        // Check if already connected
         {
             let shared = self.shared_providers.read().await;
             if shared.contains_key(&platform) {
@@ -282,16 +273,11 @@ impl ProviderRegistry {
             shared_guard.insert(platform, shared);
         }
 
-        // Start event broadcasting task for this platform
         self.spawn_provider_event_task(platform).await;
 
         info!(platform = %platform, "Provider registered and broadcasting started");
         Ok(())
     }
-
-    // =========================================================================
-    // Event Router Registration
-    // =========================================================================
 
     /// Register an `EventRouter` for a platform.
     ///
@@ -353,10 +339,6 @@ impl ProviderRegistry {
         routers.contains_key(&platform)
     }
 
-    // =========================================================================
-    // ACK Bridge
-    // =========================================================================
-
     /// Set the ACK bridge for routing strategy ACKs.
     ///
     /// This should be called when setting up a provider that requires
@@ -396,10 +378,6 @@ impl ProviderRegistry {
         }
     }
 
-    // =========================================================================
-    // Internal Broadcast Channel
-    // =========================================================================
-
     /// Subscribe to internal order updates.
     ///
     /// Returns a receiver that will receive `InternalTradingEvent` wrappers
@@ -414,10 +392,6 @@ impl ProviderRegistry {
     pub fn order_updates_sender(&self) -> broadcast::Sender<InternalTradingEvent> {
         self.internal_broadcast_sender.clone()
     }
-
-    // =========================================================================
-    // Strategy Connection Management
-    // =========================================================================
 
     /// Register a strategy connection to receive events.
     pub async fn register_strategy_connection(&self, conn_id: Uuid) {
@@ -460,10 +434,6 @@ impl ProviderRegistry {
     pub async fn connected_strategy_count(&self) -> usize {
         self.connected_strategies.read().await.len()
     }
-
-    // =========================================================================
-    // Provider Status
-    // =========================================================================
 
     /// Check if at least one shared provider is connected.
     #[must_use]
@@ -517,10 +487,6 @@ impl ProviderRegistry {
             .map(|p| p.staleness.stale_instruments_with_times())
     }
 
-    // =========================================================================
-    // Position Synthesis
-    // =========================================================================
-
     /// Spawn a task to process internal trading events and synthesize position events.
     ///
     /// This task receives `InternalTradingEvent` from the internal channel and:
@@ -544,7 +510,6 @@ impl ProviderRegistry {
                     result = receiver.recv() => {
                         match result {
                             Ok(internal_event) => {
-                                // Handle reconnection signals
                                 if matches!(
                                     &internal_event.message,
                                     WsMessage::Connection {
@@ -580,7 +545,6 @@ impl ProviderRegistry {
                                     _ => continue,
                                 };
 
-                                // Get the EventRouter for this platform
                                 let router = {
                                     let routers = event_routers.read().await;
                                     routers.get(&internal_event.platform).cloned()
@@ -590,7 +554,6 @@ impl ProviderRegistry {
                                     continue;
                                 };
 
-                                // Determine position_qty: use provided value or calculate
                                 let position_qty = internal_event.context
                                     .as_ref()
                                     .and_then(|ctx| ctx.position_qty)
@@ -660,10 +623,6 @@ impl ProviderRegistry {
         }
     }
 
-    // =========================================================================
-    // Event Broadcasting
-    // =========================================================================
-
     /// Spawn background task for a platform to broadcast events.
     ///
     /// If an `EventRouter` is registered for this platform, events are routed
@@ -727,7 +686,6 @@ impl ProviderRegistry {
             let mut backtest_terminal_relayed = false;
 
             'outer: loop {
-                // === Inner loop: process events from the current stream ===
                 loop {
                     tokio::select! {
                         () = cancel.cancelled() => {
@@ -747,7 +705,6 @@ impl ProviderRegistry {
                                     backtest_terminal_relayed = true;
                                 }
 
-                                // Clear staleness and notify strategies on first fresh tick
                                 if let Some((symbol, stale_since)) =
                                     Self::maybe_clear_staleness(&event, &staleness)
                                 {
@@ -760,7 +717,6 @@ impl ProviderRegistry {
                                         .await;
                                 }
 
-                                // Forward quote prices to trailing stop price source
                                 if let WsMessage::QuoteData { ref quote, ref timestamp } = event
                                     && let Some(ref source) = price_source_snapshot {
                                         source.handle_quote(
@@ -770,7 +726,6 @@ impl ProviderRegistry {
                                         );
                                     }
 
-                                // Track rate limit events
                                 if let WsMessage::RateLimit { event: ref rate_event, .. } = event {
                                     metrics::counter!(
                                         "gateway_rate_limit_events_total",
@@ -780,7 +735,6 @@ impl ProviderRegistry {
                                     .increment(1);
                                 }
 
-                                // Route through EventRouter if registered
                                 Self::route_event_through_router(
                                     &event,
                                     platform,
@@ -788,8 +742,6 @@ impl ProviderRegistry {
                                     &trading_adapters,
                                 ).await;
 
-                                // Enrich order events with correlation IDs and
-                                // clean up correlation on terminal states
                                 let event = match event {
                                     WsMessage::Order { event: evt, mut order, parent_order_id, timestamp } => {
                                         order.correlation_id = correlation_store.get(&order.id);
@@ -813,7 +765,7 @@ impl ProviderRegistry {
                                 // resolves SUBSCRIPTIONS at startup against its
                                 // instrument catalog) bypass the registry's filter —
                                 // re-filtering with weaker pattern semantics is the
-                                // class of bug TEK-268 was tracking.
+                                // class of bug this guards against.
                                 let should_broadcast = filters_events_upstream
                                     || subscription_filter.matches(&event, platform);
                                 let delivered = if should_broadcast {
@@ -842,7 +794,7 @@ impl ProviderRegistry {
                                     // Registry filter declined to broadcast. Treat the
                                     // event as delivered so the engine cannot deadlock
                                     // waiting on an event the registry deliberately
-                                    // dropped (TEK-270 deadlock avoidance). Moot for
+                                    // dropped (deadlock avoidance). Moot for
                                     // tektii backtest mode (filters upstream); live and
                                     // other providers rely on this branch.
                                     debug!(
@@ -881,7 +833,6 @@ impl ProviderRegistry {
                                     }
                                 }
 
-                                // Emit fill/cancel events to internal channel
                                 if matches!(event, WsMessage::Order {
                                     event: OrderEventType::OrderFilled
                                         | OrderEventType::OrderPartiallyFilled
@@ -908,11 +859,7 @@ impl ProviderRegistry {
                     }
                 }
 
-                // === Stream closed — reconnect or exit ===
-
                 if !supports_reconnection {
-                    // Notify strategies and exit (e.g., Tektii engine).
-
                     if backtest_terminal_relayed {
                         // The provider already relayed a real, in-band
                         // `backtest_complete` terminal and its flush-ack
@@ -970,7 +917,6 @@ impl ProviderRegistry {
                     break 'outer;
                 }
 
-                // Notify strategies of broker disconnect
                 let disconnect_msg = WsMessage::broker_disconnected(platform);
                 connection_manager.broadcast(disconnect_msg).await;
                 metrics::counter!(
@@ -979,7 +925,6 @@ impl ProviderRegistry {
                 )
                 .increment(1);
 
-                // Mark all instruments as stale
                 let symbols = {
                     let shared_guard = shared_providers_clone.read().await;
                     shared_guard
@@ -989,20 +934,16 @@ impl ProviderRegistry {
                 };
                 staleness.mark_all_stale(&symbols);
 
-                // Notify strategies which instruments are stale
                 if !symbols.is_empty() {
                     let msg = WsMessage::data_stale(platform, symbols);
                     connection_manager.broadcast(msg).await;
                 }
 
-                // Create reconnection handler
                 let mut handler = ReconnectionHandler::new(reconnection_config.clone());
                 handler.on_disconnect();
 
-                // === Reconnection loop with exponential backoff ===
                 let reconnected = loop {
                     let Some(delay) = handler.next_backoff() else {
-                        // Max retry duration exceeded
                         handler.on_gave_up();
                         let msg = WsMessage::broker_connection_failed(platform);
                         connection_manager.broadcast(msg).await;
@@ -1030,7 +971,6 @@ impl ProviderRegistry {
                         "Attempting broker reconnection"
                     );
 
-                    // Wait for backoff delay (or shutdown)
                     tokio::select! {
                         () = cancel.cancelled() => {
                             info!(platform = %platform, "Shutdown during reconnection backoff");
@@ -1039,7 +979,6 @@ impl ProviderRegistry {
                         () = tokio::time::sleep(delay) => {}
                     }
 
-                    // Attempt reconnection
                     let result = {
                         let shared_guard = shared_providers_clone.read().await;
                         if let Some(p) = shared_guard.get(&platform) {
@@ -1075,7 +1014,6 @@ impl ProviderRegistry {
                                 router.reconcile_after_reconnect().await;
                             }
 
-                            // Notify strategies of reconnection
                             let msg = WsMessage::broker_reconnected(platform, gap);
                             connection_manager.broadcast(msg).await;
 
@@ -1109,14 +1047,11 @@ impl ProviderRegistry {
                 if !reconnected {
                     break 'outer;
                 }
-
-                // Continue outer loop — back to processing events from new stream
             }
 
             debug!(platform = %platform, "Platform task completed");
         });
 
-        // Store the task handle
         let mut shared_guard = self.shared_providers.write().await;
         if let Some(p) = shared_guard.get_mut(&platform) {
             p.task = Some(task);
@@ -1206,10 +1141,6 @@ impl ProviderRegistry {
             })
         })
     }
-
-    // =========================================================================
-    // Disconnect / Shutdown
-    // =========================================================================
 
     /// Disconnect a specific shared provider.
     pub async fn disconnect_shared_provider(

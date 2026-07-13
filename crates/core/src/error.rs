@@ -128,7 +128,6 @@ pub struct ApiError {
 /// Gateway error types.
 #[derive(Error, Debug)]
 pub enum GatewayError {
-    // === 400 Bad Request ===
     /// Invalid request format or parameters
     #[error("Invalid request: {message}")]
     InvalidRequest {
@@ -153,7 +152,6 @@ pub enum GatewayError {
     #[error("Validation failed: {0}")]
     ValidationError(#[from] validator::ValidationErrors),
 
-    // === 401 Unauthorized ===
     /// Authentication failed or credentials invalid
     #[error("Unauthorized: {reason}")]
     Unauthorized {
@@ -163,7 +161,6 @@ pub enum GatewayError {
         code: String,
     },
 
-    // === 404 Not Found ===
     /// Order not found
     #[error("Order not found: {id}")]
     OrderNotFound {
@@ -192,7 +189,6 @@ pub enum GatewayError {
         id: String,
     },
 
-    // === 409 Conflict ===
     /// Order cannot be modified (already filled, cancelled, etc.)
     #[error("Order cannot be modified: {reason}")]
     OrderNotModifiable {
@@ -209,7 +205,6 @@ pub enum GatewayError {
         message: String,
     },
 
-    // === 422 Unprocessable Entity ===
     /// Order rejected by the exchange/broker
     #[error("Order rejected: {reason}")]
     OrderRejected {
@@ -221,7 +216,6 @@ pub enum GatewayError {
         details: Option<serde_json::Value>,
     },
 
-    // === 429 Rate Limited ===
     /// Rate limit exceeded
     #[error("Rate limit exceeded")]
     RateLimited {
@@ -231,7 +225,6 @@ pub enum GatewayError {
         reset_at: Option<chrono::DateTime<chrono::Utc>>,
     },
 
-    // === 500 Internal Server Error ===
     /// Internal server error
     #[error("Internal error: {message}")]
     Internal {
@@ -242,7 +235,6 @@ pub enum GatewayError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    // === 502 Bad Gateway ===
     /// Error from upstream provider
     #[error("Provider error: {message}")]
     ProviderError {
@@ -255,7 +247,6 @@ pub enum GatewayError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    // === 503 Service Unavailable ===
     /// Gateway is shutting down — reject new orders
     #[error("Gateway is shutting down")]
     ShuttingDown,
@@ -267,7 +258,6 @@ pub enum GatewayError {
         message: String,
     },
 
-    // === 501 Not Implemented ===
     /// Operation not supported by this provider
     #[error("{operation} not supported on {provider}")]
     UnsupportedOperation {
@@ -668,8 +658,6 @@ mod tests {
         assert_eq!(json["code"], "ORDER_NOT_FOUND");
     }
 
-    // --- Error envelope format tests (6.4.1) ---
-
     fn check_envelope(err: &GatewayError) -> (StatusCode, serde_json::Value) {
         let status = err.status_code();
         let api_error = err.to_api_error();
@@ -945,8 +933,6 @@ mod tests {
         assert_eq!(json["code"], "PROVIDER_UNAVAILABLE");
         assert!(json.get("details").is_none() || json["details"].is_null());
     }
-
-    // --- Provider error passthrough tests (6.4.4) ---
 
     #[test]
     fn provider_error_preserves_adapter_context_in_json() {

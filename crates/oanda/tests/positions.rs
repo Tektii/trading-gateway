@@ -8,10 +8,6 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models::{ClosePositionRequest, OrderStatus, PositionSide};
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Get All Positions
-// =========================================================================
-
 #[tokio::test]
 async fn get_positions_all() {
     let (server, base_url) = start_mock_server().await;
@@ -85,10 +81,6 @@ async fn get_positions_empty() {
     let positions = adapter.get_positions(None).await.unwrap();
     assert!(positions.is_empty());
 }
-
-// =========================================================================
-// Get Single Position (various ID formats)
-// =========================================================================
 
 #[tokio::test]
 async fn get_position_long_suffix() {
@@ -185,10 +177,6 @@ async fn get_position_empty_sides() {
     let err = adapter.get_position("EUR_USD_LONG").await.unwrap_err();
     assert!(matches!(err, GatewayError::PositionNotFound { .. }));
 }
-
-// =========================================================================
-// Close Position
-// =========================================================================
 
 #[tokio::test]
 async fn close_position_long_full() {

@@ -1,7 +1,7 @@
-//! TEK-271: ACK round-trip for engine-placed SL/TP fills under the Tektii
+//! ACK round-trip for engine-placed SL/TP fills under the Tektii
 //! backtest provider.
 //!
-//! Under the TEK-268 simplification, every engine event that produces a
+//! Every engine event that produces a
 //! downstream `WsMessage` registers pending in `TektiiAckBridge` and waits for
 //! a strategy ACK. This includes Order(`Filled`) events for SL/TP orders the
 //! strategy never directly placed (the engine fills them as part of bracket
@@ -114,7 +114,7 @@ async fn setup_pipeline() -> (
     (server, engine_tx, engine_rx, registry, out_rx)
 }
 
-/// TEK-271: an engine-placed SL/TP fill reaches the strategy, the strategy
+/// An engine-placed SL/TP fill reaches the strategy, the strategy
 /// ACK drains the auto-tracked pending entry, and the engine receives a
 /// `ClientMessage::EventAck` carrying the original `event_id`.
 ///
@@ -136,7 +136,7 @@ async fn engine_placed_sl_fill_acks_round_trip() {
     // outbound frame.
     let (received, received_id) = timeout(Duration::from_secs(2), out_rx.recv())
         .await
-        .expect("strategy never received SL/TP fill (TEK-271)")
+        .expect("strategy never received SL/TP fill")
         .expect("strategy channel closed before fill arrived");
 
     assert_eq!(received_id.as_deref(), Some(SL_FILL_EVENT_ID));
@@ -157,7 +157,7 @@ async fn engine_placed_sl_fill_acks_round_trip() {
 
     let raw = timeout(Duration::from_secs(2), engine_rx.recv())
         .await
-        .expect("engine never received EventAck — backtest would stall (TEK-271)")
+        .expect("engine never received EventAck — backtest would stall")
         .expect("engine channel closed before EventAck arrived");
 
     match parse_client_message(&raw) {
@@ -176,7 +176,7 @@ async fn engine_placed_sl_fill_acks_round_trip() {
     server.shutdown().await;
 }
 
-/// TEK-271 failure-mode witness: if the strategy never ACKs (the symptom a
+/// Failure-mode witness: if the strategy never ACKs (the symptom a
 /// regression in the auto-drain path would produce), the engine never
 /// receives an `EventAck` and the backtest stalls.
 ///

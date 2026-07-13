@@ -40,19 +40,10 @@ use tektii_gateway_core::models::{
     Position, PositionSide, Quote, Side, Timeframe, Trade, TradeQueryParams, TradingPlatform,
 };
 
-// ============================================================================
-// Constants
-// ============================================================================
-
 /// Maximum length for Saxo `ExternalReference` field.
 const MAX_EXTERNAL_REFERENCE_LEN: usize = 50;
 
-/// Default asset types to load instruments for.
 const DEFAULT_ASSET_TYPES: &[&str] = &["FxSpot", "CfdOnIndex", "CfdOnStock", "CfdOnFutures"];
-
-// ============================================================================
-// Adapter
-// ============================================================================
 
 /// Saxo Bank REST API adapter implementing `TradingAdapter`.
 pub struct SaxoAdapter {
@@ -67,7 +58,6 @@ pub struct SaxoAdapter {
     /// Provider capabilities.
     capabilities: SaxoCapabilities,
 
-    // === Event Infrastructure ===
     /// State Manager for caching orders and positions.
     state_manager: Arc<StateManager>,
     /// Exit Handler for managing stop-loss and take-profit orders.
@@ -99,7 +89,6 @@ impl SaxoAdapter {
     ) -> Result<Self, SaxoError> {
         let http_client = SaxoHttpClient::new(credentials, platform)?;
 
-        // Load instrument map
         let instrument_map = SaxoInstrumentMap::load(&http_client, DEFAULT_ASSET_TYPES).await?;
         if instrument_map.is_empty() {
             return Err(SaxoError::Config(
@@ -111,7 +100,6 @@ impl SaxoAdapter {
             "Saxo instrument map loaded"
         );
 
-        // Load client key
         let client_response: SaxoClientResponse = http_client.get("/port/v1/clients/me").await?;
         let client_key = client_response.client_key;
         if client_key.is_empty() {
@@ -175,10 +163,6 @@ impl SaxoAdapter {
         self
     }
 
-    // =========================================================================
-    // Event Infrastructure Accessors
-    // =========================================================================
-
     /// Returns a reference to the `StateManager`.
     #[must_use]
     #[allow(dead_code)]
@@ -198,10 +182,6 @@ impl SaxoAdapter {
         Arc::clone(&self.event_router)
     }
 
-    // =========================================================================
-    // Circuit Breaker
-    // =========================================================================
-
     async fn check_circuit_breaker(&self) -> GatewayResult<()> {
         let breaker = self.circuit_breaker.read().await;
         if breaker.is_open() {
@@ -216,10 +196,6 @@ impl SaxoAdapter {
             breaker.record_failure();
         }
     }
-
-    // =========================================================================
-    // Symbol Resolution
-    // =========================================================================
 
     fn resolve_symbol(
         &self,
@@ -236,10 +212,6 @@ impl SaxoAdapter {
             .map(ToString::to_string)
             .map_err(GatewayError::from)
     }
-
-    // =========================================================================
-    // Order Type Mapping
-    // =========================================================================
 
     fn to_saxo_order_type(order_type: tektii_gateway_core::models::OrderType) -> &'static str {
         match order_type {
@@ -270,10 +242,6 @@ impl SaxoAdapter {
         }
     }
 
-    // =========================================================================
-    // Side Mapping
-    // =========================================================================
-
     fn to_saxo_buy_sell(side: Side) -> &'static str {
         match side {
             Side::Buy => "Buy",
@@ -292,10 +260,6 @@ impl SaxoAdapter {
             }),
         }
     }
-
-    // =========================================================================
-    // Duration (Time-in-Force) Mapping
-    // =========================================================================
 
     fn to_saxo_duration(tif: tektii_gateway_core::models::TimeInForce) -> SaxoOrderDuration {
         let duration_type = match tif {
@@ -325,10 +289,6 @@ impl SaxoAdapter {
         }
     }
 
-    // =========================================================================
-    // Order Status Mapping
-    // =========================================================================
-
     pub(crate) fn from_saxo_order_status(
         status: &str,
     ) -> GatewayResult<tektii_gateway_core::models::OrderStatus> {
@@ -349,10 +309,6 @@ impl SaxoAdapter {
             }),
         }
     }
-
-    // =========================================================================
-    // Translation Helpers
-    // =========================================================================
 
     fn translate_order(&self, saxo_order: &SaxoOrder) -> GatewayResult<Order> {
         let symbol = self.resolve_uic(saxo_order.uic, &saxo_order.asset_type)?;
@@ -603,10 +559,6 @@ impl SaxoAdapter {
         })
     }
 
-    // =========================================================================
-    // Pre-Trade Margin Precheck
-    // =========================================================================
-
     async fn precheck_order(&self, request: &SaxoOrderRequest) -> GatewayResult<()> {
         let result: Result<SaxoPrecheckResponse, SaxoError> = self
             .http_client
@@ -655,10 +607,6 @@ impl SaxoAdapter {
                 .map(|pct| serde_json::json!({ "margin_utilization_pct": pct })),
         })
     }
-
-    // =========================================================================
-    // Order Request Building
-    // =========================================================================
 
     fn build_order_request(
         &self,
@@ -765,10 +713,6 @@ impl SaxoAdapter {
         Some(related)
     }
 
-    // =========================================================================
-    // Timeframe Mapping
-    // =========================================================================
-
     fn to_saxo_horizon(params: &BarParams) -> u32 {
         match params.timeframe {
             Timeframe::OneMinute => 1,
@@ -787,10 +731,6 @@ impl SaxoAdapter {
     }
 }
 
-// ============================================================================
-// Decimal helper
-// ============================================================================
-
 trait DecimalToF64 {
     fn to_f64(&self) -> Option<f64>;
 }
@@ -801,10 +741,6 @@ impl DecimalToF64 for Decimal {
         f64::from_str(&self.to_string()).ok()
     }
 }
-
-// ============================================================================
-// TradingAdapter Implementation
-// ============================================================================
 
 #[async_trait]
 impl TradingAdapter for SaxoAdapter {
@@ -819,10 +755,6 @@ impl TradingAdapter for SaxoAdapter {
     fn provider_name(&self) -> &'static str {
         "saxo"
     }
-
-    // =========================================================================
-    // Account
-    // =========================================================================
 
     #[instrument(skip(self), name = "saxo_get_account")]
     async fn get_account(&self) -> GatewayResult<Account> {
@@ -859,10 +791,6 @@ impl TradingAdapter for SaxoAdapter {
             currency: resp.currency,
         })
     }
-
-    // =========================================================================
-    // Orders
-    // =========================================================================
 
     #[instrument(skip(self, request), name = "saxo_submit_order")]
     async fn submit_order(
@@ -1059,10 +987,6 @@ impl TradingAdapter for SaxoAdapter {
         })
     }
 
-    // =========================================================================
-    // Trades
-    // =========================================================================
-
     #[instrument(skip(self, params), name = "saxo_get_trades")]
     async fn get_trades(&self, params: &TradeQueryParams) -> GatewayResult<Vec<Trade>> {
         self.check_circuit_breaker().await?;
@@ -1091,10 +1015,6 @@ impl TradingAdapter for SaxoAdapter {
 
         Ok(trades)
     }
-
-    // =========================================================================
-    // Positions
-    // =========================================================================
 
     #[instrument(skip(self), name = "saxo_get_positions")]
     async fn get_positions(&self, symbol: Option<&str>) -> GatewayResult<Vec<Position>> {
@@ -1207,10 +1127,6 @@ impl TradingAdapter for SaxoAdapter {
         })
     }
 
-    // =========================================================================
-    // Market Data
-    // =========================================================================
-
     #[instrument(skip(self), name = "saxo_get_quote")]
     async fn get_quote(&self, symbol: &str) -> GatewayResult<Quote> {
         self.check_circuit_breaker().await?;
@@ -1266,10 +1182,6 @@ impl TradingAdapter for SaxoAdapter {
             .collect())
     }
 
-    // =========================================================================
-    // Capabilities & Status
-    // =========================================================================
-
     async fn get_capabilities(&self) -> GatewayResult<Capabilities> {
         Ok(self.capabilities.capabilities())
     }
@@ -1309,10 +1221,6 @@ impl TradingAdapter for SaxoAdapter {
         })
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

@@ -12,10 +12,6 @@ use tektii_gateway_core::websocket::messages::{OrderEventType, WsMessage};
 const SPOT: TradingPlatform = TradingPlatform::BinanceSpotLive;
 const FUTURES: TradingPlatform = TradingPlatform::BinanceFuturesLive;
 
-// ============================================================================
-// Market Data — Book Ticker
-// ============================================================================
-
 #[test]
 fn test_book_ticker_parses_to_quote() {
     let json = r#"{"stream":"btcusdt@bookTicker","data":{"u":12345,"s":"BTCUSDT","b":"50000.50","B":"1.5","a":"50001.00","A":"2.0"}}"#;
@@ -35,10 +31,6 @@ fn test_book_ticker_parses_to_quote() {
         other => panic!("Expected QuoteData, got {other:?}"),
     }
 }
-
-// ============================================================================
-// Market Data — Kline
-// ============================================================================
 
 #[test]
 fn test_kline_parses_to_candle() {
@@ -76,10 +68,6 @@ fn test_kline_1h_parses_timeframe() {
     }
 }
 
-// ============================================================================
-// Market Data — Unknown / Subscription Responses
-// ============================================================================
-
 #[test]
 fn test_subscription_response_ignored() {
     let json = r#"{"result":null,"id":1}"#;
@@ -100,10 +88,6 @@ fn test_malformed_json_returns_empty() {
     let events = process_market_message(json, SPOT);
     assert!(events.is_empty());
 }
-
-// ============================================================================
-// Spot — executionReport
-// ============================================================================
 
 fn spot_execution_report(execution_type: &str, order_status: &str) -> String {
     format!(
@@ -169,7 +153,6 @@ fn test_spot_cancel_uses_original_client_order_id() {
     if let WsMessage::Order { event, order, .. } = &events[0] {
         assert_eq!(*event, OrderEventType::OrderCancelled);
         assert_eq!(order.status, OrderStatus::Cancelled);
-        // On cancel, should use the original client order ID
         assert_eq!(order.client_order_id.as_deref(), Some("original123"));
     } else {
         panic!("Expected Order");
@@ -204,10 +187,6 @@ fn test_spot_expired() {
     }
 }
 
-// ============================================================================
-// Spot — outboundAccountPosition
-// ============================================================================
-
 #[test]
 fn test_spot_account_update() {
     let json = r#"{"e":"outboundAccountPosition","E":1700000000000,"B":[{"a":"USDT","f":"10000.50","l":"500.00"},{"a":"BTC","f":"0.5","l":"0.0"}]}"#;
@@ -216,16 +195,11 @@ fn test_spot_account_update() {
 
     match &events[0] {
         WsMessage::Account { account, .. } => {
-            // Sum of free balances
             assert!(account.balance > rust_decimal::Decimal::ZERO);
         }
         other => panic!("Expected Account, got {other:?}"),
     }
 }
-
-// ============================================================================
-// Futures — ORDER_TRADE_UPDATE
-// ============================================================================
 
 #[test]
 fn test_futures_order_fill() {
@@ -266,10 +240,6 @@ fn test_futures_trailing_stop_order() {
     }
 }
 
-// ============================================================================
-// Futures — ACCOUNT_UPDATE
-// ============================================================================
-
 #[test]
 fn test_futures_account_update() {
     let json = r#"{"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"ORDER","B":[{"a":"USDT","wb":"15000.50","cw":"14500.00"}],"P":[{"s":"BTCUSDT","pa":"0.1","ep":"50000","up":"50.00","mt":"cross","ps":"LONG"}]}}"#;
@@ -284,10 +254,6 @@ fn test_futures_account_update() {
         other => panic!("Expected Account, got {other:?}"),
     }
 }
-
-// ============================================================================
-// Edge Cases
-// ============================================================================
 
 #[test]
 fn test_unknown_user_data_event_ignored() {
@@ -312,7 +278,6 @@ fn test_malformed_user_data_returns_empty() {
 
 #[test]
 fn test_spot_event_on_futures_ignored() {
-    // executionReport sent to a futures parser should be ignored
     let json = spot_execution_report("NEW", "NEW");
     let events = process_user_data_message(&json, FUTURES, true);
     assert!(events.is_empty());

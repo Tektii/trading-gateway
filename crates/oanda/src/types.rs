@@ -6,10 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
-// Account Types
-// ============================================================================
-
 /// Response from `GET /v3/accounts/{id}/summary`.
 #[derive(Debug, Deserialize)]
 pub struct OandaAccountResponse {
@@ -38,10 +34,6 @@ pub struct OandaAccount {
     /// Account currency (e.g., "USD").
     pub currency: String,
 }
-
-// ============================================================================
-// Order Types -- Responses
-// ============================================================================
 
 /// Response from `GET /v3/accounts/{id}/orders`.
 #[derive(Debug, Deserialize)]
@@ -159,10 +151,6 @@ pub struct OandaTransaction {
     pub financing: Option<String>,
 }
 
-// ============================================================================
-// Position Types
-// ============================================================================
-
 /// Response from `GET /v3/accounts/{id}/openPositions`.
 #[derive(Debug, Deserialize)]
 pub struct OandaPositionsResponse {
@@ -206,10 +194,6 @@ pub struct OandaPositionSide {
     pub unrealized_pl: Option<String>,
 }
 
-// ============================================================================
-// Pricing Types
-// ============================================================================
-
 /// Response from `GET /v3/accounts/{id}/pricing`.
 #[derive(Debug, Deserialize)]
 pub struct OandaPricingResponse {
@@ -239,10 +223,6 @@ pub struct OandaPriceBucket {
     /// Liquidity available at this price.
     pub liquidity: i64,
 }
-
-// ============================================================================
-// Candle Types
-// ============================================================================
 
 /// Response from `GET /v3/instruments/{instrument}/candles`.
 #[derive(Debug, Deserialize)]
@@ -284,10 +264,6 @@ pub struct OandaCandleData {
     pub c: String,
 }
 
-// ============================================================================
-// Trade Types
-// ============================================================================
-
 /// Response from `GET /v3/accounts/{id}/trades`.
 #[derive(Debug, Deserialize)]
 pub struct OandaTradesResponse {
@@ -318,10 +294,6 @@ pub struct OandaTrade {
     #[serde(default, rename = "unrealizedPL")]
     pub unrealized_pl: Option<String>,
 }
-
-// ============================================================================
-// Request Types
-// ============================================================================
 
 /// Wrapper for order creation requests.
 #[derive(Debug, Serialize)]
@@ -437,10 +409,6 @@ pub struct OandaClientExtensions {
     pub comment: Option<String>,
 }
 
-// ============================================================================
-// Error Response
-// ============================================================================
-
 /// Oanda error response body.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -448,10 +416,6 @@ pub struct OandaErrorResponse {
     /// Error message from the API.
     pub error_message: Option<String>,
 }
-
-// ============================================================================
-// Streaming Types (HTTP chunked transfer -- NDJSON)
-// ============================================================================
 
 /// A message from the Oanda pricing stream (NDJSON line).
 ///
@@ -572,10 +536,6 @@ pub struct OandaStreamHeartbeat {
     /// Timestamp (RFC 3339).
     pub time: String,
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -833,7 +793,6 @@ mod tests {
         assert_eq!(order["timeInForce"], "FOK");
         assert_eq!(order["stopLossOnFill"]["price"], "1.08000");
         assert_eq!(order["takeProfitOnFill"]["price"], "1.09500");
-        // Trailing stop should be absent
         assert!(order.get("trailingStopLossOnFill").is_none());
     }
 
@@ -857,7 +816,6 @@ mod tests {
         assert_eq!(order["type"], "LIMIT");
         assert_eq!(order["units"], "-5000");
         assert_eq!(order["price"], "1.27500");
-        // No bracket fields
         assert!(order.get("stopLossOnFill").is_none());
         assert!(order.get("takeProfitOnFill").is_none());
     }
@@ -914,10 +872,6 @@ mod tests {
         assert_eq!(tx.order_id.as_deref(), Some("6357"));
         assert_eq!(tx.trade_id.as_deref(), Some("6358"));
     }
-
-    // ========================================================================
-    // Streaming type tests
-    // ========================================================================
 
     #[test]
     fn deserialize_price_stream_message() {
@@ -1086,7 +1040,6 @@ mod tests {
         let tx: OandaTransactionStreamLine = serde_json::from_str(json).unwrap();
         assert_eq!(tx.commission.as_deref(), Some("0.0000"));
         assert_eq!(tx.financing.as_deref(), Some("-0.5000"));
-        // A fill line carries no positionFinancings.
         assert!(tx.position_financings.is_none());
     }
 

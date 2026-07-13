@@ -63,14 +63,12 @@ async fn handle_socket(
     let conn_id = Uuid::new_v4();
     info!("New WebSocket connection from {} (ID: {})", addr, conn_id);
 
-    // Split socket into sender and receiver
     let (ws_sender, ws_receiver) = socket.split();
 
-    // Create channel for outgoing messages. Each item is a `WsMessage` plus an
-    // optional engine `event_id` injected into the frame at serialization.
+    // Each outbound item is a `WsMessage` plus an optional engine `event_id`
+    // injected into the frame at serialization.
     let (tx, rx) = mpsc::channel::<(WsMessage, Option<String>)>(WS_CLIENT_CHANNEL_CAPACITY);
 
-    // Create connection object
     let connection = WsConnection {
         id: conn_id,
         sender: tx,
@@ -79,11 +77,9 @@ async fn handle_socket(
         connected_at: std::time::Instant::now(),
     };
 
-    // Register connection with manager
     connection_manager.add_connection(connection).await;
     info!("Connection {} registered with manager", conn_id);
 
-    // Register with provider registry to receive events
     provider_registry
         .register_strategy_connection(conn_id)
         .await;
@@ -113,7 +109,6 @@ async fn handle_socket(
         }
     }
 
-    // Proceed directly to message handling
     handle_connection(
         conn_id,
         ws_sender,
@@ -162,7 +157,6 @@ async fn handle_connection(
         conn_id
     );
 
-    // Spawn task to handle outgoing messages
     let manager_clone = connection_manager.clone();
     let send_task = tokio::spawn(async move {
         while let Some((msg, event_id)) = rx.recv().await {
@@ -195,7 +189,6 @@ async fn handle_connection(
         debug!("Send task for connection {} completed", conn_id);
     });
 
-    // Handle incoming messages from the strategy
     let manager_clone = connection_manager.clone();
     let registry_clone = provider_registry.clone();
     while let Some(result) = ws_receiver.next().await {

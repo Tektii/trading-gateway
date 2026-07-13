@@ -42,7 +42,6 @@ where
     type Rejection = GatewayError;
 
     async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
-        // First, try to deserialize the JSON
         let Json(value) = Json::<T>::from_request(req, state).await.map_err(|e| {
             GatewayError::InvalidRequest {
                 message: format!("Invalid JSON: {e}"),
@@ -50,7 +49,6 @@ where
             }
         })?;
 
-        // Then validate
         value.validate().map_err(GatewayError::ValidationError)?;
 
         Ok(Self(value))
@@ -99,7 +97,6 @@ where
             return Ok(Self(None));
         }
 
-        // Try to extract and validate JSON
         match ValidatedJson::<T>::from_request(req, state).await {
             Ok(ValidatedJson(value)) => Ok(Self(Some(value))),
             // Empty body or null is fine

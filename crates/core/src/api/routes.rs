@@ -36,10 +36,6 @@ use crate::websocket::messages::{
 use super::extractors::{OptionalValidatedJson, ValidatedJson};
 use super::state::GatewayState;
 
-// ============================================================================
-// Handler-defined types
-// ============================================================================
-
 /// Query parameters for cancelling all orders.
 #[derive(Debug, Clone, Default, serde::Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct CancelAllOrdersParams {
@@ -60,10 +56,6 @@ pub struct CloseAllPositionsParams {
     /// Filter by symbol (None = close all positions)
     pub symbol: Option<String>,
 }
-
-// ============================================================================
-// Account
-// ============================================================================
 
 /// Get account information.
 ///
@@ -88,10 +80,6 @@ pub async fn get_account(
     let account = adapter.get_account().await?;
     Ok(Json(account))
 }
-
-// ============================================================================
-// Orders
-// ============================================================================
 
 /// Submit a new order.
 ///
@@ -418,10 +406,6 @@ pub async fn cancel_all_orders(
     Ok(Json(result))
 }
 
-// ============================================================================
-// Trades
-// ============================================================================
-
 /// Get trade history.
 #[utoipa::path(
     get,
@@ -446,10 +430,6 @@ pub async fn get_trades(
     let trades = adapter.get_trades(&params).await?;
     Ok(Json(trades))
 }
-
-// ============================================================================
-// Positions
-// ============================================================================
 
 /// Get open positions.
 #[utoipa::path(
@@ -567,10 +547,6 @@ pub async fn close_all_positions(
     Ok(Json(handles))
 }
 
-// ============================================================================
-// Market Data
-// ============================================================================
-
 /// Get quote for a symbol.
 #[utoipa::path(
     get,
@@ -631,10 +607,6 @@ pub async fn get_bars(
     Ok(Json(bars))
 }
 
-// ============================================================================
-// System
-// ============================================================================
-
 /// Get provider capabilities.
 #[utoipa::path(
     get,
@@ -678,10 +650,6 @@ pub async fn get_connection_status(
     let status = adapter.get_connection_status().await?;
     Ok(Json(status))
 }
-
-// ============================================================================
-// Circuit Breakers
-// ============================================================================
 
 /// Status of both circuit breakers.
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -738,7 +706,6 @@ pub async fn reset_circuit_breakers(
     let adapter = state.adapter();
     let platform = state.platform();
 
-    // Reset adapter circuit breaker
     let adapter_had_breaker = adapter.circuit_breaker_status().await.is_some();
     if adapter_had_breaker {
         let failure_count = adapter
@@ -754,7 +721,6 @@ pub async fn reset_circuit_breakers(
         );
     }
 
-    // Reset exit order circuit breaker
     if let Some(exit_handler) = state.exit_handler_registry().get(&platform) {
         let failure_count = exit_handler.circuit_breaker_failure_count().await;
         exit_handler
@@ -773,7 +739,6 @@ pub async fn reset_circuit_breakers(
 
     metrics::counter!("gateway_circuit_breaker_resets_total").increment(1);
 
-    // Return current state after reset
     let adapter_snapshot = adapter
         .circuit_breaker_status()
         .await
@@ -805,10 +770,6 @@ async fn exit_order_snapshot(state: &GatewayState) -> CircuitBreakerSnapshot {
         CircuitBreakerSnapshot::closed()
     }
 }
-
-// ============================================================================
-// Health Checks
-// ============================================================================
 
 /// Liveness probe endpoint.
 ///
@@ -896,17 +857,10 @@ pub async fn get_health(State(state): State<GatewayState>) -> impl IntoResponse 
     })
 }
 
-// ============================================================================
-// OpenAPI + Router Factory
-// ============================================================================
-
 /// `OpenAPI` documentation for the gateway API.
 #[derive(OpenApi)]
 #[openapi(
     components(schemas(
-        // ================================================================
-        // Core Enums
-        // ================================================================
         Side,
         PositionSide,
         OrderType,
@@ -916,13 +870,7 @@ pub async fn get_health(State(state): State<GatewayState>) -> impl IntoResponse 
         AssetClass,
         PositionMode,
         RejectReason,
-        // ================================================================
-        // Account
-        // ================================================================
         Account,
-        // ================================================================
-        // Orders
-        // ================================================================
         Order,
         OrderHandle,
         OrderRequest,
@@ -932,54 +880,27 @@ pub async fn get_health(State(state): State<GatewayState>) -> impl IntoResponse 
         CancelOrderResult,
         CancelAllResult,
         CancelAllOrdersParams,
-        // ================================================================
-        // Positions
-        // ================================================================
         Position,
         ClosePositionRequest,
         CloseAllPositionsParams,
         GetPositionsParams,
-        // ================================================================
-        // Trades
-        // ================================================================
         Trade,
         TradeQueryParams,
-        // ================================================================
-        // Market Data
-        // ================================================================
         Quote,
         Bar,
         BarParams,
         Timeframe,
-        // ================================================================
-        // System
-        // ================================================================
         Capabilities,
         ConnectionStatus,
-        // ================================================================
-        // Operations
-        // ================================================================
         CircuitBreakerSnapshot,
         CircuitBreakerStatusResponse,
-        // ================================================================
-        // Health
-        // ================================================================
         HealthStatus,
         ReadyStatus,
         DetailedHealthStatus,
         ProviderHealth,
         OverallStatus,
-        // ================================================================
-        // Trading Platform
-        // ================================================================
         TradingPlatform,
-        // ================================================================
-        // Error Types
-        // ================================================================
         ApiError, ErrorCode,
-        // ================================================================
-        // WebSocket Types
-        // ================================================================
         WsMessage,
         PingPayload,
         OrderEventType,
@@ -1025,30 +946,22 @@ pub struct GatewayApiDoc;
 /// let app = router.with_state(state);
 /// ```
 pub fn create_gateway_router() -> OpenApiRouter<GatewayState> {
-    // API routes — nested under /v1
     let api_routes = OpenApiRouter::new()
-        // Account
         .routes(routes!(get_account))
         // Orders - note: specific routes must come before parameterized routes
         .routes(routes!(get_order_history))
         .routes(routes!(submit_order, get_orders, cancel_all_orders))
         .routes(routes!(get_order, modify_order, cancel_order))
-        // Positions
         .routes(routes!(get_positions, close_all_positions))
         .routes(routes!(get_position, close_position))
-        // Trades
         .routes(routes!(get_trades))
-        // Market Data
         .routes(routes!(get_quote))
         .routes(routes!(get_bars))
-        // System
         .routes(routes!(get_capabilities))
         .routes(routes!(get_connection_status))
-        // Operations
         .routes(routes!(get_circuit_breaker_status))
         .routes(routes!(reset_circuit_breakers));
 
-    // Operational routes stay at root
     OpenApiRouter::with_openapi(GatewayApiDoc::openapi())
         .nest("/v1", api_routes)
         .routes(routes!(get_livez))
@@ -1070,10 +983,6 @@ mod tests {
         let (router, _api) = create_gateway_router().split_for_parts();
         router.with_state(state)
     }
-
-    // ========================================================================
-    // 4.5 — Health endpoints
-    // ========================================================================
 
     #[tokio::test]
     async fn livez_returns_200_ok() {
@@ -1122,10 +1031,6 @@ mod tests {
         assert_eq!(json["message"], "Gateway is shutting down");
     }
 
-    // ========================================================================
-    // 4.1.1 — submit_order shutdown guard
-    // ========================================================================
-
     #[tokio::test]
     async fn submit_order_returns_503_when_shutting_down() {
         let state = test_gateway_state();
@@ -1152,10 +1057,6 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["code"], "SHUTTING_DOWN");
     }
-
-    // ========================================================================
-    // 4.5 — /health detailed endpoint
-    // ========================================================================
 
     #[tokio::test]
     async fn health_returns_connected_with_single_provider() {
@@ -1185,7 +1086,6 @@ mod tests {
         let (_router, api) = create_gateway_router().split_for_parts();
         let paths: Vec<&str> = api.paths.paths.keys().map(|s| s.as_str()).collect();
 
-        // API routes should have /v1 prefix
         assert!(
             paths.contains(&"/v1/account"),
             "expected /v1/account in spec, got: {paths:?}"
@@ -1199,7 +1099,6 @@ mod tests {
             "expected /v1/positions in spec, got: {paths:?}"
         );
 
-        // Health routes should NOT have /v1 prefix
         assert!(
             paths.contains(&"/livez"),
             "expected /livez at root, got: {paths:?}"
@@ -1228,10 +1127,6 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
     }
-
-    // ========================================================================
-    // Circuit breaker endpoints
-    // ========================================================================
 
     #[tokio::test]
     async fn get_circuit_breaker_status_returns_closed_by_default() {

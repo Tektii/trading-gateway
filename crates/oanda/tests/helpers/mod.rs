@@ -17,11 +17,6 @@ pub fn test_adapter(base_url: &str) -> OandaAdapter {
         .expect("Failed to build HTTP client")
 }
 
-// =========================================================================
-// Oanda JSON response builders
-// =========================================================================
-
-/// Oanda account summary response.
 pub fn oanda_account_json() -> Value {
     json!({
         "account": {
@@ -36,7 +31,6 @@ pub fn oanda_account_json() -> Value {
     })
 }
 
-/// Oanda order response with optional overrides.
 pub fn oanda_order_json(overrides: &Value) -> Value {
     let mut base = json!({
         "id": "123",
@@ -123,7 +117,6 @@ pub fn oanda_ioc_cancel_json() -> Value {
     })
 }
 
-/// Oanda order rejection response.
 pub fn oanda_reject_json(reason: &str) -> Value {
     json!({
         "orderRejectTransaction": {
@@ -152,7 +145,6 @@ pub fn oanda_position_json(instrument: &str, long_units: &str, short_units: &str
     })
 }
 
-/// Oanda trade response.
 pub fn oanda_trade_json(instrument: &str, units: &str) -> Value {
     json!({
         "id": "1",
@@ -165,7 +157,6 @@ pub fn oanda_trade_json(instrument: &str, units: &str) -> Value {
     })
 }
 
-/// Oanda pricing (quote) response.
 pub fn oanda_pricing_json(instrument: &str) -> Value {
     json!({
         "prices": [{
@@ -177,7 +168,6 @@ pub fn oanda_pricing_json(instrument: &str) -> Value {
     })
 }
 
-/// Oanda candles (bars) response.
 pub fn oanda_candles_json() -> Value {
     json!({
         "candles": [{

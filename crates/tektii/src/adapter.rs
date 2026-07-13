@@ -66,21 +66,15 @@ impl EngineErrorBody {
 
 /// Tektii adapter implementing `TradingAdapter` for the engine.
 pub struct TektiiAdapter {
-    /// HTTP client for REST API calls
     client: Client,
     /// Base URL for engine REST API (e.g., "<http://localhost:8080>")
     rest_url: String,
     /// WebSocket URL for engine events (e.g., "<ws://localhost:8081>")
     ws_url: String,
-    /// Provider capabilities
     capabilities: TektiiCapabilities,
 
-    // === Event Infrastructure ===
-    /// State Manager for caching orders and positions
     state_manager: Arc<StateManager>,
-    /// Exit Handler for managing stop-loss and take-profit orders
     exit_handler: Arc<ExitHandler>,
-    /// Event Router for processing WebSocket events
     event_router: Arc<EventRouter>,
 }
 
@@ -98,7 +92,6 @@ impl TektiiAdapter {
         credentials: &TektiiCredentials,
         broadcaster: broadcast::Sender<WsMessage>,
     ) -> Result<Self, reqwest::Error> {
-        // Configure client with connection pooling
         let client = Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
@@ -109,16 +102,13 @@ impl TektiiAdapter {
 
         let platform = TradingPlatform::Tektii;
 
-        // Create shared StateManager
         let state_manager = Arc::new(StateManager::new());
 
-        // Create ExitHandler
         let exit_handler = Arc::new(ExitHandler::with_defaults(
             Arc::clone(&state_manager),
             platform,
         ));
 
-        // Create EventRouter
         let event_router = Arc::new(EventRouter::new(
             Arc::clone(&state_manager),
             Arc::clone(&exit_handler) as Arc<_>,
@@ -153,10 +143,6 @@ impl TektiiAdapter {
         self
     }
 
-    // =========================================================================
-    // Event Infrastructure Accessors
-    // =========================================================================
-
     /// Returns a reference to the `StateManager`.
     #[must_use]
     pub fn state_manager(&self) -> Arc<StateManager> {
@@ -180,10 +166,6 @@ impl TektiiAdapter {
     pub fn ws_url(&self) -> &str {
         &self.ws_url
     }
-
-    // =========================================================================
-    // HTTP Helpers
-    // =========================================================================
 
     /// Build provider error from message.
     fn provider_error(message: String) -> GatewayError {
@@ -235,7 +217,6 @@ impl TektiiAdapter {
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
 
-            // Map specific HTTP status codes to appropriate error types
             return match status.as_u16() {
                 429 => Err(GatewayError::RateLimited {
                     retry_after_seconds,
@@ -335,7 +316,6 @@ impl TradingAdapter for TektiiAdapter {
         let engine_handle: engine_types::OrderHandle = Self::handle_response(response).await?;
         let handle = conversions::engine_order_handle_to_api(&engine_handle);
 
-        // Register in OCO group tracking if oco_group_id is set
         if let Some(ref group_id) = oco_group_id {
             self.state_manager.add_to_oco_group(&handle.id, group_id);
         }
@@ -427,7 +407,6 @@ impl TradingAdapter for TektiiAdapter {
         // Get the original order to preserve fields not being modified
         let original_order = self.get_order(order_id).await?;
 
-        // Check if order is in a modifiable state
         match original_order.status {
             OrderStatus::Filled
             | OrderStatus::Cancelled
@@ -446,10 +425,8 @@ impl TradingAdapter for TektiiAdapter {
             }
         }
 
-        // Cancel the existing order
         self.cancel_order(order_id).await?;
 
-        // Create new order with modifications applied
         let new_request = OrderRequest {
             symbol: original_order.symbol.clone(),
             side: original_order.side,
@@ -475,7 +452,6 @@ impl TradingAdapter for TektiiAdapter {
             leverage: None,
         };
 
-        // Attempt replacement - log warning if it fails after cancel
         let handle = match self.submit_order(&new_request).await {
             Ok(h) => h,
             Err(e) => {
@@ -498,7 +474,6 @@ impl TradingAdapter for TektiiAdapter {
 
     #[instrument(skip(self), name = "tektii_cancel_order")]
     async fn cancel_order(&self, order_id: &str) -> GatewayResult<CancelOrderResult> {
-        // Delete first, then fetch the updated order
         let start = Instant::now();
         let response = self
             .client
@@ -526,7 +501,6 @@ impl TradingAdapter for TektiiAdapter {
             return Err(Self::provider_error(body));
         }
 
-        // Fetch the cancelled order to return in result
         let cancelled_order = self.get_order(order_id).await?;
 
         Ok(CancelOrderResult {
@@ -643,10 +617,8 @@ impl TradingAdapter for TektiiAdapter {
         position_id: &str,
         request: &ClosePositionRequest,
     ) -> GatewayResult<OrderHandle> {
-        // Get position to determine close order details
         let position = self.get_position(position_id).await?;
 
-        // Create a closing order (opposite side, market order)
         use tektii_gateway_core::models::{OrderType, PositionSide, Side, TimeInForce};
 
         let close_side = match position.side {
@@ -682,8 +654,6 @@ impl TradingAdapter for TektiiAdapter {
         self.submit_order(&close_request).await
     }
 
-    // === Market Data ===
-
     #[instrument(skip(self), name = "tektii_get_quote")]
     async fn get_quote(&self, symbol: &str) -> GatewayResult<Quote> {
         let start = Instant::now();
@@ -700,14 +670,12 @@ impl TradingAdapter for TektiiAdapter {
             "Engine API call completed"
         );
 
-        // Handle specific error responses
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(Self::map_not_found(response, symbol).await);
         }
 
         let engine_quote: engine_types::Quote = Self::handle_response(response).await?;
 
-        // Convert engine quote to gateway quote
         // Fail loudly on invalid timestamps to avoid time-skew bugs in simulation
         let timestamp = i64::try_from(engine_quote.timestamp)
             .ok()
@@ -743,7 +711,6 @@ impl TradingAdapter for TektiiAdapter {
         symbol: &str,
         params: &BarParams,
     ) -> GatewayResult<Vec<tektii_gateway_core::models::Bar>> {
-        // Build query parameters for engine request
         let count = params.limit.unwrap_or(100);
         let timeframe_str = format!("{}", params.timeframe);
 
@@ -765,14 +732,12 @@ impl TradingAdapter for TektiiAdapter {
             "Engine API call completed"
         );
 
-        // Handle specific error responses
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(Self::map_not_found(response, symbol).await);
         }
 
         let engine_response: engine_types::BarsResponse = Self::handle_response(response).await?;
 
-        // Convert engine bars to gateway bars
         let bars: GatewayResult<Vec<tektii_gateway_core::models::Bar>> = engine_response
             .bars
             .into_iter()
@@ -813,7 +778,6 @@ impl TradingAdapter for TektiiAdapter {
     }
 
     async fn get_connection_status(&self) -> GatewayResult<ConnectionStatus> {
-        // Simple health check - try to reach the engine
         let start = Instant::now();
         let response = self
             .client

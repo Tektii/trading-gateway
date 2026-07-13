@@ -24,15 +24,12 @@ async fn mock_price_source_subscribe_and_receive() {
 async fn current_price_returns_latest() {
     let source = MockPriceSource::new();
 
-    // No price set → error
     assert!(source.current_price("BTCUSD").await.is_err());
 
-    // Set price → returns it
     source.set_price("BTCUSD", dec!(48000));
     let price = source.current_price("BTCUSD").await.unwrap();
     assert_eq!(price, dec!(48000));
 
-    // Update price → returns new value
     source.set_price("BTCUSD", dec!(49000));
     let price = source.current_price("BTCUSD").await.unwrap();
     assert_eq!(price, dec!(49000));

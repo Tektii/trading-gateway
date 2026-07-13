@@ -71,12 +71,10 @@ async fn handler_config_max_entries_applied() {
     };
     let handler = TrailingStopHandler::new_arc(source, mock_executor(), PLATFORM, config);
 
-    // First registration succeeds
     handler
         .register("p1", &trailing_stop_order("BTCUSD"))
         .expect("first registration should succeed");
 
-    // Second registration fails (at capacity)
     let result = handler.register("p2", &trailing_stop_order("BTCUSD"));
     assert!(result.is_err(), "Should reject when at max capacity");
 }

@@ -47,10 +47,6 @@ use tektii_gateway_core::websocket::provider::{
     EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
 };
 
-// ============================================================================
-// Constants
-// ============================================================================
-
 /// Base URL for Oanda practice streaming endpoints.
 const OANDA_PRACTICE_STREAM_URL: &str = "https://stream-fxpractice.oanda.com";
 /// Base URL for Oanda live streaming endpoints.
@@ -89,10 +85,6 @@ const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// `MAX_BACKOFF` -- indicates a real outage worth stopping for and surfacing loudly.
 const MAX_CONSECUTIVE_CANDLE_POLL_FAILURES: u32 = 8;
 
-// ============================================================================
-// Error type (internal to streaming)
-// ============================================================================
-
 /// Errors that can occur during HTTP stream reading.
 #[derive(Debug)]
 enum StreamError {
@@ -106,10 +98,6 @@ enum StreamError {
     PermanentAuth(String),
 }
 
-// ============================================================================
-// Provider
-// ============================================================================
-
 /// Oanda HTTP streaming provider implementing [`WebSocketProvider`].
 ///
 /// Wraps two concurrent HTTP chunked-transfer streams (pricing + transactions)
@@ -118,21 +106,16 @@ enum StreamError {
 pub struct OandaWebSocketProvider {
     /// Base URL for streaming endpoints.
     stream_url: String,
-    /// Base URL for REST endpoints (candle polling -- candles are not streamed).
+    /// Candles are not streamed -- polled from the REST host instead.
     rest_url: String,
-    /// Bearer API token.
     api_token: Arc<SecretBox<String>>,
-    /// Oanda account ID.
     account_id: String,
-    /// Platform identifier (OandaPractice or OandaLive).
     platform: TradingPlatform,
     /// Currently subscribed instruments in Oanda format (e.g., "EUR_USD").
     instruments: Arc<RwLock<Vec<String>>>,
-    /// Stored config from initial connect() for reconnection.
     stored_config: Arc<RwLock<Option<ProviderConfig>>>,
-    /// Channel sender for events to the strategy.
     event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>,
-    /// Top-level cancellation token (cancels all streams).
+    /// Top-level; cancels all streams. Per-stream tokens below cancel individually.
     cancel_token: CancellationToken,
     /// Separate token for price stream -- cancelled on subscribe/unsubscribe to
     /// respawn with updated instrument list.
@@ -142,7 +125,7 @@ pub struct OandaWebSocketProvider {
     candle_poll_cancel: Arc<RwLock<CancellationToken>>,
     /// Separate token for the transaction stream -- cancelled-and-replaced on each spawn so a
     /// reconnect (which re-runs `connect()`) does not leave a duplicate stream task running and
-    /// emit duplicate order events on the strategy channel (TEK-601).
+    /// emit duplicate order events on the strategy channel.
     transaction_stream_cancel: Arc<RwLock<CancellationToken>>,
     /// HTTP client (shared across reconnections).
     client: Client,
@@ -200,10 +183,6 @@ impl OandaWebSocketProvider {
         self
     }
 
-    // ========================================================================
-    // Internal trading stream (for EventRouter)
-    // ========================================================================
-
     /// Start the transaction stream and emit events on the internal broadcast channel.
     ///
     /// This is used by the registry to feed order events into the `EventRouter` for
@@ -232,13 +211,8 @@ impl OandaWebSocketProvider {
         Ok(())
     }
 
-    // ========================================================================
-    // Price stream lifecycle
-    // ========================================================================
-
     /// Spawn (or respawn) the price stream task with the current instrument list.
     async fn spawn_price_stream(&self) {
-        // Cancel existing price stream if running.
         let old_cancel = {
             let mut guard = self.price_stream_cancel.write().await;
             let old = guard.clone();
@@ -284,10 +258,9 @@ impl OandaWebSocketProvider {
     /// cancels the previous task before spawning a new one, so a reconnect (which re-runs
     /// `connect()`) does not leave the old generation running. Without this, both old and
     /// new tasks read the same `event_tx` (repointed by `connect()`) and every order event
-    /// is delivered N+1 times after N reconnects (TEK-601). The stream loop also stops on
+    /// is delivered N+1 times after N reconnects. The stream loop also stops on
     /// the top-level `cancel_token` (disconnect).
     async fn spawn_transaction_stream(&self) {
-        // Cancel any existing transaction stream, then install a fresh token.
         let new_cancel = {
             let mut guard = self.transaction_stream_cancel.write().await;
             guard.cancel();
@@ -328,7 +301,6 @@ impl OandaWebSocketProvider {
     /// poll task rather than leaving a duplicate running. It also stops on the top-level
     /// `cancel_token` (disconnect).
     async fn spawn_candle_poll(&self) {
-        // Cancel any existing candle poll, then install a fresh token.
         let new_cancel = {
             let mut guard = self.candle_poll_cancel.write().await;
             guard.cancel();
@@ -360,32 +332,24 @@ impl OandaWebSocketProvider {
     }
 }
 
-// ============================================================================
-// WebSocketProvider trait implementation
-// ============================================================================
-
 #[async_trait]
 impl WebSocketProvider for OandaWebSocketProvider {
     async fn connect(&self, config: ProviderConfig) -> Result<EventStream, WebSocketError> {
         *self.stored_config.write().await = Some(config.clone());
 
-        // Store instruments (passed through as-is to Oanda).
         self.instruments.write().await.clone_from(&config.symbols);
 
-        // Create event channel.
         let (tx, rx) = mpsc::unbounded_channel();
         *self.event_tx.write().await = Some(tx);
 
-        // Spawn price stream.
         self.spawn_price_stream().await;
 
         // Spawn the candle poll only if the strategy asked for candles -- Oanda has no
-        // candle stream, so we REST-poll /candles on the minute boundary (see TEK-599).
+        // candle stream, so we REST-poll /candles on the minute boundary.
         if wants_candles(&config.event_types) {
             self.spawn_candle_poll().await;
         }
 
-        // Spawn transaction stream (cancel-and-replace so reconnect does not duplicate -- TEK-601).
         self.spawn_transaction_stream().await;
 
         info!(
@@ -410,7 +374,6 @@ impl WebSocketProvider for OandaWebSocketProvider {
             }
         }
 
-        // Respawn price stream with updated instruments.
         self.spawn_price_stream().await;
 
         debug!(
@@ -429,7 +392,6 @@ impl WebSocketProvider for OandaWebSocketProvider {
             }
         }
 
-        // Respawn price stream with updated instruments.
         self.spawn_price_stream().await;
 
         debug!(
@@ -469,10 +431,6 @@ impl WebSocketProvider for OandaWebSocketProvider {
         self.connect(config).await
     }
 }
-
-// ============================================================================
-// Price stream
-// ============================================================================
 
 /// Run the price stream with reconnection.
 #[allow(clippy::too_many_arguments)]
@@ -645,10 +603,6 @@ async fn process_price_buffer(
     }
 }
 
-// ============================================================================
-// Candle poll
-// ============================================================================
-
 /// Whether the requested event types include candles/bars.
 ///
 /// Mirrors the Alpaca adapter's mapping so subscriptions behave consistently across
@@ -677,12 +631,12 @@ fn next_minute_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
 /// quotes/orders, whereas `get_bars` hardcodes "oanda". Strategies key off OHLC, not the
 /// provider label, so this divergence is deliberate -- do not "fix" it.
 ///
-/// Price/volume basis (TEK-599): uses **mid** OHLC (Oanda's `/candles` default, `price=M`)
+/// Price/volume basis: uses **mid** OHLC (Oanda's `/candles` default, `price=M`)
 /// and Oanda's **tick volume** (count of price ticks, not traded notional -- forex is OTC
 /// with no consolidated volume). This matches both `get_bars` and the engine's single-series
 /// `Candle` (`crates/tektii/src/websocket.rs`), keeping the canary's live-vs-backtest
 /// comparison apples-to-apples *provided the engine's forex dataset is also mid + tick volume*
-/// (a canary-dataset concern owned by the repoint, TEK-597).
+/// (a canary-dataset concern owned by the repoint).
 fn candle_to_bar(symbol: &str, candle: &OandaCandle, platform: TradingPlatform) -> Option<Bar> {
     let mid = candle.mid.as_ref()?;
     let timestamp = DateTime::parse_from_rfc3339(&candle.time)
@@ -809,7 +763,6 @@ async fn poll_and_emit(
             }
         };
 
-        // Map closed candles to bars (ascending), then select those past the watermark.
         let bars: Vec<Bar> = candles
             .iter()
             .filter_map(|c| candle_to_bar(symbol, c, platform))
@@ -919,13 +872,9 @@ async fn run_candle_poll(
     }
 }
 
-// ============================================================================
-// Transaction stream
-// ============================================================================
-
 /// Run the transaction stream with reconnection (strategy-facing channel).
 ///
-/// `stream_cancel` is the per-spawn token (cancel-and-replace on reconnect, TEK-601);
+/// `stream_cancel` is the per-spawn token (cancel-and-replace on reconnect);
 /// `parent_cancel` is the top-level disconnect token. Either firing terminates the loop.
 #[allow(clippy::too_many_arguments)]
 async fn run_transaction_stream(
@@ -1263,7 +1212,6 @@ async fn process_transaction_buffer(
                     sink.send(msg).await;
                 }
 
-                // Emit a per-fill account snapshot, ordered right after the fill.
                 if line.transaction_type == "ORDER_FILL"
                     && let Some(fetcher) = sink.account_fetcher()
                     && let Some(account) = fetcher
@@ -1425,10 +1373,6 @@ fn merge_fill_account(mut account: Account, fill_balance: Option<&str>) -> Accou
     account
 }
 
-// ============================================================================
-// Message conversion helpers
-// ============================================================================
-
 /// Map an Oanda reject reason string to the gateway's `RejectReason` enum.
 fn oanda_reject_reason(reason: &str) -> RejectReason {
     match reason {
@@ -1455,7 +1399,7 @@ fn price_to_quote(
         return vec![];
     };
 
-    // Mid price as last.
+    // No last-trade price on forex; `last` reports mid instead.
     let mid = (bid + ask) / Decimal::from(2);
     let symbol = instrument.to_string();
 
@@ -1661,7 +1605,6 @@ fn transaction_fill_to_messages(
         WsMessage::trade(trade),
     ];
 
-    // Carry settled on this fill, if any, as a Financing cash flow.
     if let Some(amount) = tx
         .financing
         .as_deref()
@@ -1891,10 +1834,6 @@ fn transaction_reject_to_messages(
     }]
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2061,7 +2000,6 @@ mod tests {
         };
 
         let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
-        // Order + Trade.
         assert_eq!(msgs.len(), 2);
 
         match &msgs[0] {
@@ -2918,10 +2856,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------------
-    // Per-fill account snapshots
-    // ------------------------------------------------------------------------
-
     /// Build an OANDA account-summary response body.
     fn account_summary_value(
         balance: &str,
@@ -3330,7 +3264,6 @@ mod tests {
         let creds = OandaCredentials::new("test", "test-account");
         let provider = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
 
-        // Verify initial state.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3361,10 +3294,6 @@ mod tests {
         let provider = OandaWebSocketProvider::new(&creds, TradingPlatform::OandaPractice);
         assert_eq!(provider.stream_url, "http://localhost:9999");
     }
-
-    // ------------------------------------------------------------------
-    // Candle poll (TEK-599)
-    // ------------------------------------------------------------------
 
     #[test]
     fn default_rest_urls() {
@@ -3492,7 +3421,6 @@ mod tests {
 
     #[tokio::test]
     async fn poll_candles_filters_incomplete_keeps_ascending() {
-        // Response: a closed candle followed by the in-progress (incomplete) minute.
         let (server, base_url) = start_mock_server().await;
         mount_json(
             &server,
@@ -3599,7 +3527,6 @@ mod tests {
         let mut last_emitted = HashMap::new();
         let client = Client::new();
 
-        // First poll: one candle emitted.
         poll_and_emit(
             &client,
             &base_url,
@@ -3621,7 +3548,6 @@ mod tests {
             other => panic!("expected Candle, got {other:?}"),
         }
 
-        // Second poll: same candle, dedup suppresses it.
         poll_and_emit(
             &client,
             &base_url,
@@ -3902,7 +3828,6 @@ mod tests {
             "both symbols should emit despite identical timestamps"
         );
 
-        // Second pass: both deduped.
         poll_and_emit(
             &client,
             &base_url,
@@ -4058,13 +3983,9 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Transaction stream lifecycle (TEK-601)
-    // ------------------------------------------------------------------
-
     #[tokio::test]
     async fn reconnect_cancels_previous_transaction_stream_token() {
-        // Regression for TEK-601: on the old code, `connect()` spawned the transaction
+        // Regression: on the old code, `connect()` spawned the transaction
         // stream with the top-level `cancel_token`, so a reconnect (which re-runs
         // `connect()`) left the previous task alive and every order event was
         // delivered N+1 times after N reconnects. The fix gives the transaction stream
@@ -4105,7 +4026,7 @@ mod tests {
             .expect("reconnect should succeed");
         assert!(
             gen0_token.is_cancelled(),
-            "reconnect must cancel the previous transaction-stream token (TEK-601)"
+            "reconnect must cancel the previous transaction-stream token"
         );
 
         let gen1_token = provider.transaction_stream_cancel.read().await.clone();
@@ -4114,17 +4035,12 @@ mod tests {
             "gen-1 transaction-stream token should be live after reconnect"
         );
 
-        // Cleanly tear down spawned tasks.
         provider.disconnect().await.expect("disconnect");
     }
 
-    // ------------------------------------------------------------------
-    // Disconnect cancels per-task tokens (TEK-658)
-    // ------------------------------------------------------------------
-
     #[tokio::test]
     async fn disconnect_cancels_all_per_task_tokens() {
-        // Regression for TEK-658: `disconnect()` previously cancelled only the
+        // Regression: `disconnect()` previously cancelled only the
         // top-level `cancel_token`. Stream tasks happened to exit anyway because
         // each `select!` block also listened on the parent token, but that
         // invariant was implicit -- a future spawn site wired only to its
@@ -4171,15 +4087,15 @@ mod tests {
 
         assert!(
             price_token.is_cancelled(),
-            "disconnect must cancel the price-stream per-task token (TEK-658)"
+            "disconnect must cancel the price-stream per-task token"
         );
         assert!(
             candle_token.is_cancelled(),
-            "disconnect must cancel the candle-poll per-task token (TEK-658)"
+            "disconnect must cancel the candle-poll per-task token"
         );
         assert!(
             tx_token.is_cancelled(),
-            "disconnect must cancel the transaction-stream per-task token (TEK-658)"
+            "disconnect must cancel the transaction-stream per-task token"
         );
     }
 }

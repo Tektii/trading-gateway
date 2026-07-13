@@ -12,10 +12,6 @@ use tektii_gateway_core::websocket::messages::WsMessage;
 use tektii_gateway_test_support::wiremock_helpers::merge_json;
 use tokio::sync::broadcast;
 
-// =========================================================================
-// Adapter factories
-// =========================================================================
-
 /// Create a `BinanceSpotAdapter` pointed at a wiremock server.
 pub fn test_spot_adapter(base_url: &str) -> BinanceSpotAdapter {
     let credentials = BinanceCredentials::new("test-key", "test-secret").with_base_url(base_url);
@@ -67,10 +63,6 @@ pub fn test_coin_futures_adapter(base_url: &str) -> BinanceCoinFuturesAdapter {
     .expect("Failed to build HTTP client")
     .with_retry_config(RetryConfig::for_tests())
 }
-
-// =========================================================================
-// Spot JSON response builders
-// =========================================================================
 
 /// Binance Spot account response (camelCase).
 pub fn binance_spot_account_json() -> Value {
@@ -252,10 +244,6 @@ pub fn binance_cancel_replace_json(overrides: &Value) -> Value {
     base
 }
 
-// =========================================================================
-// Futures JSON response builders
-// =========================================================================
-
 /// Binance Futures account response.
 pub fn binance_futures_account_json() -> Value {
     json!({
@@ -381,10 +369,6 @@ pub fn binance_futures_kline_json() -> Value {
     ]])
 }
 
-// =========================================================================
-// Margin JSON response builders
-// =========================================================================
-
 /// Binance Margin account response.
 pub fn binance_margin_account_json() -> Value {
     json!({
@@ -458,10 +442,6 @@ pub fn binance_margin_trade_json(symbol: &str) -> Value {
         "isIsolated": false
     })
 }
-
-// =========================================================================
-// Coin-M Futures JSON response builders
-// =========================================================================
 
 /// Binance Coin-M Futures account response.
 pub fn binance_coin_account_json() -> Value {

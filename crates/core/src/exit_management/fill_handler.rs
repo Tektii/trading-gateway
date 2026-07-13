@@ -165,7 +165,6 @@ impl ExitHandler {
             results.push(result);
         }
 
-        // Log summary
         let success_count = results.iter().filter(|r| r.is_success()).count();
         let failed_count = results.iter().filter(|r| r.is_failed()).count();
         let deferred_count = results.iter().filter(|r| r.is_deferred()).count();
@@ -369,7 +368,6 @@ impl ExitHandler {
         placeholder_id: &str,
         filled_qty: Decimal,
     ) -> Result<ExitEntry, Box<PlacementResult>> {
-        // Get entry
         let entry = if let Some(entry_ref) = self.pending_by_placeholder.get(placeholder_id) {
             entry_ref.value().clone()
         } else {
@@ -382,7 +380,6 @@ impl ExitHandler {
             )));
         };
 
-        // Skip terminal states
         let is_terminal = matches!(
             entry.status,
             ExitEntryStatus::Cancelled { .. }
@@ -492,7 +489,6 @@ impl ExitHandler {
             Err(result) => return *result,
         };
 
-        // Check circuit breaker
         if self.is_circuit_breaker_open_internal().await {
             warn!(placeholder_id, "Circuit breaker open - deferring placement");
             return PlacementResult::deferred(
@@ -502,7 +498,6 @@ impl ExitHandler {
             );
         }
 
-        // Build and place order
         let order_request =
             Self::build_exit_order_request(&entry, qty_to_place, existing_orders.len());
         let placement_result = self
@@ -1225,10 +1220,6 @@ mod tests {
         assert_ne!(first.client_order_id, second.client_order_id);
         assert_ne!(second.client_order_id, third.client_order_id);
     }
-
-    // =========================================================================
-    // update_entry_to_failed: actual_orders preservation
-    // =========================================================================
 
     use crate::state::StateManager;
     use std::sync::Arc;

@@ -11,10 +11,6 @@ use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_core::models as api;
 use tektii_gateway_core::websocket::messages as ws;
 
-// =============================================================================
-// Timestamp Utilities
-// =============================================================================
-
 /// Convert Unix milliseconds to `DateTime<Utc>`.
 ///
 /// Falls back to the current time if the timestamp is invalid, with an error log.
@@ -46,10 +42,6 @@ pub fn unix_ms_to_datetime(ms: u64) -> DateTime<Utc> {
 fn datetime_to_unix_ms(dt: DateTime<Utc>) -> u64 {
     dt.timestamp_millis() as u64
 }
-
-// =============================================================================
-// Enum Conversions: Engine -> Gateway
-// =============================================================================
 
 /// Convert engine Side to gateway Side.
 pub const fn engine_side_to_api(side: engine::Side) -> api::Side {
@@ -120,10 +112,6 @@ pub const fn engine_order_event_type_to_api(event: engine::OrderEventType) -> ws
     }
 }
 
-// =============================================================================
-// Enum Conversions: Gateway -> Engine
-// =============================================================================
-
 /// Convert gateway Side to engine Side.
 pub const fn api_side_to_engine(side: api::Side) -> engine::Side {
     match side {
@@ -176,10 +164,6 @@ pub fn api_time_in_force_to_engine(
     }
 }
 
-// =============================================================================
-// Request Conversions: Gateway -> Engine
-// =============================================================================
-
 /// Reject unsupported features for the Tektii engine.
 fn reject_if_set<T>(field: &str, value: Option<&T>) -> Result<(), GatewayError> {
     if value.is_some() {
@@ -209,7 +193,6 @@ fn reject_if_true(field: &str, value: bool) -> Result<(), GatewayError> {
 pub fn order_request_to_engine(
     req: &api::OrderRequest,
 ) -> Result<engine::SubmitOrderRequest, GatewayError> {
-    // Reject unsupported features
     // NOTE: stop_loss, take_profit, and oco_group_id are NOT rejected here.
     // They are handled by the gateway's exit_handler via PendingSlTp bracket strategy.
     // The engine doesn't support these natively, but the gateway layer does.
@@ -250,10 +233,6 @@ pub fn order_request_to_engine(
         time_in_force,
     })
 }
-
-// =============================================================================
-// Response Conversions: Engine -> Gateway
-// =============================================================================
 
 /// Convert engine Order to gateway Order.
 pub fn engine_order_to_api(order: &engine::Order) -> api::Order {
@@ -442,7 +421,6 @@ mod tests {
 
     #[test]
     fn test_order_request_rejects_unsupported() {
-        // trailing_distance should be rejected
         let req = api::OrderRequest {
             trailing_distance: Some(dec!(10)),
             ..api::OrderRequest::market("AAPL", api::Side::Buy, dec!(100))
@@ -464,7 +442,6 @@ mod tests {
             api::OrderRequest::market("AAPL", api::Side::Buy, dec!(100)).with_oco_group("my-group");
         assert!(order_request_to_engine(&req).is_ok());
 
-        // Basic market order should work
         let req = api::OrderRequest::market("AAPL", api::Side::Buy, dec!(100));
         assert!(order_request_to_engine(&req).is_ok());
     }

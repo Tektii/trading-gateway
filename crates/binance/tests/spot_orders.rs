@@ -18,10 +18,6 @@ fn market_buy_request() -> OrderRequest {
     }
 }
 
-// =========================================================================
-// Submit Order
-// =========================================================================
-
 #[tokio::test]
 async fn submit_market_order() {
     let (server, base_url) = start_mock_server().await;
@@ -139,10 +135,6 @@ async fn submit_order_rejected() {
     );
 }
 
-// =========================================================================
-// Get Order
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_success() {
     let (server, base_url) = start_mock_server().await;
@@ -217,10 +209,6 @@ async fn get_order_not_found() {
     );
 }
 
-// =========================================================================
-// Get Orders
-// =========================================================================
-
 #[tokio::test]
 async fn get_orders_open() {
     let (server, base_url) = start_mock_server().await;
@@ -260,10 +248,6 @@ async fn get_orders_empty() {
     let orders = adapter.get_orders(&params).await.unwrap();
     assert!(orders.is_empty());
 }
-
-// =========================================================================
-// Modify Order (cancel-replace)
-// =========================================================================
 
 #[tokio::test]
 async fn modify_order_cancel_replace() {
@@ -338,10 +322,6 @@ async fn modify_order_not_modifiable() {
         "Expected OrderNotModifiable, got: {err:?}"
     );
 }
-
-// =========================================================================
-// Cancel Order
-// =========================================================================
 
 #[tokio::test]
 async fn cancel_order_success() {

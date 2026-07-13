@@ -17,10 +17,6 @@ use crate::models::{Side, TradingPlatform};
 use crate::websocket::connection::WsConnectionManager;
 use crate::websocket::registry::ProviderRegistry;
 
-// =============================================================================
-// Shutdown Sequence
-// =============================================================================
-
 /// Execute the graceful shutdown sequence.
 ///
 /// Steps (in order):
@@ -40,32 +36,23 @@ pub async fn run_shutdown_sequence(
 ) {
     tracing::info!("Shutting down...");
 
-    // Step 1: Notify connected strategies
     ws_connection_manager.broadcast_shutdown().await;
 
-    // Step 2: Set shutdown flag — new orders rejected, /readyz returns 503
+    // New orders rejected, /readyz returns 503.
     shutdown_state.set_shutting_down();
 
-    // Step 3: Log pending exit entries at error severity
     log_pending_exits(exit_handler_registry);
 
-    // Step 4: Write exit state snapshot to disk
     if let Err(e) = write_exit_state_snapshot(exit_handler_registry, exit_state_path).await {
         tracing::error!(error = %e, "Failed to write exit state snapshot");
     }
 
-    // Step 5: Disconnect broker WebSocket connections
     provider_registry.shutdown().await;
 
-    // Step 6: Cancel background tasks
     cancel_token.cancel();
 
     tracing::info!("Gateway stopped");
 }
-
-// =============================================================================
-// Logging
-// =============================================================================
 
 /// Log all pending and failed exit entries at error severity.
 ///
@@ -106,10 +93,6 @@ pub fn log_pending_exits(registry: &ExitHandlerRegistry) {
         );
     }
 }
-
-// =============================================================================
-// Exit State Snapshot
-// =============================================================================
 
 /// Snapshot of all non-terminal exit entries, written to disk on shutdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,10 +289,6 @@ mod tests {
         registry
     }
 
-    // ========================================================================
-    // log_pending_exits tests
-    // ========================================================================
-
     #[test]
     fn log_pending_exits_with_entries_runs_without_panic() {
         let registry = test_registry_with_pending(3);
@@ -322,10 +301,6 @@ mod tests {
         let registry = ExitHandlerRegistry::new();
         log_pending_exits(&registry);
     }
-
-    // ========================================================================
-    // write_exit_state_snapshot tests
-    // ========================================================================
 
     #[tokio::test]
     async fn write_snapshot_with_entries_creates_file() {
@@ -341,7 +316,6 @@ mod tests {
         let snapshot: ExitStateSnapshot = serde_json::from_str(&content).unwrap();
         assert_eq!(snapshot.entries.len(), 2);
 
-        // Verify fields
         for entry in &snapshot.entries {
             assert_eq!(entry.side, Side::Sell);
             assert_eq!(entry.order_type, ExitLegType::StopLoss);
@@ -361,20 +335,14 @@ mod tests {
         assert!(!path.exists());
     }
 
-    // ========================================================================
-    // read_exit_state_on_startup tests
-    // ========================================================================
-
     #[tokio::test]
     async fn read_snapshot_on_startup_logs_warning() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("exit-state.json");
 
-        // Write a snapshot first
         let registry = test_registry_with_pending(2);
         write_exit_state_snapshot(&registry, &path).await.unwrap();
 
-        // Read it back — should not panic
         read_exit_state_on_startup(&path).await;
     }
 
@@ -383,13 +351,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent.json");
 
-        // Should not panic
         read_exit_state_on_startup(&path).await;
     }
-
-    // ========================================================================
-    // Roundtrip test
-    // ========================================================================
 
     #[tokio::test]
     async fn snapshot_roundtrip_preserves_data() {

@@ -252,10 +252,6 @@ impl EventRouter {
         self.trailing_stop_handler.set(handler)
     }
 
-    // =========================================================================
-    // Public Query Methods
-    // =========================================================================
-
     /// Get the number of order events processed.
     #[must_use]
     pub fn order_events_processed(&self) -> u64 {
@@ -304,10 +300,6 @@ impl EventRouter {
         self.broadcaster.clone()
     }
 
-    // =========================================================================
-    // Order Event Handling
-    // =========================================================================
-
     /// Handle an order event from the provider.
     ///
     /// This is the main entry point for order-related events. It:
@@ -331,10 +323,9 @@ impl EventRouter {
     ) {
         Self::log_order_event(event, order);
 
-        // Step 1: Update State Manager FIRST
         self.update_state_for_order_event(event, order);
 
-        // Step 2: Route fills to Exit Handler BEFORE broadcast
+        // Route fills to Exit Handler BEFORE broadcast
         if Self::is_fill_event(event) {
             if let Some(adapter) = self.adapter.get() {
                 self.route_fill_to_exit_handler(order, adapter.as_ref())
@@ -347,12 +338,10 @@ impl EventRouter {
             }
         }
 
-        // Step 2.5: Route trailing stop lifecycle events
         self.route_trailing_stop_event(event, order).await;
 
-        // Step 2.75: Cancel OCO siblings on full fill or rejection
-        // Note: Partial fills do NOT trigger sibling cancellation
-        // Note: Manual cancellations do NOT cascade (user intent respected)
+        // Partial fills do NOT trigger sibling cancellation.
+        // Manual cancellations do NOT cascade (user intent respected).
         if matches!(
             event,
             OrderEventType::OrderFilled | OrderEventType::OrderRejected
@@ -361,7 +350,7 @@ impl EventRouter {
             self.cancel_oco_siblings(order, adapter.as_ref()).await;
         }
 
-        // Step 3: Broadcast to strategies AFTER exit handler completes
+        // Broadcast to strategies AFTER exit handler completes
         self.broadcast_order_event(event, order, parent_order_id);
 
         self.order_events_processed.fetch_add(1, Ordering::Relaxed);
@@ -385,10 +374,8 @@ impl EventRouter {
             "Order cancelled"
         );
 
-        // Update State Manager
         let _ = self.state_manager.remove_order(&order.id);
 
-        // Cancel any pending exit orders for this primary order
         if self.exit_handler.has_pending_for_primary(&order.id) {
             match self.exit_handler.handle_cancellation(&order.id).await {
                 Ok(result) => {
@@ -408,7 +395,6 @@ impl EventRouter {
             }
         }
 
-        // Broadcast cancellation
         self.broadcast_order_event(OrderEventType::OrderCancelled, order, None);
 
         self.order_events_processed.fetch_add(1, Ordering::Relaxed);
@@ -440,13 +426,11 @@ impl EventRouter {
         let symbol = &order.symbol;
         let position_qty_decimal = position_qty.abs();
 
-        // Get previous position state from StateManager
         let previous_position = self.state_manager.get_position_by_symbol(symbol);
         let previous_qty = previous_position
             .as_ref()
             .map_or(Decimal::ZERO, |p| p.quantity);
 
-        // Determine event type based on quantity changes
         let event_type = match (previous_qty.is_zero(), position_qty_decimal.is_zero()) {
             (true, false) => PositionEventType::PositionOpened,
             (false, true) => PositionEventType::PositionClosed,
@@ -454,7 +438,6 @@ impl EventRouter {
                 PositionEventType::PositionModified
             }
             _ => {
-                // No meaningful change (same quantity or both zero)
                 debug!(
                     symbol = %symbol,
                     previous_qty = %previous_qty,
@@ -465,12 +448,11 @@ impl EventRouter {
             }
         };
 
-        // Build synthetic position
         let position_side = match position_qty.cmp(&Decimal::ZERO) {
             std::cmp::Ordering::Greater => PositionSide::Long,
             std::cmp::Ordering::Less => PositionSide::Short,
             std::cmp::Ordering::Equal => {
-                // Position closed - use previous side or default to Long
+                // Position closed — use previous side or default to Long
                 previous_position
                     .as_ref()
                     .map_or(PositionSide::Long, |p| p.side)
@@ -503,7 +485,6 @@ impl EventRouter {
             "Synthesized position event from fill"
         );
 
-        // Use existing handle_position_event for state update and broadcast
         self.handle_position_event(event_type, &position).await;
     }
 
@@ -683,7 +664,6 @@ impl EventRouter {
             );
         }
 
-        // Notify strategy if any exit orders failed or were deferred due to circuit breaker
         self.broadcast_unprotected_position_if_needed(order, &results)
             .await;
 
@@ -703,7 +683,6 @@ impl EventRouter {
             return;
         }
 
-        // Collect failed exit types
         let mut failed_exits = Vec::new();
         for result in results {
             match &result.outcome {
@@ -791,19 +770,17 @@ impl EventRouter {
     /// is detected via `record_oco_fill` and triggers an `OcoDoubleExit` alert
     /// to connected strategies so they can take corrective action.
     async fn cancel_oco_siblings(&self, filled_order: &Order, adapter: &dyn TradingAdapter) {
-        // Check if order is part of an OCO group
-        // First try the order's oco_group_id field, then fall back to StateManager lookup
-        // (WebSocket events from provider may not have oco_group_id populated)
+        // Fall back to StateManager lookup — provider WebSocket events may not
+        // populate oco_group_id on the order itself.
         let group_id = filled_order
             .oco_group_id
             .clone()
             .or_else(|| self.state_manager.get_oco_group_id(&filled_order.id));
 
         let Some(group_id) = group_id else {
-            return; // Not part of any OCO group
+            return;
         };
 
-        // Double-exit detection: record this fill and check if one was already recorded
         if let Some(previous_fill) = self.state_manager.record_oco_fill(
             &group_id,
             &filled_order.id,
@@ -835,7 +812,6 @@ impl EventRouter {
             return;
         }
 
-        // Get sibling order IDs (excluding the filled order)
         let siblings = self
             .state_manager
             .get_oco_siblings(&group_id, &filled_order.id);
@@ -963,10 +939,6 @@ impl EventRouter {
         let _ = self.broadcaster.send(message);
     }
 
-    // =========================================================================
-    // Position Event Handling
-    // =========================================================================
-
     /// Handle a position event from the provider.
     ///
     /// This updates the State Manager and broadcasts the event to strategies.
@@ -985,7 +957,6 @@ impl EventRouter {
             "Processing position event"
         );
 
-        // Update State Manager
         match event {
             PositionEventType::PositionOpened | PositionEventType::PositionModified => {
                 self.state_manager.upsert_position(position);
@@ -993,7 +964,6 @@ impl EventRouter {
             PositionEventType::PositionClosed => {
                 let _ = self.state_manager.remove_position(&position.id);
 
-                // Cancel any pending exit orders for this symbol
                 if let Some(adapter) = self.adapter.get() {
                     let cancelled = self
                         .exit_handler
@@ -1012,7 +982,6 @@ impl EventRouter {
             }
         }
 
-        // Broadcast to strategies
         self.broadcast_position_event(event, position);
 
         self.position_events_processed
@@ -1039,10 +1008,6 @@ impl EventRouter {
         let _ = self.broadcaster.send(message);
     }
 
-    // =========================================================================
-    // Connection Event Handling
-    // =========================================================================
-
     /// Handle a connection event (connected, disconnecting, reconnecting).
     ///
     /// On reconnect, the caller should perform a full state sync by
@@ -1062,10 +1027,6 @@ impl EventRouter {
 
         let _ = self.broadcaster.send(message);
     }
-
-    // =========================================================================
-    // State Synchronization
-    // =========================================================================
 
     /// Reconcile state after a WebSocket reconnection.
     ///
@@ -1087,7 +1048,6 @@ impl EventRouter {
     /// are skipped with a warning.
     #[allow(clippy::too_many_lines)]
     pub async fn reconcile_after_reconnect(&self) {
-        // Fix #1: Prevent concurrent reconciliation runs
         if self
             .reconciling
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1116,11 +1076,9 @@ impl EventRouter {
             "Starting post-reconnect reconciliation"
         );
 
-        // Step 1: Fetch all tracked orders from provider concurrently
         let mut changes_detected: u32 = 0;
         let mut errors: u32 = 0;
 
-        // Phase 1: Concurrent fetch — query provider for each order in parallel
         // Bounded to 10 concurrent requests to avoid overwhelming the broker API
         let fetch_results: Vec<_> =
             futures_util::stream::iter(order_ids.into_iter().map(|order_id| {
@@ -1142,7 +1100,7 @@ impl EventRouter {
             .collect()
             .await;
 
-        // Phase 2: Sequential process — maintain ordering invariants
+        // Process sequentially to maintain the state/exit/broadcast ordering invariants.
         for (order_id, cached_status, cached_filled_qty, query_result) in fetch_results {
             let Ok(query_result) = query_result else {
                 warn!(
@@ -1200,8 +1158,7 @@ impl EventRouter {
             }
         }
 
-        // Step 2: Sync full state from provider (open orders + positions)
-        // Fix #3: Only broadcast Connected if both queries succeed
+        // Only broadcast Connected if both the orders and positions queries succeed.
         let open_orders = match adapter
             .get_orders(&OrderQueryParams {
                 status: Some(vec![
@@ -1238,8 +1195,7 @@ impl EventRouter {
 
         self.sync_state_from_provider(open_orders, positions);
 
-        // Step 3: Re-broadcast PositionUnprotected for any failed exit entries
-        // These notifications may have been dropped during the disconnect.
+        // Re-broadcast PositionUnprotected — these may have been dropped during the disconnect.
         let failed_entries = self.exit_handler.get_failed_entries();
         if !failed_entries.is_empty() {
             info!(
@@ -1255,7 +1211,7 @@ impl EventRouter {
             debug!(cleared, "Cleared failed exit entries after rebroadcast");
         }
 
-        // Step 4: Broadcast Connected AFTER all reconciliation events and successful sync
+        // Broadcast Connected AFTER all reconciliation events and successful sync.
         info!(
             platform = ?self.platform,
             orders_checked = order_count,
@@ -1396,10 +1352,6 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    // =========================================================================
-    // Test Helpers
-    // =========================================================================
-
     fn create_test_router() -> (EventRouter, broadcast::Receiver<WsMessage>) {
         let state_manager = Arc::new(StateManager::new());
         let exit_handler: Arc<dyn crate::exit_management::ExitHandling> =
@@ -1468,10 +1420,6 @@ mod tests {
             updated_at: Utc::now(),
         }
     }
-
-    // =========================================================================
-    // Position Synthesis Tests (Alpaca position_qty)
-    // =========================================================================
 
     fn create_filled_order(id: &str, symbol: &str, side: Side, avg_price: Decimal) -> Order {
         Order {
@@ -1675,10 +1623,6 @@ mod tests {
             _ => panic!("Expected Position message, got {:?}", msg),
         }
     }
-
-    // =========================================================================
-    // Position Unprotected Notification Tests
-    // =========================================================================
 
     use crate::adapter::{BracketStrategy, ProviderCapabilities};
     use crate::error::GatewayError;
@@ -2026,10 +1970,6 @@ mod tests {
             "Order event should still be broadcast"
         );
     }
-
-    // =========================================================================
-    // Reconnect Reconciliation Tests
-    // =========================================================================
 
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
@@ -2536,10 +2476,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Adapter Wiring Tests
-    // =========================================================================
-
     #[tokio::test]
     async fn test_fill_without_adapter_set_does_not_panic() {
         let (router, _rx) = create_test_router();
@@ -2914,10 +2850,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Critical Notification Dropped Tests
-    // =========================================================================
-
     #[tokio::test]
     async fn test_position_unprotected_with_no_receivers_increments_dropped_counter() {
         let (router, exit_handler, rx) = create_test_router_with_exit_handler();
@@ -2965,10 +2897,6 @@ mod tests {
             "Should NOT increment dropped counter when receivers exist"
         );
     }
-
-    // =========================================================================
-    // Rebroadcast Unprotected Position Tests (Reconnect Recovery)
-    // =========================================================================
 
     use crate::exit_management::ExitLegType;
 
@@ -3265,10 +3193,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Initial broadcast_unprotected_position_if_needed tests
-    // =========================================================================
-
     #[tokio::test]
     async fn test_broadcast_unprotected_includes_actual_order_ids_empty_for_failed() {
         let (router, mut rx) = create_test_router();
@@ -3347,10 +3271,6 @@ mod tests {
             _ => panic!("Expected Error message, got {:?}", msg),
         }
     }
-
-    // =========================================================================
-    // OCO Double-Exit Detection Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn test_oco_double_exit_detected_and_broadcast() {

@@ -24,12 +24,10 @@ pub use margin::adapter::BinanceMarginAdapter;
 pub use spot::adapter::BinanceSpotAdapter;
 pub use websocket::BinanceWebSocketProvider;
 
-// Re-export common utilities for external use
 #[allow(unused_imports)]
 pub use common::BinanceHttpClient;
 pub use common::binance_error_mapper;
 
-// Re-export WebSocket types
 #[allow(unused_imports)]
 pub use user_data_stream::BinanceUserDataStream;
 

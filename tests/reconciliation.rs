@@ -50,7 +50,6 @@ fn setup() -> (
 async fn missed_fill_detected_and_state_updated() {
     let (router, mut rx, state_manager) = setup();
 
-    // Pre-populate state with an Open order
     let order = tektii_gateway_core::models::Order {
         id: "order-1".into(),
         status: OrderStatus::Open,
@@ -75,7 +74,6 @@ async fn missed_fill_detected_and_state_updated() {
 
     router.reconcile_after_reconnect().await;
 
-    // Should have broadcast the fill event AND a Connected event
     let mut saw_fill = false;
     let mut saw_connected = false;
 
@@ -217,7 +215,6 @@ async fn no_changes_when_state_matches() {
 
     router.reconcile_after_reconnect().await;
 
-    // Should only see Connected — no order change events
     let mut order_events = 0;
     while let Ok(msg) = rx.try_recv() {
         if matches!(msg, WsMessage::Order { .. }) {
@@ -247,7 +244,6 @@ async fn order_not_found_removed_from_cache() {
 
     router.reconcile_after_reconnect().await;
 
-    // Order should be removed from cache
     assert!(
         state_manager.get_order("order-5").is_none(),
         "Expected order to be removed from StateManager"
@@ -313,10 +309,6 @@ async fn connected_event_broadcast_after_successful_sync() {
         "Expected Connected event after successful reconciliation"
     );
 }
-
-// =============================================================================
-// Story 6.3.4 — Reconnection state reconciliation tests
-// =============================================================================
 
 #[tokio::test]
 async fn expired_order_detected_during_reconciliation() {
@@ -427,7 +419,6 @@ async fn failed_exit_entries_rebroadcast_on_reconnect() {
         PLATFORM,
     ));
 
-    // Pre-insert a failed exit entry
     let entry = ExitEntry {
         placeholder_id: "exit:sl:order-fail".into(),
         primary_order_id: "order-fail".into(),
@@ -473,7 +464,6 @@ async fn failed_exit_entries_rebroadcast_on_reconnect() {
 
     router.reconcile_after_reconnect().await;
 
-    // Verify PositionUnprotected broadcast with rebroadcast flag
     let mut saw_unprotected = false;
     while let Ok(msg) = rx.try_recv() {
         if let WsMessage::Error { details, .. } = &msg
@@ -490,7 +480,6 @@ async fn failed_exit_entries_rebroadcast_on_reconnect() {
         "Expected PositionUnprotected rebroadcast with rebroadcast=true"
     );
 
-    // Failed entries should be cleared after rebroadcast
     assert!(
         exit_handler.get_failed_entries().is_empty(),
         "Expected failed entries to be cleared after rebroadcast"
@@ -534,7 +523,6 @@ async fn position_state_synced_after_reconciliation() {
 async fn multiple_divergences_detected_in_single_run() {
     let (router, mut rx, state_manager) = setup();
 
-    // Three cached Open orders
     for id in &["order-a", "order-b", "order-c"] {
         let order = tektii_gateway_core::models::Order {
             id: (*id).into(),
@@ -643,7 +631,6 @@ async fn sync_failure_prevents_connected_broadcast() {
 
     router.reconcile_after_reconnect().await;
 
-    // No Connected event should be broadcast when sync fails
     let mut saw_connected = false;
     while let Ok(msg) = rx.try_recv() {
         if matches!(

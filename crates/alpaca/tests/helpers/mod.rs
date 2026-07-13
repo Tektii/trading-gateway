@@ -23,11 +23,6 @@ pub fn test_adapter(base_url: &str) -> AlpacaAdapter {
         .with_retry_config(RetryConfig::for_tests())
 }
 
-// =========================================================================
-// Alpaca JSON response builders
-// =========================================================================
-
-/// Alpaca account response.
 pub fn alpaca_account_json() -> Value {
     json!({
         "id": "account-123",
@@ -66,7 +61,6 @@ pub fn alpaca_order_json(overrides: &Value) -> Value {
     base
 }
 
-/// Alpaca position response.
 pub fn alpaca_position_json(symbol: &str) -> Value {
     json!({
         "symbol": symbol,
@@ -79,7 +73,6 @@ pub fn alpaca_position_json(symbol: &str) -> Value {
     })
 }
 
-/// Alpaca trade activity (FILL) response.
 pub fn alpaca_activity_json(symbol: &str) -> Value {
     json!({
         "id": "activity-001",
@@ -93,7 +86,6 @@ pub fn alpaca_activity_json(symbol: &str) -> Value {
     })
 }
 
-/// Stock quote response.
 pub fn alpaca_quote_json() -> Value {
     json!({
         "quote": {
@@ -106,7 +98,6 @@ pub fn alpaca_quote_json() -> Value {
     })
 }
 
-/// Crypto quote response.
 pub fn alpaca_crypto_quote_json(symbol: &str) -> Value {
     json!({
         "quotes": {
@@ -121,7 +112,6 @@ pub fn alpaca_crypto_quote_json(symbol: &str) -> Value {
     })
 }
 
-/// Stock bars response.
 pub fn alpaca_bars_json() -> Value {
     json!({
         "bars": [
@@ -137,7 +127,6 @@ pub fn alpaca_bars_json() -> Value {
     })
 }
 
-/// Crypto bars response.
 pub fn alpaca_crypto_bars_json(symbol: &str) -> Value {
     json!({
         "bars": {

@@ -282,10 +282,6 @@ impl TrailingStopHandler {
             .map(|e| e.value().clone())
     }
 
-    // =========================================================================
-    // Executor Configuration
-    // =========================================================================
-
     /// Sets the stop order executor for order placement and modification.
     ///
     /// This is called after handler creation to inject the executor,
@@ -321,10 +317,6 @@ impl TrailingStopHandler {
         }
     }
 
-    // =========================================================================
-    // Stop Order Lifecycle Methods
-    // =========================================================================
-
     /// Places the initial stop order at the provider.
     ///
     /// Called when an entry is in `Tracking` state and we need to place the actual
@@ -351,7 +343,6 @@ impl TrailingStopHandler {
         quantity: Decimal,
         stop_level: Decimal,
     ) -> Result<bool, GatewayError> {
-        // Check circuit breaker
         if self.is_circuit_breaker_open() {
             debug!(
                 placeholder_id,
@@ -360,7 +351,7 @@ impl TrailingStopHandler {
             return Ok(false);
         }
 
-        // Build request (limit_price unused for stop market orders, but required by struct)
+        // limit_price unused for stop market orders, but required by struct
         let request = super::executor::StopOrderRequest {
             symbol: symbol.to_string(),
             side,
@@ -369,12 +360,9 @@ impl TrailingStopHandler {
             limit_price: stop_level,
         };
 
-        // Place the order
         match self.executor.place_stop_order(&request).await {
             Ok(placed) => {
-                // Transition to Active state
                 if let Some(mut entry) = self.entries_by_placeholder.get_mut(placeholder_id) {
-                    // Get peak price before mutating
                     let peak_price = entry.current_peak().unwrap_or(stop_level);
 
                     entry.set_status(TrailingEntryStatus::Active {
@@ -395,10 +383,8 @@ impl TrailingStopHandler {
                 Ok(true)
             }
             Err(e) => {
-                // Record failure for circuit breaker
                 self.record_stop_order_failure();
 
-                // Transition to Failed state
                 if let Some(mut entry) = self.entries_by_placeholder.get_mut(placeholder_id) {
                     entry.set_status(TrailingEntryStatus::Failed {
                         error: e.to_string(),
@@ -445,7 +431,6 @@ impl TrailingStopHandler {
         side: crate::models::Side,
         quantity: Decimal,
     ) -> Result<Option<String>, GatewayError> {
-        // Check circuit breaker
         if self.is_circuit_breaker_open() {
             debug!(
                 placeholder_id,
@@ -454,7 +439,7 @@ impl TrailingStopHandler {
             return Ok(None);
         }
 
-        // Build request (limit_price unused for stop market orders, but required by struct)
+        // limit_price unused for stop market orders, but required by struct
         let request = super::executor::ModifyStopRequest {
             order_id: stop_order_id.to_string(),
             symbol: symbol.to_string(),
@@ -464,10 +449,8 @@ impl TrailingStopHandler {
             new_limit_price: new_stop_level,
         };
 
-        // Modify the order (cancel + replace)
         match self.executor.modify_stop_order(&request).await {
             Ok(placed) => {
-                // Update entry with new order details
                 if let Some(mut entry) = self.entries_by_placeholder.get_mut(placeholder_id)
                     && let TrailingEntryStatus::Active { peak_price, .. } = entry.status
                 {
@@ -490,7 +473,6 @@ impl TrailingStopHandler {
                 Ok(Some(placed.order_id))
             }
             Err(e) => {
-                // Record failure for circuit breaker
                 self.record_stop_order_failure();
 
                 warn!(
@@ -569,7 +551,6 @@ impl TrailingStopHandler {
         primary_order_id: &str,
         order: &OrderRequest,
     ) -> Result<RegisteredTrailingStop, GatewayError> {
-        // Validate order type
         if order.order_type != OrderType::TrailingStop {
             return Err(GatewayError::InvalidRequest {
                 message: format!("Expected TrailingStop order, got {:?}", order.order_type),
@@ -577,7 +558,6 @@ impl TrailingStopHandler {
             });
         }
 
-        // Validate required fields
         let trailing_distance =
             order
                 .trailing_distance
@@ -588,7 +568,6 @@ impl TrailingStopHandler {
 
         let trailing_type = order.trailing_type.unwrap_or(TrailingType::Percent);
 
-        // Validate trailing distance is positive
         if trailing_distance <= Decimal::ZERO {
             return Err(GatewayError::InvalidRequest {
                 message: format!("trailing_distance must be positive, got {trailing_distance}"),
@@ -596,7 +575,6 @@ impl TrailingStopHandler {
             });
         }
 
-        // Validate percentage trailing distance is less than 100%
         if trailing_type == TrailingType::Percent && trailing_distance >= dec!(100) {
             return Err(GatewayError::InvalidRequest {
                 message: format!(
@@ -606,7 +584,6 @@ impl TrailingStopHandler {
             });
         }
 
-        // Check capacity
         if self.entries_by_placeholder.len() >= self.config.max_pending_entries {
             return Err(GatewayError::Internal {
                 message: format!(
@@ -617,7 +594,6 @@ impl TrailingStopHandler {
             });
         }
 
-        // Create entry
         let entry = TrailingEntry::new(
             primary_order_id,
             order.symbol.clone(),
@@ -633,8 +609,6 @@ impl TrailingStopHandler {
         // Entry stays in Pending state until primary order fills.
         // Activation happens in on_primary_filled() to avoid placing
         // stop orders before the position exists.
-
-        // Store entry
         self.entries_by_placeholder
             .insert(placeholder_id.clone(), entry);
         self.entries_by_primary
@@ -668,7 +642,6 @@ impl TrailingStopHandler {
     /// - `UnsupportedOperation` if price source doesn't support the operation
     /// - `SymbolNotFound` if price isn't available within timeout
     async fn try_activate_tracking(&self, entry: &mut TrailingEntry) -> Result<(), GatewayError> {
-        // Ensure the provider is streaming quotes for this symbol
         if let Err(e) = self.quote_subscriber.ensure_subscribed(&entry.symbol).await {
             warn!(
                 symbol = %entry.symbol,
@@ -698,10 +671,8 @@ impl TrailingStopHandler {
                 }
             };
 
-        // Calculate initial stop level
         let stop_level = entry.calculate_stop(current_price);
 
-        // Transition to Tracking state
         entry.set_status(TrailingEntryStatus::Tracking {
             peak_price: current_price,
             stop_level,
@@ -716,7 +687,6 @@ impl TrailingStopHandler {
             "Trailing stop tracking initialized"
         );
 
-        // Spawn tracking task if we have a self-reference (created via new_arc)
         self.spawn_tracking_task(&entry.placeholder_id, &entry.symbol, rx);
 
         Ok(())
@@ -806,7 +776,6 @@ impl TrailingStopHandler {
         symbol: &str,
         mut rx: tokio::sync::mpsc::Receiver<super::price_source::PriceUpdate>,
     ) {
-        // Get the Arc<Self> from our weak reference
         let handler = {
             let Ok(self_ref) = self.self_ref.read() else {
                 warn!(
@@ -915,7 +884,6 @@ impl TrailingStopHandler {
     ) -> Result<bool, GatewayError> {
         let entry_info = match self.entries_by_placeholder.get_mut(placeholder_id) {
             Some(mut e) => {
-                // Check if already terminal
                 if e.status.is_terminal() {
                     return Ok(false);
                 }
@@ -967,18 +935,15 @@ impl TrailingStopHandler {
         placeholder_id: &str,
         reason: CancellationReason,
     ) -> Result<bool, GatewayError> {
-        // First, extract the info we need for provider cancellation
         let cancel_info = {
             let Some(entry) = self.entries_by_placeholder.get(placeholder_id) else {
                 return Ok(false);
             };
 
-            // Check if already terminal
             if entry.status.is_terminal() {
                 return Ok(false);
             }
 
-            // If Active, we need to cancel at provider
             if let TrailingEntryStatus::Active {
                 ref stop_order_id, ..
             } = entry.status
@@ -989,7 +954,6 @@ impl TrailingStopHandler {
             }
         }; // Lock released
 
-        // If we have a stop order to cancel, do it now
         if let Some((stop_order_id, symbol)) = cancel_info {
             match self
                 .executor
@@ -1016,7 +980,6 @@ impl TrailingStopHandler {
             }
         }
 
-        // Now perform the local cancellation (same as sync cancel)
         self.cancel(placeholder_id, reason)
     }
 
@@ -1056,7 +1019,6 @@ impl TrailingStopHandler {
             return Ok(false); // No trailing stop registered for this order
         };
 
-        // Check if entry needs activation
         let needs_activation = self
             .entries_by_placeholder
             .get(&placeholder_id)
@@ -1076,9 +1038,7 @@ impl TrailingStopHandler {
             Some(guard) => guard.clone(),
             None => return Ok(false),
         };
-        // Guard dropped here ^
 
-        // Try to activate tracking (async — no DashMap lock held)
         match self.try_activate_tracking(&mut entry).await {
             Ok(()) => {
                 info!(
@@ -1087,12 +1047,10 @@ impl TrailingStopHandler {
                     fill_price = %fill_price,
                     "Trailing stop tracking activated on primary fill"
                 );
-                // Reinsert the updated entry
                 self.entries_by_placeholder.insert(placeholder_id, entry);
                 Ok(true)
             }
             Err(error) => {
-                // Handle activation failure — may transition to PriceSourceUnavailable
                 let symbol = entry.symbol.clone();
                 Self::handle_activation_failure(
                     &mut entry,
@@ -1101,7 +1059,6 @@ impl TrailingStopHandler {
                     primary_order_id,
                     &symbol,
                 )?;
-                // Reinsert the updated entry
                 self.entries_by_placeholder.insert(placeholder_id, entry);
                 Ok(false)
             }
@@ -1127,7 +1084,6 @@ impl TrailingStopHandler {
     ///
     /// Entries in terminal or pending states are skipped.
     pub async fn on_price_update(&self, symbol: &str, price: Decimal) -> Result<(), GatewayError> {
-        // Find all entries for this symbol that are actively tracking
         let entries_to_update: Vec<String> = self
             .entries_by_placeholder
             .iter()
@@ -1153,19 +1109,16 @@ impl TrailingStopHandler {
                     continue;
                 };
 
-                // Skip if not active
                 if !entry.status.is_active() {
                     continue;
                 }
 
-                // Determine what action to take based on current state
                 match &entry.status {
                     TrailingEntryStatus::Tracking {
                         peak_price: current_peak,
                         stop_level: current_stop,
                         ..
                     } => {
-                        // In Tracking state: place the initial stop order
                         // If price improved, use new stop level; otherwise use current
                         let (new_peak, new_stop) =
                             if entry.is_peak_improvement(*current_peak, price) {
@@ -1188,16 +1141,12 @@ impl TrailingStopHandler {
                         stop_level: old_stop_level,
                         ..
                     } => {
-                        // In Active state: check for price improvement
                         if !entry.is_peak_improvement(*current_peak, price) {
-                            // No improvement, nothing to do
                             continue;
                         }
 
-                        // Calculate new stop level with updated peak
                         let new_stop_level = entry.calculate_stop(price);
 
-                        // Check if adjustment is significant enough
                         let should_adjust =
                             super::types::should_adjust_stop(*old_stop_level, new_stop_level);
 
@@ -1211,7 +1160,6 @@ impl TrailingStopHandler {
                                 new_peak: price,
                             })
                         } else {
-                            // Just update state, no order modification needed
                             Some(PriceUpdateAction::UpdateStateOnly {
                                 new_peak: price,
                                 new_stop_level,
@@ -1232,7 +1180,6 @@ impl TrailingStopHandler {
         Ok(())
     }
 
-    /// Handles the `PlaceStop` action: places initial stop and updates state if skipped.
     /// Handles disconnection of the price source for a symbol.
     ///
     /// Transitions all `Tracking` or `Active` entries for the symbol to
@@ -1420,10 +1367,6 @@ impl TrailingStopHandler {
         }
     }
 
-    // =========================================================================
-    // Recovery: PriceSourceUnavailable -> Tracking
-    // =========================================================================
-
     /// Calculates the backoff duration for a given failure count.
     ///
     /// Formula: `recovery_interval * 2^(failure_count - 1)`, capped at
@@ -1453,7 +1396,6 @@ impl TrailingStopHandler {
     ///
     /// Returns statistics about the recovery attempt.
     pub async fn retry_unavailable_entries(&self) -> RecoveryStats {
-        // Collect placeholder IDs of all PriceSourceUnavailable entries
         let unavailable_ids: Vec<String> = self
             .entries_by_placeholder
             .iter()
@@ -1497,7 +1439,6 @@ impl TrailingStopHandler {
             None => return,
         };
 
-        // Check TTL
         if entry.created_at.elapsed() > self.config.entry_ttl {
             if let Some(mut e) = self.entries_by_placeholder.get_mut(placeholder_id) {
                 e.set_status(TrailingEntryStatus::Failed {
@@ -1511,7 +1452,6 @@ impl TrailingStopHandler {
             return;
         }
 
-        // Exponential backoff
         if let TrailingEntryStatus::PriceSourceUnavailable {
             recovery_failure_count,
             last_recovery_attempt,
@@ -1533,7 +1473,6 @@ impl TrailingStopHandler {
             }
         }
 
-        // Try to activate tracking
         let mut entry_clone = entry;
         match self.try_activate_tracking(&mut entry_clone).await {
             Ok(()) => {
@@ -1767,10 +1706,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Registration Tests
-    // =========================================================================
-
     #[tokio::test]
     async fn register_creates_entry_with_placeholder() {
         let handler = create_test_handler();
@@ -1822,10 +1757,6 @@ mod tests {
         let entry = handler.get_entry(&result.placeholder_id).unwrap();
         assert_eq!(entry.trailing_type, TrailingType::Percent);
     }
-
-    // =========================================================================
-    // Validation Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn register_rejects_non_trailing_stop_order() {
@@ -1911,10 +1842,6 @@ mod tests {
         ));
     }
 
-    // =========================================================================
-    // Cancellation Tests
-    // =========================================================================
-
     #[tokio::test]
     async fn cancel_removes_entry() {
         let handler = create_test_handler();
@@ -1998,10 +1925,6 @@ mod tests {
             _ => panic!("Expected Cancelled status"),
         }
     }
-
-    // =========================================================================
-    // Phase 2: Tracking Activation Tests (with working price source)
-    // =========================================================================
 
     mod tracking_activation {
         use super::*;
@@ -2269,10 +2192,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Modify Failure Verification Tests
-    // =========================================================================
-
     mod modify_failure_verification {
         use super::*;
         use crate::trailing_stop::executor::StopOrderStatus;
@@ -2515,10 +2434,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Recovery Tests (PriceSourceUnavailable -> Tracking)
-    // =========================================================================
-
     mod recovery {
         use super::*;
         use crate::trailing_stop::price_source::MockPriceSource;
@@ -2571,10 +2486,6 @@ mod tests {
             );
             result.placeholder_id
         }
-
-        // =================================================================
-        // calculate_recovery_backoff() formula tests (pure, no async)
-        // =================================================================
 
         #[test]
         fn backoff_zero_failures_returns_zero() {

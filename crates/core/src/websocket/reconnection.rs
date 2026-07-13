@@ -58,7 +58,6 @@ impl ReconnectionHandler {
             return None;
         }
 
-        // Check if we've exceeded the max retry duration
         if let Some(disconnected_at) = self.disconnected_at
             && disconnected_at.elapsed() >= self.config.max_retry_duration
         {

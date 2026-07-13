@@ -42,10 +42,6 @@ use crate::models::{
     Trade, TradingPlatform,
 };
 
-// ============================================================================
-// Server -> Client Message Payloads
-// ============================================================================
-
 /// Server ping payload.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -53,10 +49,6 @@ pub struct PingPayload {
     /// Server timestamp.
     pub timestamp: DateTime<Utc>,
 }
-
-// ============================================================================
-// Trading Event Types
-// ============================================================================
 
 /// Order event types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -216,10 +208,6 @@ pub enum WsErrorCode {
     OcoDoubleExit,
 }
 
-// ============================================================================
-// Unified Message Enum
-// ============================================================================
-
 /// All possible WebSocket messages.
 ///
 /// Uses serde's internally tagged representation for clean JSON:
@@ -250,7 +238,6 @@ pub enum WsErrorCode {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WsMessage {
-    // === Client -> Server ===
     /// Response to server ping.
     Pong,
 
@@ -278,7 +265,6 @@ pub enum WsMessage {
         timestamp: u64,
     },
 
-    // === Server -> Client ===
     /// Server heartbeat ping.
     Ping {
         /// Server timestamp.
@@ -454,10 +440,6 @@ pub enum WsMessage {
         reason: String,
     },
 }
-
-// ============================================================================
-// Helper Methods
-// ============================================================================
 
 impl WsMessage {
     /// Create a pong message.
@@ -636,10 +618,6 @@ impl WsMessage {
     }
 }
 
-// ============================================================================
-// Event enum for subscription routing
-// ============================================================================
-
 /// Event types for subscription routing.
 ///
 /// Represents all possible event types that can be subscribed to via WebSocket.
@@ -739,10 +717,6 @@ pub enum EventParseError {
     InvalidTimeframe(String),
 }
 
-// ============================================================================
-// Proxy-specific helper functions
-// ============================================================================
-
 /// Create a synthetic Order object for proxy-generated events.
 ///
 /// This is used when the `EventRouter` needs to broadcast events for SL/TP orders
@@ -798,10 +772,6 @@ pub fn synthetic_order(
         updated_at: now,
     }
 }
-
-// ============================================================================
-// Proxy-specific types for SL/TP and error handling
-// ============================================================================
 
 /// Severity level of SL/TP placement failure.
 ///
@@ -1079,10 +1049,6 @@ impl InstrumentSubscription {
     }
 }
 
-// =============================================================================
-// Internal event types (not sent to strategies)
-// =============================================================================
-
 /// Internal trading event with additional context.
 ///
 /// This wrapper carries `WsMessage` events along with provider-specific context
@@ -1156,16 +1122,10 @@ impl EventAckMessage {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr;
-
-    // === Event tests ===
 
     #[test]
     fn test_event_parse_candle() {
@@ -1275,7 +1235,6 @@ mod tests {
 
     #[test]
     fn test_parse_case_sensitive() {
-        // Ensure event names are case-sensitive
         let result: Result<Event, _> = "ORDER_UPDATE".parse();
         assert!(result.is_err());
 
@@ -1298,29 +1257,23 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // === Broker connection event tests ===
-
     #[test]
     fn test_broker_disconnected_serialization() {
         let msg = WsMessage::broker_disconnected(TradingPlatform::AlpacaPaper);
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""event":"BROKER_DISCONNECTED""#));
         assert!(json.contains(r#""broker":"alpaca-paper""#));
-        // No gap_duration_ms for disconnect
         assert!(!json.contains("gap_duration_ms"));
     }
 
     #[test]
     fn test_backtest_complete_serialization() {
-        // Distinct terminal, tagged `backtest_complete`, carries the
-        // broker name and is NOT a connection event.
         let msg = WsMessage::backtest_complete(TradingPlatform::Tektii);
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"backtest_complete""#));
         assert!(json.contains(r#""broker":"tektii""#));
         assert!(!json.contains("BROKER_DISCONNECTED"));
 
-        // Round-trips back to the same variant.
         let parsed: WsMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, WsMessage::BacktestComplete { .. }));
     }
@@ -1345,7 +1298,6 @@ mod tests {
 
     #[test]
     fn test_existing_connection_events_backward_compat() {
-        // Existing Connection events should not include broker or gap fields
         let msg = WsMessage::Connection {
             event: ConnectionEventType::Connected,
             error: None,
@@ -1369,8 +1321,6 @@ mod tests {
         assert!(json.contains(r#""event":"DISCONNECTING""#));
         assert!(!json.contains("broker"));
     }
-
-    // === DataStaleness tests ===
 
     #[test]
     fn test_data_stale_serialization() {
@@ -1447,8 +1397,6 @@ mod tests {
         assert!(!json.contains("stale_since"));
         assert!(!json.contains("broker"));
     }
-
-    // === Financing tests ===
 
     #[test]
     fn test_financing_serialization() {

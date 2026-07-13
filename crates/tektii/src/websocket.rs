@@ -172,16 +172,11 @@ pub enum TektiiWsError {
     SendFailed(String),
 }
 
-// =============================================================================
-// WebSocketProvider Trait Implementation
-// =============================================================================
-
 #[async_trait]
 impl WebSocketProvider for TektiiWebSocketProvider {
     async fn connect(&self, _config: ProviderConfig) -> Result<EventStream, WebSocketError> {
         let (ack_bridge, engine_ack_rx) = TektiiAckBridge::create();
 
-        // Store the ACK bridge so it can be retrieved later
         {
             let mut bridge_guard = self.ack_bridge.write().await;
             *bridge_guard = Some(ack_bridge.clone());
@@ -198,10 +193,8 @@ impl WebSocketProvider for TektiiWebSocketProvider {
 
         let (mut write, read) = ws_stream.split();
 
-        // Create event stream channel for broadcasting to strategies
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-        // Spawn engine ACK writer task
         let engine_writer_task = {
             let mut engine_ack_rx = engine_ack_rx;
             tokio::spawn(async move {
@@ -229,7 +222,6 @@ impl WebSocketProvider for TektiiWebSocketProvider {
             })
         };
 
-        // Spawn message processor task
         spawn_engine_message_processor(
             read,
             EngineMessageProcessorContext {
@@ -377,11 +369,9 @@ fn spawn_engine_message_processor(
                                         }
                                     }
 
-                                    // Process the message and send to EventRouter
                                     handle_server_message(&server_msg, &event_router);
 
-                                    // Also send to EventStream for broadcasting to strategies.
-                                    // The envelope carries the engine event_id (TEK-270) so the
+                                    // The envelope carries the engine event_id so the
                                     // registry can call `AckBridge::mark_sent` after
                                     // `connection_manager.send_to` returns Ok — closing the race
                                     // where a strategy ACK arrives between WS-read and broadcast.
@@ -435,10 +425,6 @@ fn spawn_engine_message_processor(
         info!("Tektii WebSocket provider message processor stopped");
     });
 }
-
-// =============================================================================
-// Helper Functions for WebSocketProvider Implementation
-// =============================================================================
 
 /// Convert a `ServerMessage` to `WsMessage` for subscription filter checking and broadcasting.
 fn server_message_to_ws_message(

@@ -32,10 +32,6 @@ fn order_json() -> serde_json::Value {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: Concurrent order submissions
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn concurrent_order_submissions_all_succeed() {
     let adapter = Arc::new(MockTradingAdapter::new(TradingPlatform::AlpacaPaper));
@@ -93,10 +89,6 @@ async fn concurrent_order_submissions_all_succeed() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: Concurrent submissions + fill events
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn concurrent_submissions_with_fill_events() {
     let adapter = Arc::new(MockTradingAdapter::new(TradingPlatform::AlpacaPaper));
@@ -108,7 +100,6 @@ async fn concurrent_submissions_with_fill_events() {
     let base_url = gw.base_url();
     let http = http_client();
 
-    // Spawn 10 REST submissions
     let submit_handles: Vec<_> = (0..10)
         .map(|_| {
             let base_url = base_url.clone();
@@ -137,7 +128,6 @@ async fn concurrent_submissions_with_fill_events() {
         });
     }
 
-    // Verify all submissions succeeded
     let submit_results = futures::future::join_all(submit_handles).await;
     for result in submit_results {
         let resp = result.expect("task panicked").expect("request failed");
@@ -145,7 +135,6 @@ async fn concurrent_submissions_with_fill_events() {
     }
     assert_eq!(adapter.submitted_orders().len(), 10);
 
-    // Collect fill events from WS
     let mut received_ids = HashSet::new();
     for _ in 0..10 {
         if let Some(WsMessage::Order { order, .. }) = client.recv_message(TIMEOUT).await {
@@ -159,10 +148,6 @@ async fn concurrent_submissions_with_fill_events() {
         "strategy should receive all 10 fill events"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Test 3: Concurrent reads during event processing
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn concurrent_reads_during_event_processing() {
@@ -229,10 +214,6 @@ async fn concurrent_reads_during_event_processing() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 4: Multiple WS clients receive all events
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn multiple_ws_clients_receive_all_events() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
@@ -240,14 +221,12 @@ async fn multiple_ws_clients_receive_all_events() {
     let num_clients = 5;
     let num_events = 10;
 
-    // Connect all clients
     let mut clients = Vec::with_capacity(num_clients);
     for _ in 0..num_clients {
         clients.push(StrategyClient::connect(&gw).await);
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Inject events
     for i in 0..num_events {
         let mut order = test_order();
         order.id = format!("multi-{i}");
@@ -262,7 +241,6 @@ async fn multiple_ws_clients_receive_all_events() {
         });
     }
 
-    // Each client collects events in its own task
     let client_handles: Vec<_> = clients
         .into_iter()
         .enumerate()

@@ -73,7 +73,6 @@ pub struct OcoFillRecord {
 pub struct StateManager {
     orders: DashMap<String, CachedOrder>,
     positions: DashMap<String, CachedPosition>,
-    // Indexes for fast lookups
     orders_by_position: DashMap<String, HashSet<String>>,
     orders_by_symbol: DashMap<String, HashSet<String>>,
     /// For netting mode - one position per symbol
@@ -97,10 +96,6 @@ impl StateManager {
         }
     }
 
-    // =========================================================================
-    // Lifecycle
-    // =========================================================================
-
     /// Clear and repopulate from provider data (on connect/reconnect).
     ///
     /// This performs a full sync, replacing all cached state with fresh data
@@ -108,7 +103,6 @@ impl StateManager {
     /// separately by the Exit Handler. OCO groups are also cleared since they
     /// are client-side concepts not stored by providers.
     pub fn sync_from_provider(&self, orders: Vec<Order>, positions: Vec<Position>) {
-        // Clear existing state
         self.orders.clear();
         self.positions.clear();
         self.orders_by_position.clear();
@@ -117,7 +111,6 @@ impl StateManager {
         self.oco_groups.clear();
         self.oco_fills.clear();
 
-        // Repopulate from provider data
         for order in orders {
             self.upsert_order(&order);
         }
@@ -125,10 +118,6 @@ impl StateManager {
             self.upsert_position(&position);
         }
     }
-
-    // =========================================================================
-    // Order Operations
-    // =========================================================================
 
     /// Insert or update an order.
     ///
@@ -151,10 +140,9 @@ impl StateManager {
             oco_group_id: order.oco_group_id.clone(),
         };
 
-        // Atomically insert and get old value (eliminates TOCTOU race)
+        // Atomic insert-and-return-old eliminates the TOCTOU race with a get-then-insert.
         let old_cached = self.orders.insert(order.id.clone(), cached);
 
-        // Clean up old indexes based on actual old value
         if let Some(ref old) = old_cached {
             if old.position_id != order.position_id
                 && let Some(ref old_pos_id) = old.position_id
@@ -179,7 +167,6 @@ impl StateManager {
             }
         }
 
-        // Update new indexes
         if let Some(ref group_id) = order.oco_group_id {
             self.oco_groups
                 .entry(group_id.clone())
@@ -224,26 +211,22 @@ impl StateManager {
     #[must_use]
     pub fn remove_order(&self, order_id: &str) -> bool {
         if let Some((_, order)) = self.orders.remove(order_id) {
-            // Remove from symbol index
             if let Some(mut orders) = self.orders_by_symbol.get_mut(&order.symbol) {
                 orders.remove(order_id);
             }
 
-            // Remove from position index
             if let Some(ref pos_id) = order.position_id
                 && let Some(mut orders) = self.orders_by_position.get_mut(pos_id)
             {
                 orders.remove(order_id);
             }
 
-            // Remove from OCO group index
             if let Some(ref group_id) = order.oco_group_id
                 && let Some(mut orders) = self.oco_groups.get_mut(group_id)
             {
                 orders.remove(order_id);
-                // Clean up empty groups
                 if orders.is_empty() {
-                    drop(orders); // Release lock before removal
+                    drop(orders); // release lock before removing the group entry
                     self.oco_groups.remove(group_id);
                 }
             }
@@ -302,10 +285,6 @@ impl StateManager {
             .collect()
     }
 
-    // =========================================================================
-    // Position Operations
-    // =========================================================================
-
     /// Insert or update a position.
     ///
     /// Uses atomic insert to avoid TOCTOU race conditions.
@@ -317,10 +296,9 @@ impl StateManager {
             quantity: position.quantity,
         };
 
-        // Atomically insert and get old value
         let old_cached = self.positions.insert(position.id.clone(), cached);
 
-        // Clean up old symbol index if symbol changed (rare but possible)
+        // Clean up the old symbol index only when the symbol changed (rare but possible).
         if let Some(ref old) = old_cached
             && old.symbol != position.symbol
             && let Some(entry) = self.position_by_symbol.get(&old.symbol)
@@ -339,16 +317,15 @@ impl StateManager {
     #[must_use]
     pub fn remove_position(&self, position_id: &str) -> bool {
         if let Some((_, position)) = self.positions.remove(position_id) {
-            // Remove from symbol index only if this position owns it
-            // (protects against race conditions)
+            // Remove the symbol index only if this position still owns it (guards a race
+            // where a newer position already took over the symbol).
             if let Some(entry) = self.position_by_symbol.get(&position.symbol)
                 && entry.value() == position_id
             {
-                drop(entry); // Release read lock before removal
+                drop(entry); // release read lock before removing
                 self.position_by_symbol.remove(&position.symbol);
             }
 
-            // Clean up order index for this position
             self.orders_by_position.remove(position_id);
             true
         } else {
@@ -378,10 +355,6 @@ impl StateManager {
     pub fn position_count(&self) -> usize {
         self.positions.len()
     }
-
-    // =========================================================================
-    // Exit Order Tracking
-    // =========================================================================
 
     /// Mark orders as exit orders with sibling link.
     ///
@@ -440,23 +413,17 @@ impl StateManager {
             .and_then(|r| r.parent_order_id.clone())
     }
 
-    // =========================================================================
-    // OCO Group Tracking
-    // =========================================================================
-
     /// Add an order to an OCO group.
     ///
     /// Called when creating orders with `oco_group_id` to register them
     /// in the group index. Orders in the same group will be cancelled
     /// when one fills completely.
     pub fn add_to_oco_group(&self, order_id: &str, group_id: &str) {
-        // Add to group index
         self.oco_groups
             .entry(group_id.to_string())
             .or_default()
             .insert(order_id.to_string());
 
-        // Update the cached order's oco_group_id
         if let Some(mut entry) = self.orders.get_mut(order_id) {
             entry.oco_group_id = Some(group_id.to_string());
         }
@@ -482,13 +449,12 @@ impl StateManager {
 
     #[must_use]
     pub fn get_oco_group_id(&self, order_id: &str) -> Option<String> {
-        // First check if order is in orders map with oco_group_id
         if let Some(entry) = self.orders.get(order_id)
             && entry.oco_group_id.is_some()
         {
             return entry.oco_group_id.clone();
         }
-        // Otherwise search oco_groups index (order may not be in orders map yet)
+        // Fall back to the group index — the order may not be in the orders map yet.
         for entry in &self.oco_groups {
             if entry.value().contains(order_id) {
                 return Some(entry.key().clone());
@@ -503,10 +469,6 @@ impl StateManager {
             .get(order_id)
             .is_some_and(|r| r.oco_group_id.is_some())
     }
-
-    // =========================================================================
-    // OCO Double-Exit Detection
-    // =========================================================================
 
     /// Record an OCO fill for double-exit detection.
     ///
@@ -528,7 +490,6 @@ impl StateManager {
             side,
         };
 
-        // Try to insert; if entry already exists, return the previous record
         match self.oco_fills.entry(group_id.to_string()) {
             dashmap::mapref::entry::Entry::Occupied(existing) => Some(existing.get().clone()),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
@@ -550,20 +511,12 @@ impl Default for StateManager {
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{OrderType, TimeInForce};
     use chrono::Utc;
     use rust_decimal_macros::dec;
-
-    // =========================================================================
-    // Test Helpers
-    // =========================================================================
 
     fn create_test_order(id: &str, symbol: &str, side: Side, quantity: Decimal) -> Order {
         Order {
@@ -619,10 +572,6 @@ mod tests {
             updated_at: Utc::now(),
         }
     }
-
-    // =========================================================================
-    // Index Invariant Tests
-    // =========================================================================
 
     #[test]
     fn test_upsert_order_cleans_old_position_index() {
@@ -690,10 +639,6 @@ mod tests {
             .expect("should still exist");
         assert_eq!(cached.position_id, "pos-2");
     }
-
-    // =========================================================================
-    // Exit Order Tracking Tests
-    // =========================================================================
 
     #[test]
     fn test_link_exit_orders() {
@@ -777,10 +722,6 @@ mod tests {
         assert!(state.get_parent_order("entry-1").is_none()); // Entry has no parent
         assert!(state.get_parent_order("unknown").is_none());
     }
-
-    // =========================================================================
-    // Concurrent Access Tests
-    // =========================================================================
 
     #[test]
     fn test_concurrent_order_operations() {
@@ -904,10 +845,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // OCO Double-Exit Detection Tests
-    // =========================================================================
-
     #[test]
     fn test_record_oco_fill_first_fill_returns_none() {
         let state = StateManager::new();
@@ -963,10 +900,6 @@ mod tests {
         let result = state.record_oco_fill("group-1", "order-2", dec!(100), "BTCUSD", Side::Sell);
         assert!(result.is_none(), "After sync, oco_fills should be cleared");
     }
-
-    // =========================================================================
-    // Symbol Index Tests
-    // =========================================================================
 
     #[test]
     fn test_upsert_order_cleans_old_symbol_index() {

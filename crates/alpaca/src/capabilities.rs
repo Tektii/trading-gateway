@@ -8,10 +8,6 @@ use tektii_gateway_core::models::{
     AssetClass, Capabilities, OrderRequest, OrderType, PositionMode, RateLimits,
 };
 
-// ============================================================================
-// Symbol Classification Utilities
-// ============================================================================
-
 /// Check if a symbol represents a cryptocurrency.
 ///
 /// Determines asset class from the symbol string by checking common crypto
@@ -45,10 +41,6 @@ pub fn is_crypto_symbol(symbol: &str) -> bool {
         || symbol_upper.contains("/ETH")
 }
 
-// ============================================================================
-// Alpaca Provider Capabilities
-// ============================================================================
-
 /// Alpaca provider capabilities.
 ///
 /// Alpaca supports bracket orders for stocks but NOT for crypto.
@@ -67,22 +59,18 @@ impl AlpacaCapabilities {
 
 impl ProviderCapabilities for AlpacaCapabilities {
     fn supports_bracket_orders(&self, symbol: &str) -> bool {
-        // Alpaca supports bracket orders ONLY for stocks, not crypto
         !is_crypto_symbol(symbol)
     }
 
     fn supports_oco_orders(&self, symbol: &str) -> bool {
-        // Alpaca supports OCO for stocks only (same as bracket)
         !is_crypto_symbol(symbol)
     }
 
     fn supports_oto_orders(&self, symbol: &str) -> bool {
-        // Alpaca supports OTO for stocks only (same as bracket)
         !is_crypto_symbol(symbol)
     }
 
     fn bracket_strategy(&self, order: &OrderRequest) -> BracketStrategy {
-        // No SL/TP requested - nothing to handle
         if order.stop_loss.is_none() && order.take_profit.is_none() {
             return BracketStrategy::None;
         }
@@ -140,8 +128,6 @@ mod tests {
     use rust_decimal_macros::dec;
     use tektii_gateway_core::models::{OrderType, Side, TimeInForce};
 
-    // is_crypto_symbol tests
-
     #[test]
     fn is_crypto_true_for_usdt_suffix() {
         assert!(is_crypto_symbol("BTCUSDT"));
@@ -160,8 +146,6 @@ mod tests {
         assert!(!is_crypto_symbol("MSFT"));
         assert!(!is_crypto_symbol("GOOG"));
     }
-
-    // bracket_strategy tests
 
     fn order_request(
         symbol: &str,
@@ -208,8 +192,6 @@ mod tests {
         let order = order_request("BTCUSDT", Some(dec!(45000)), None);
         assert_eq!(caps.bracket_strategy(&order), BracketStrategy::PendingSlTp);
     }
-
-    // short_selling feature tests
 
     #[test]
     fn alpaca_supports_short_selling() {

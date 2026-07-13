@@ -177,10 +177,8 @@ async fn spawn_gateway_inner(
     let platform = adapter.platform();
     let adapter: Arc<dyn TradingAdapter> = adapter;
 
-    // Build adapter registry
     let adapter_registry = AdapterRegistry::new(Arc::clone(&adapter), platform);
 
-    // Create shared infrastructure
     let ws_manager = Arc::new(WsConnectionManager::new());
     let correlation_store = Arc::new(CorrelationStore::new());
     let cancel = CancellationToken::new();
@@ -216,7 +214,6 @@ async fn spawn_gateway_inner(
             .expect("register_event_router should succeed");
     }
 
-    // Build gateway state
     let state = GatewayState::new(
         adapter_registry,
         ws_manager,
@@ -226,7 +223,6 @@ async fn spawn_gateway_inner(
         None,
     );
 
-    // Create provider event stream and register
     let (event_tx, stream) = MockWebSocketProvider::make_event_stream();
     if with_mock_provider {
         let provider = MockWebSocketProvider::new(false); // no reconnection needed
@@ -236,7 +232,6 @@ async fn spawn_gateway_inner(
             .expect("register_provider should succeed");
     }
 
-    // Build Axum router (REST + WebSocket)
     let (router, _api) = create_gateway_router().split_for_parts();
     let app = router
         .route(
@@ -251,7 +246,6 @@ async fn spawn_gateway_inner(
         )
         .with_state(state.clone());
 
-    // Bind to random port and start serving
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -362,10 +356,6 @@ pub async fn spawn_test_gateway_with_metrics(adapter: MockTradingAdapter) -> Opt
         metrics_handle: Some(metrics_handle),
     })
 }
-
-// =============================================================================
-// Strategy WebSocket client
-// =============================================================================
 
 /// A WebSocket client that connects to the gateway as a strategy.
 ///

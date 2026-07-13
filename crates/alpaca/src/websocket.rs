@@ -37,12 +37,7 @@ use tektii_gateway_core::websocket::provider::{
     Credentials, EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
 };
 
-/// Type alias for the WebSocket write half.
 type WsWriteHalf = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-
-// ============================================================================
-// Connection State
-// ============================================================================
 
 #[derive(Debug, Clone, Default)]
 enum ConnectionState {
@@ -56,16 +51,11 @@ enum ConnectionState {
     Error(String),
 }
 
-/// Tracks current subscription state.
 #[derive(Debug, Clone, Default)]
 struct SubscriptionState {
     symbols: Vec<String>,
     event_types: Vec<String>,
 }
-
-// ============================================================================
-// Alpaca Market Data Protocol Messages
-// ============================================================================
 
 /// Authentication message sent to Alpaca market data WebSocket.
 #[derive(Debug, Serialize)]
@@ -148,10 +138,6 @@ struct AlpacaBarMessage {
     timestamp: String,
 }
 
-// ============================================================================
-// Alpaca Trading Stream Protocol Messages
-// ============================================================================
-
 /// Authentication message for Alpaca trading stream.
 #[derive(Debug, Serialize)]
 struct TradingAuthMessage {
@@ -173,7 +159,6 @@ struct TradingListenMessage {
     data: TradingListenData,
 }
 
-/// Listen data payload for trading stream.
 #[derive(Debug, Serialize)]
 struct TradingListenData {
     streams: Vec<String>,
@@ -240,10 +225,6 @@ struct AlpacaTradingOrderInfo {
     legs: Option<Vec<AlpacaTradingOrderInfo>>,
 }
 
-// ============================================================================
-// AlpacaWebSocketProvider
-// ============================================================================
-
 /// Alpaca WebSocket provider for real-time market data and trading events.
 ///
 /// Manages two separate authenticated WebSocket connections:
@@ -255,7 +236,6 @@ pub struct AlpacaWebSocketProvider {
     feed: String,
     /// Base URL override for testing.
     base_url: Option<String>,
-    /// Current subscription state.
     subscriptions: Arc<RwLock<SubscriptionState>>,
     /// Market data connection state.
     connection_state: Arc<RwLock<ConnectionState>>,
@@ -296,11 +276,6 @@ impl std::fmt::Debug for AlpacaWebSocketProvider {
     }
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Convert an Alpaca order info to a gateway `Order`.
 fn alpaca_order_to_trading_order(info: &AlpacaTradingOrderInfo) -> Order {
     let side = match info.side.to_lowercase().as_str() {
         "buy" => Side::Buy,
@@ -408,7 +383,6 @@ fn alpaca_order_to_trading_order(info: &AlpacaTradingOrderInfo) -> Order {
     }
 }
 
-/// Map an Alpaca trading event name to a gateway `OrderEventType`.
 fn alpaca_event_to_order_event_type(event: &str) -> OrderEventType {
     match event {
         "new" | "accepted" => OrderEventType::OrderCreated,
@@ -429,7 +403,6 @@ fn parse_alpaca_timestamp_to_datetime(s: &str) -> Option<DateTime<Utc>> {
     s.parse::<DateTime<Utc>>().ok()
 }
 
-/// Parse a trading stream event into a `WsMessage`.
 fn parse_trading_event(update: &AlpacaTradingOrderUpdate) -> WsMessage {
     let order = alpaca_order_to_trading_order(&update.order);
     let event_type = alpaca_event_to_order_event_type(&update.event);
@@ -470,10 +443,6 @@ fn parse_internal_trading_event(
         InternalTradingEvent::new(message, platform)
     }
 }
-
-// ============================================================================
-// AlpacaWebSocketProvider Implementation
-// ============================================================================
 
 impl AlpacaWebSocketProvider {
     /// Create a new Alpaca WebSocket provider with the given feed type.
@@ -522,7 +491,6 @@ impl AlpacaWebSocketProvider {
         }
     }
 
-    /// Check if the given feed is for crypto data.
     fn is_crypto_feed(symbols: &[String]) -> bool {
         symbols.iter().any(|s| {
             s.contains('/')
@@ -715,7 +683,6 @@ impl AlpacaWebSocketProvider {
         events
     }
 
-    /// Convert an Alpaca quote message to a `WsMessage::QuoteData`.
     fn convert_quote_to_ws_message(
         msg: &AlpacaQuoteMessage,
         platform: TradingPlatform,
@@ -740,7 +707,6 @@ impl AlpacaWebSocketProvider {
         }))
     }
 
-    /// Convert an Alpaca bar message to a `WsMessage::Candle`.
     fn convert_bar_to_ws_message(msg: &AlpacaBarMessage, platform: TradingPlatform) -> WsMessage {
         let symbol = msg.symbol.clone();
         let timestamp = parse_alpaca_timestamp_to_datetime(&msg.timestamp).unwrap_or_else(Utc::now);
@@ -774,7 +740,6 @@ impl AlpacaWebSocketProvider {
         let ws_stream = connect_with_retry(&url).await?;
         let (mut write, read) = ws_stream.split();
 
-        // Authenticate
         let auth = TradingAuthMessage {
             action: "authenticate".to_string(),
             data: TradingAuthData {
@@ -791,7 +756,6 @@ impl AlpacaWebSocketProvider {
             .await
             .map_err(|e| WebSocketError::SendError(format!("Failed to send trading auth: {e}")))?;
 
-        // Subscribe to trade updates
         let listen = TradingListenMessage {
             action: "listen".to_string(),
             data: TradingListenData {
@@ -881,7 +845,6 @@ impl AlpacaWebSocketProvider {
         }
     }
 
-    /// Get the trading stream WebSocket URL for the given platform.
     fn trading_stream_url(&self, platform: TradingPlatform) -> String {
         if let Some(ref base) = self.base_url {
             return base.clone();
@@ -975,7 +938,6 @@ fn spawn_trading_stream_reader(
     });
 }
 
-/// Process a single text message from the Alpaca trading stream.
 fn process_trading_stream_text(
     text: &str,
     platform: TradingPlatform,
@@ -1055,8 +1017,8 @@ fn spawn_market_data_reader(
                         Some(Ok(Message::Binary(bytes))) => {
                             // Defensive: market-data currently arrives as Text frames,
                             // but the trading-stream sibling sends JSON in Binary —
-                            // mirror that handling here so we don't repeat TEK-573 if
-                            // Alpaca ever switches this stream too.
+                            // mirror that handling here so we don't drop frames if
+                            // Alpaca ever switches this stream to Binary too.
                             match std::str::from_utf8(&bytes) {
                                 Ok(text) => {
                                     for event in AlpacaWebSocketProvider::process_alpaca_message(text, platform) {
@@ -1117,14 +1079,9 @@ fn spawn_market_data_reader(
     });
 }
 
-// ============================================================================
-// WebSocketProvider Trait Implementation
-// ============================================================================
-
 #[async_trait]
 impl WebSocketProvider for AlpacaWebSocketProvider {
     async fn connect(&self, config: ProviderConfig) -> Result<EventStream, WebSocketError> {
-        // Store config for reconnection
         *self.stored_config.write().await = Some(config.clone());
 
         let credentials = config.credentials.as_ref().ok_or_else(|| {
@@ -1144,20 +1101,16 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
 
         *self.connection_state.write().await = ConnectionState::Connecting;
 
-        // Connect to market data WebSocket
         let ws_stream = connect_with_retry(&url).await?;
         let (mut write, mut read) = ws_stream.split();
 
         *self.connection_state.write().await = ConnectionState::Connected;
 
-        // Authenticate
         Self::authenticate(&mut write, credentials).await?;
 
-        // Wait for auth response
         Self::wait_for_auth_response(&mut read).await?;
         *self.connection_state.write().await = ConnectionState::Authenticated;
 
-        // Subscribe to requested symbols
         Self::send_subscription(
             &mut write,
             &config.symbols,
@@ -1166,7 +1119,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         )
         .await?;
 
-        // Update subscription state
         {
             let mut subs = self.subscriptions.write().await;
             subs.symbols.clone_from(&config.symbols);
@@ -1174,13 +1126,10 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         }
         *self.connection_state.write().await = ConnectionState::Subscribed;
 
-        // Store write half
         *self.write_half.lock().await = Some(write);
 
-        // Create event channel
         let (tx, rx) = mpsc::unbounded_channel();
 
-        // Spawn market data read task
         spawn_market_data_reader(
             read,
             tx.clone(),
@@ -1190,7 +1139,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             self.last_pong.clone(),
         );
 
-        // Connect trading stream if event types include order/trade updates
         let needs_trading = config.event_types.iter().any(|e| {
             matches!(
                 e.as_str(),
@@ -1225,7 +1173,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         Self::send_subscription(write, &symbols, &event_types, "subscribe").await?;
         drop(write_guard);
 
-        // Update subscription state
         let mut subs = self.subscriptions.write().await;
         for symbol in &symbols {
             if !subs.symbols.contains(symbol) {
@@ -1256,7 +1203,6 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
         Self::send_subscription(write, &symbols, &event_types, "unsubscribe").await?;
         drop(write_guard);
 
-        // Update subscription state
         let mut subs = self.subscriptions.write().await;
         subs.symbols.retain(|s| !symbols.contains(s));
         drop(subs);
@@ -1290,21 +1236,14 @@ impl WebSocketProvider for AlpacaWebSocketProvider {
             )
         })?;
 
-        // Clear stale state
         *self.connection_state.write().await = ConnectionState::Disconnected;
         *self.trading_connection_state.write().await = ConnectionState::Disconnected;
         *self.write_half.lock().await = None;
 
-        // Reconnect
         self.connect(config).await
     }
 }
 
-// ============================================================================
-// Module-Level Helpers
-// ============================================================================
-
-/// Connect to a WebSocket URL with retry + exponential backoff.
 async fn connect_with_retry(
     url: &str,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WebSocketError> {
@@ -1333,7 +1272,6 @@ async fn connect_with_retry(
     }
 }
 
-/// Provider name string for an Alpaca platform.
 const fn alpaca_provider_name(platform: TradingPlatform) -> &'static str {
     if platform.is_paper() {
         "alpaca-paper"
@@ -1347,7 +1285,7 @@ mod tests {
     use super::*;
     use tektii_gateway_core::websocket::messages::WsMessage;
 
-    /// Regression test for TEK-573: Alpaca's trading stream delivers
+    /// Regression test: Alpaca's trading stream delivers
     /// `trade_updates` as Binary WebSocket frames whose payload is UTF-8 JSON.
     /// The reader previously matched only `Message::Text` and dropped Binary
     /// frames on the catch-all arm, silently swallowing every fill / reject /

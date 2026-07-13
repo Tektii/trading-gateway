@@ -42,28 +42,17 @@ use tektii_gateway_core::websocket::provider::{
     EventStream, ProviderConfig, ProviderEvent, WebSocketProvider,
 };
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// WebSocket URL for Saxo SIM environment.
 const SAXO_SIM_WS_URL: &str = "wss://streaming.saxobank.com/sim/openapi/streamingws";
-/// WebSocket URL for Saxo LIVE environment.
 const SAXO_LIVE_WS_URL: &str = "wss://streaming.saxobank.com/openapi/streamingws";
 
-/// Heartbeat timeout.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fraction of token lifetime at which to trigger re-authorization.
 const TOKEN_REAUTH_FRACTION: f64 = 0.75;
 
-/// Default token lifetime in seconds.
 const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 1200;
 
-/// Reference ID for the portfolio balance subscription.
 const BALANCE_REFERENCE_ID: &str = "balance_account";
-
-/// Reference ID for the portfolio order subscription.
 const ORDER_REFERENCE_ID: &str = "orders_account";
 
 /// Margin utilisation threshold for warning (80%).
@@ -75,12 +64,7 @@ const MARGIN_CRITICAL_THRESHOLD: f64 = 90.0;
 /// Margin utilisation threshold for margin call (100%).
 const MARGIN_CALL_THRESHOLD: f64 = 100.0;
 
-/// Debounce period.
 const MARGIN_DEBOUNCE: Duration = Duration::from_secs(60);
-
-// ============================================================================
-// Internal types
-// ============================================================================
 
 struct SubscriptionEntry {
     symbol: String,
@@ -159,10 +143,6 @@ impl MarginMonitor {
     }
 }
 
-// ============================================================================
-// Provider
-// ============================================================================
-
 /// Saxo Bank WebSocket streaming provider implementing [`WebSocketProvider`].
 pub struct SaxoWebSocketProvider {
     platform: TradingPlatform,
@@ -208,10 +188,6 @@ impl SaxoWebSocketProvider {
             stored_config: Arc::new(RwLock::new(None)),
         })
     }
-
-    // ========================================================================
-    // Subscription management
-    // ========================================================================
 
     async fn create_price_subscription(
         &self,
@@ -328,10 +304,6 @@ impl SaxoWebSocketProvider {
         Ok(())
     }
 
-    // ========================================================================
-    // Portfolio subscriptions
-    // ========================================================================
-
     async fn subscribe_balance(&self, context_id: &str) -> Result<(), SaxoError> {
         let request = SaxoPortfolioSubscriptionRequest {
             arguments: SaxoPortfolioSubscriptionArguments {
@@ -384,7 +356,6 @@ impl SaxoWebSocketProvider {
         Ok(())
     }
 
-    /// Create all initial price and portfolio subscriptions.
     async fn create_initial_subscriptions(&self, symbols: &[String], context_id: &str) {
         for symbol in symbols {
             if let Err(e) = self.subscribe_symbol(symbol, context_id).await {
@@ -436,10 +407,6 @@ impl SaxoWebSocketProvider {
     }
 }
 
-// ============================================================================
-// WebSocketProvider trait implementation
-// ============================================================================
-
 #[async_trait]
 impl WebSocketProvider for SaxoWebSocketProvider {
     async fn connect(&self, config: ProviderConfig) -> Result<EventStream, WebSocketError> {
@@ -451,7 +418,6 @@ impl WebSocketProvider for SaxoWebSocketProvider {
             *ctx = Some(context_id.clone());
         }
 
-        // Load instrument map
         let instrument_map = SaxoInstrumentMap::load(&self.http_client, &["FxSpot"])
             .await
             .map_err(|e| {
@@ -463,13 +429,11 @@ impl WebSocketProvider for SaxoWebSocketProvider {
             *map = Some(instrument_map);
         }
 
-        // Get access token for WebSocket connection
         let token =
             self.http_client.auth().access_token().await.map_err(|e| {
                 WebSocketError::ConfigError(format!("Failed to get Saxo token: {e}"))
             })?;
 
-        // Open WebSocket connection
         let ws_connect_url = format!("{}/connect?contextId={}", self.ws_url, context_id);
         let request = Request::builder()
             .uri(&ws_connect_url)
@@ -497,17 +461,14 @@ impl WebSocketProvider for SaxoWebSocketProvider {
             "Saxo WebSocket connected"
         );
 
-        // Create event channel
         let (tx, rx) = mpsc::unbounded_channel();
         *self.event_tx.write().await = Some(tx);
 
         self.create_initial_subscriptions(&config.symbols, &context_id)
             .await;
 
-        // Split WebSocket for reader task
         let (ws_write, ws_read) = ws_stream.split();
 
-        // Spawn binary frame reader task
         let reader_cancel = self.cancel_token.clone();
         let reader_store = self.snapshot_store.clone();
         let reader_subs = self.subscriptions.clone();
@@ -531,7 +492,6 @@ impl WebSocketProvider for SaxoWebSocketProvider {
             .await;
         });
 
-        // Spawn token re-authorization task
         let reauth_cancel = self.cancel_token.clone();
         let reauth_http = self.http_client.clone();
         let reauth_context_id = context_id.clone();
@@ -633,10 +593,6 @@ impl WebSocketProvider for SaxoWebSocketProvider {
     }
 }
 
-// ============================================================================
-// Binary frame reader task
-// ============================================================================
-
 struct FrameReaderContext {
     snapshot_store: Arc<SnapshotStore>,
     subscriptions: Arc<Mutex<HashMap<String, SubscriptionEntry>>>,
@@ -714,7 +670,6 @@ async fn run_frame_reader(
         }
     }
 
-    // Signal downstream consumers
     {
         let tx_guard = ctx.event_tx.read().await;
         if let Some(tx) = tx_guard.as_ref() {
@@ -734,10 +689,6 @@ async fn run_frame_reader(
     *ctx.event_tx.write().await = None;
     ctx.cancel_token.cancel();
 }
-
-// ============================================================================
-// Message processing
-// ============================================================================
 
 async fn process_message(
     message: &super::streaming::SaxoMessage,
@@ -832,9 +783,7 @@ async fn process_price_update(
     }
 }
 
-/// Build an [`Account`] from a merged Saxo balance snapshot.
 fn build_account_from_snapshot(merged: &serde_json::Value) -> Account {
-    /// Extract an f64 field from a JSON value and convert to Decimal.
     fn decimal_field(value: &serde_json::Value, key: &str) -> Decimal {
         Decimal::from_f64(
             value
@@ -930,10 +879,6 @@ async fn process_balance_update(
         }
     }
 }
-
-// ============================================================================
-// Order event translation
-// ============================================================================
 
 /// Determine the `OrderEventType` from a Saxo order status string and fill amount.
 ///
@@ -1104,7 +1049,6 @@ async fn process_order_update(
         }
     }
 
-    // Emit WsMessage::Order for normal order lifecycle events
     let map_guard = instrument_map.read().await;
     let Some(map) = map_guard.as_ref() else {
         return; // Instruments not loaded yet
@@ -1222,10 +1166,6 @@ fn handle_control_message(
     }
 }
 
-// ============================================================================
-// Token re-authorization task
-// ============================================================================
-
 async fn run_token_reauth(
     http_client: Arc<SaxoHttpClient>,
     context_id: String,
@@ -1285,16 +1225,11 @@ async fn run_token_reauth(
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 /// Generate a reference ID from a symbol (e.g., "EURUSD:FxSpot" -> "price_eurusd_fxspot").
 fn reference_id_for_symbol(symbol: &str) -> String {
     format!("price_{}", symbol.to_lowercase().replace(':', "_"))
 }
 
-/// Extract host from a URL for the WebSocket Host header.
 fn extract_host(url: &str) -> String {
     url.split("://")
         .nth(1)
@@ -1305,7 +1240,6 @@ fn extract_host(url: &str) -> String {
         .to_string()
 }
 
-/// Convert a merged Saxo price snapshot to a `Quote`.
 fn snapshot_to_quote(snapshot: &serde_json::Value, symbol: &str) -> Option<Quote> {
     let quote = snapshot.get("Quote")?;
     let bid = quote.get("Bid").and_then(serde_json::Value::as_f64)?;
@@ -1403,10 +1337,6 @@ mod tests {
         assert!(!is_forced_liquidation(&order));
     }
 
-    // ========================================================================
-    // Order event translation tests
-    // ========================================================================
-
     #[test]
     fn saxo_status_to_event_type_mapping() {
         use tektii_gateway_core::websocket::messages::OrderEventType;
@@ -1444,7 +1374,6 @@ mod tests {
             Some(OrderEventType::OrderExpired)
         );
 
-        // Transient statuses → None
         assert_eq!(
             saxo_status_to_event_type("LockedPlacementPending", 0.0),
             None

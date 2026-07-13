@@ -76,7 +76,6 @@ impl AdapterCircuitBreaker {
     pub fn record_failure(&mut self) {
         let now = Instant::now();
 
-        // Prune old failures outside the window
         while let Some(ts) = self.recent_failures.front() {
             if now.duration_since(*ts) > self.failure_window {
                 self.recent_failures.pop_front();

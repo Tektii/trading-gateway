@@ -100,7 +100,6 @@ impl StopOrderExecutor for AdapterStopOrderExecutor {
             "Modifying trailing stop order (cancel+place)"
         );
 
-        // Step 1: Cancel the existing stop order
         let cancel_result = self.adapter.cancel_order(&request.order_id).await?;
 
         // Check if the stop was already filled (triggered) before we could modify it
@@ -114,7 +113,6 @@ impl StopOrderExecutor for AdapterStopOrderExecutor {
             });
         }
 
-        // Step 2: Place the new stop order
         let new_request = StopOrderRequest {
             symbol: request.symbol.clone(),
             side: request.side,

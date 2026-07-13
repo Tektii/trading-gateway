@@ -6,10 +6,6 @@ use tektii_gateway_core::adapter::TradingAdapter;
 use tektii_gateway_core::error::GatewayError;
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 
-// =========================================================================
-// Binance error code mapping (exercised through integration paths)
-// =========================================================================
-
 #[tokio::test]
 async fn error_binance_1013_invalid_quantity() {
     let (server, base_url) = start_mock_server().await;

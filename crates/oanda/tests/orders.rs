@@ -19,7 +19,6 @@ use tektii_gateway_test_support::models::test_order_request;
 use tektii_gateway_test_support::wiremock_helpers::{mount_json, start_mock_server};
 use tokio::sync::mpsc;
 
-/// Helper to build an `OrderRequest` for Oanda forex tests.
 fn forex_order(symbol: &str, side: Side, order_type: OrderType, qty: Decimal) -> OrderRequest {
     OrderRequest {
         symbol: symbol.to_string(),
@@ -29,10 +28,6 @@ fn forex_order(symbol: &str, side: Side, order_type: OrderType, qty: Decimal) ->
         ..test_order_request()
     }
 }
-
-// =========================================================================
-// Submit Order
-// =========================================================================
 
 #[tokio::test]
 async fn submit_market_order_fill() {
@@ -984,10 +979,6 @@ async fn submit_order_http_422() {
     }
 }
 
-// =========================================================================
-// Get Order
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_success() {
     let (server, base_url) = start_mock_server().await;
@@ -1049,10 +1040,6 @@ async fn get_order_not_found() {
     let err = adapter.get_order("999").await.unwrap_err();
     assert!(matches!(err, GatewayError::OrderNotFound { .. }));
 }
-
-// =========================================================================
-// Get Orders (list)
-// =========================================================================
 
 #[tokio::test]
 async fn get_orders_success() {
@@ -1123,10 +1110,6 @@ async fn get_orders_with_symbol_filter() {
     assert_eq!(orders.len(), 1);
 }
 
-// =========================================================================
-// Get Order History
-// =========================================================================
-
 #[tokio::test]
 async fn get_order_history() {
     let (server, base_url) = start_mock_server().await;
@@ -1153,16 +1136,11 @@ async fn get_order_history() {
     assert_eq!(orders[1].status, OrderStatus::Cancelled);
 }
 
-// =========================================================================
-// Modify Order (PUT replacement)
-// =========================================================================
-
 #[tokio::test]
 async fn modify_order_success() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // 1. GET current order
     mount_json(
         &server,
         "GET",
@@ -1172,7 +1150,7 @@ async fn modify_order_success() {
     )
     .await;
 
-    // 2. PUT replacement -> returns orderCreateTransaction with new ID
+    // PUT replacement returns orderCreateTransaction with the new order id
     mount_json(
         &server,
         "PUT",
@@ -1185,7 +1163,7 @@ async fn modify_order_success() {
     )
     .await;
 
-    // 3. GET the new order (adapter fetches the replacement)
+    // adapter fetches the replacement order for its full details
     mount_json(
         &server,
         "GET",
@@ -1237,10 +1215,6 @@ async fn modify_order_not_found() {
     assert!(matches!(err, GatewayError::OrderNotFound { .. }));
 }
 
-// =========================================================================
-// Cancel Order
-// =========================================================================
-
 #[tokio::test]
 async fn cancel_order_success() {
     let (server, base_url) = start_mock_server().await;
@@ -1279,16 +1253,11 @@ async fn cancel_order_not_found() {
     assert!(matches!(err, GatewayError::OrderNotFound { .. }));
 }
 
-// =========================================================================
-// Cancel All Orders (default trait impl)
-// =========================================================================
-
 #[tokio::test]
 async fn cancel_all_orders() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
-    // GET open orders returns 2
     mount_json(
         &server,
         "GET",
@@ -1303,7 +1272,6 @@ async fn cancel_all_orders() {
     )
     .await;
 
-    // Cancel each
     mount_json(
         &server,
         "PUT",

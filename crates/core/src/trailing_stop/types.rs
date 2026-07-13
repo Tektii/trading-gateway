@@ -464,10 +464,6 @@ impl Default for TrailingStopConfig {
 mod tests {
     use super::*;
 
-    // =========================================================================
-    // Placeholder ID Tests
-    // =========================================================================
-
     #[test]
     fn generate_placeholder_id_creates_correct_format() {
         let id = generate_placeholder_id("order-123");
@@ -486,10 +482,6 @@ mod tests {
         assert_eq!(parse_placeholder_id("exit:sl:order-123"), None);
         assert_eq!(parse_placeholder_id("trailing:"), Some(String::new()));
     }
-
-    // =========================================================================
-    // Stop Price Calculation Tests
-    // =========================================================================
 
     #[test]
     fn sell_stop_absolute_calculates_correctly() {
@@ -533,10 +525,6 @@ mod tests {
         assert_eq!(stop, dec!(51.7575));
     }
 
-    // =========================================================================
-    // Peak Improvement Tests
-    // =========================================================================
-
     #[test]
     fn sell_peak_improvement_when_price_higher() {
         assert!(is_peak_improvement(dec!(100), dec!(101), Side::Sell));
@@ -560,10 +548,6 @@ mod tests {
         assert!(!is_peak_improvement(dec!(100), dec!(101), Side::Buy));
         assert!(!is_peak_improvement(dec!(100), dec!(100), Side::Buy));
     }
-
-    // =========================================================================
-    // Stop Adjustment Threshold Tests
-    // =========================================================================
 
     #[test]
     fn should_adjust_when_first_placement() {

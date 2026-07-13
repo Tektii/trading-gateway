@@ -8,10 +8,6 @@ use tektii_gateway_core::models::{
     AssetClass, Capabilities, OrderRequest, OrderType, PositionMode, RateLimits,
 };
 
-// ============================================================================
-// Oanda Provider Capabilities
-// ============================================================================
-
 /// Oanda provider capabilities for forex and CFD trading.
 ///
 /// Oanda has the best native bracket order support of any integrated broker:
@@ -61,7 +57,6 @@ impl ProviderCapabilities for OandaCapabilities {
     }
 
     fn bracket_strategy(&self, order: &OrderRequest) -> BracketStrategy {
-        // No SL/TP requested - nothing to handle
         if order.stop_loss.is_none() && order.take_profit.is_none() {
             return BracketStrategy::None;
         }

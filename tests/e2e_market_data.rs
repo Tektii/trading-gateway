@@ -18,10 +18,6 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-// ---------------------------------------------------------------------------
-// REST bars
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn rest_get_bars_returns_configured_bars() {
     let bar = test_bar("AAPL");
@@ -73,10 +69,6 @@ async fn rest_get_bars_missing_timeframe_returns_400() {
 
     assert_eq!(resp.status(), 400);
 }
-
-// ---------------------------------------------------------------------------
-// WebSocket streaming
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn quote_event_reaches_strategy_via_websocket() {
@@ -155,10 +147,6 @@ async fn multiple_symbols_stream_independently() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Full round-trip: REST query → streaming update
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn rest_query_then_streaming_update() {
     let quote = test_quote("AAPL");
@@ -168,7 +156,6 @@ async fn rest_query_then_streaming_update() {
     let mut client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Step 1: Query current quote via REST
     let resp = http_client()
         .get(format!("{}/quotes/AAPL", gw.base_url()))
         .send()
@@ -180,7 +167,6 @@ async fn rest_query_then_streaming_update() {
     assert_eq!(body["symbol"], "AAPL");
     assert_eq!(body["last"], "100");
 
-    // Step 2: Market moves — new quote arrives via WebSocket
     let updated_quote = Quote {
         last: dec!(105),
         bid: dec!(104),

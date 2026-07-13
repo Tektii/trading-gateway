@@ -16,10 +16,6 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-// ---------------------------------------------------------------------------
-// /health endpoint
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn health_returns_connected_with_provider_details() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
@@ -48,10 +44,6 @@ async fn health_returns_connected_with_provider_details() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// /readyz endpoint
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn readyz_body_contains_provider_list() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
@@ -72,11 +64,6 @@ async fn readyz_body_contains_provider_list() {
     assert_eq!(providers[0], "alpaca-paper");
 }
 
-// ---------------------------------------------------------------------------
-// /metrics endpoint + metrics increments
-// ---------------------------------------------------------------------------
-// Process-global Prometheus recorder — all metrics assertions in one test.
-
 #[tokio::test]
 async fn metrics_endpoint_and_increments() {
     let handle = OrderHandle {
@@ -94,7 +81,6 @@ async fn metrics_endpoint_and_increments() {
         return;
     };
 
-    // -- 1. /metrics returns Prometheus text exposition format
     let resp = http_client()
         .get(format!("{}/metrics", gw.root_url()))
         .send()
@@ -109,7 +95,6 @@ async fn metrics_endpoint_and_increments() {
         "Expected Prometheus text format, got:\n{body}"
     );
 
-    // -- 2. Submit an order and verify counter/histogram appear
     let resp = http_client()
         .post(format!("{}/orders", gw.base_url()))
         .json(&serde_json::json!({
@@ -133,11 +118,9 @@ async fn metrics_endpoint_and_increments() {
         output.contains("gateway_order_submit_duration_seconds"),
         "Missing gateway_order_submit_duration_seconds after order submit:\n{output}"
     );
-    // Platform label should be present
     let has_platform = output.contains("alpaca_paper") || output.contains("alpaca-paper");
     assert!(has_platform, "Missing platform label in metrics:\n{output}");
 
-    // Also verify via HTTP endpoint
     let resp = http_client()
         .get(format!("{}/metrics", gw.root_url()))
         .send()
@@ -150,7 +133,6 @@ async fn metrics_endpoint_and_increments() {
         "Missing counter in HTTP /metrics response"
     );
 
-    // -- 3. WS connection gauge: connect, verify increment, disconnect, verify decrement
     let client = StrategyClient::connect(&gw).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -159,13 +141,11 @@ async fn metrics_endpoint_and_increments() {
         output.contains("gateway_ws_connections_active"),
         "Missing WS connections gauge after connect:\n{output}"
     );
-    // Gauge should show 1 (look for the metric line with value 1)
     assert!(
         output.contains("gateway_ws_connections_active 1"),
         "Expected WS gauge = 1, metrics:\n{output}"
     );
 
-    // Disconnect and verify gauge drops
     client.close().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 

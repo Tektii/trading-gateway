@@ -52,11 +52,9 @@ pub fn parse_frame(data: &[u8]) -> Result<Vec<SaxoMessage>, SaxoError> {
     let mut offset = 0;
 
     while offset < data.len() {
-        // Message ID: 8 bytes LE
         let message_id = read_u64_le(data, offset, "message_id")?;
         offset += 8;
 
-        // Reserved: 2 bytes (skip)
         if offset + 2 > data.len() {
             return Err(SaxoError::InvalidFrame(
                 "truncated at reserved bytes".to_string(),
@@ -64,7 +62,6 @@ pub fn parse_frame(data: &[u8]) -> Result<Vec<SaxoMessage>, SaxoError> {
         }
         offset += 2;
 
-        // Reference ID length: 1 byte
         if offset >= data.len() {
             return Err(SaxoError::InvalidFrame(
                 "truncated at reference ID length".to_string(),
@@ -73,7 +70,6 @@ pub fn parse_frame(data: &[u8]) -> Result<Vec<SaxoMessage>, SaxoError> {
         let ref_id_len = data[offset] as usize;
         offset += 1;
 
-        // Reference ID: ref_id_len bytes
         if offset + ref_id_len > data.len() {
             return Err(SaxoError::InvalidFrame(
                 "truncated at reference ID".to_string(),
@@ -84,7 +80,6 @@ pub fn parse_frame(data: &[u8]) -> Result<Vec<SaxoMessage>, SaxoError> {
             .map_err(|e| SaxoError::InvalidFrame(format!("invalid UTF-8 in reference ID: {e}")))?;
         offset += ref_id_len;
 
-        // Payload format: 1 byte (0 = JSON)
         if offset >= data.len() {
             return Err(SaxoError::InvalidFrame(
                 "truncated at payload format".to_string(),
@@ -96,11 +91,9 @@ pub fn parse_frame(data: &[u8]) -> Result<Vec<SaxoMessage>, SaxoError> {
             return Err(SaxoError::UnsupportedPayloadFormat(payload_format));
         }
 
-        // Payload size: 4 bytes LE
         let payload_size = read_u32_le(data, offset, "payload_size")? as usize;
         offset += 4;
 
-        // Payload: payload_size bytes
         if offset + payload_size > data.len() {
             return Err(SaxoError::InvalidFrame("truncated at payload".to_string()));
         }
@@ -143,16 +136,15 @@ fn read_u32_le(data: &[u8], offset: usize, field: &str) -> Result<u32, SaxoError
 mod tests {
     use super::*;
 
-    /// Build a single binary message with the given fields.
     fn build_message(message_id: u64, reference_id: &str, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&message_id.to_le_bytes()); // 8 bytes
-        buf.extend_from_slice(&[0u8; 2]); // reserved
-        buf.push(reference_id.len() as u8); // ref ID length
-        buf.extend_from_slice(reference_id.as_bytes()); // ref ID
-        buf.push(0); // payload format = JSON
-        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // payload size
-        buf.extend_from_slice(payload); // payload
+        buf.extend_from_slice(&message_id.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 2]);
+        buf.push(reference_id.len() as u8);
+        buf.extend_from_slice(reference_id.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload);
         buf
     }
 
@@ -213,10 +205,10 @@ mod tests {
     #[test]
     fn unsupported_payload_format() {
         let mut data = vec![0u8; 10]; // msg_id + reserved
-        data.push(1); // ref_id_len
-        data.push(b'x'); // ref_id
+        data.push(1);
+        data.push(b'x');
         data.push(1); // format = 1 (protobuf - unsupported)
-        data.extend_from_slice(&0u32.to_le_bytes()); // payload_size = 0
+        data.extend_from_slice(&0u32.to_le_bytes());
         let err = parse_frame(&data).unwrap_err();
         assert!(
             err.to_string()

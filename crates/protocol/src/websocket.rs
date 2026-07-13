@@ -8,10 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::rest::{Account, AccountEventType, Order, OrderEventType, Position, Trade};
 
-// =============================================================================
-// Server -> Client Messages
-// =============================================================================
-
 /// Messages sent from the engine to connected strategies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -196,10 +192,6 @@ impl ServerMessage {
     }
 }
 
-// =============================================================================
-// Client -> Server Messages
-// =============================================================================
-
 /// Messages sent from strategies to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -251,10 +243,6 @@ impl ClientMessage {
         }
     }
 }
-
-// =============================================================================
-// Event ID Generation
-// =============================================================================
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

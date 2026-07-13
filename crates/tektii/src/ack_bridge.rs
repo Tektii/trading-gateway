@@ -259,7 +259,6 @@ impl TektiiAckBridge {
         debug!(event_id = %event_id, "Immediate ACK (not subscribed)");
 
         if self.engine_ack_tx.send(vec![event_id]).is_err() {
-            // Channel closed - engine writer task has stopped
             trace!("Engine ACK channel closed, dropping immediate ACK");
         }
     }
@@ -502,17 +501,13 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = TektiiAckBridge::new(tx);
 
-        // Register a pending event
         bridge.register_pending("evt-0".to_string()).await;
 
-        // Immediate ACK for different event
         bridge.immediate_ack("evt-1".to_string());
 
-        // Should receive the immediate ACK
         let acked = rx.recv().await.expect("Should receive immediate ACK");
         assert_eq!(acked, vec!["evt-1".to_string()]);
 
-        // Pending event should still be there
         assert_eq!(bridge.pending_count().await, 1);
     }
 
@@ -664,7 +659,6 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let bridge = TektiiAckBridge::new(tx);
 
-        // Should not panic
         bridge.mark_sent(vec!["unknown".to_string()]).await;
 
         assert_eq!(bridge.pending_count().await, 0);

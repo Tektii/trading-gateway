@@ -18,10 +18,6 @@ use smallvec::SmallVec;
 
 use crate::models::{Side, TradingPlatform};
 
-// =============================================================================
-// Exit Leg Type
-// =============================================================================
-
 /// Type of exit order leg: stop-loss or take-profit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,10 +59,6 @@ impl std::fmt::Display for ExitLegType {
         }
     }
 }
-
-// =============================================================================
-// Actual Order
-// =============================================================================
 
 /// A single actual order placed at the provider for a pending exit entry.
 ///
@@ -127,10 +119,6 @@ impl ActualOrder {
     }
 }
 
-// =============================================================================
-// Actual Order Status
-// =============================================================================
-
 /// Status of an individual actual order at the provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -158,10 +146,6 @@ pub enum ActualOrderStatus {
     /// Order status is unknown.
     Unknown,
 }
-
-// =============================================================================
-// Cancellation Reason
-// =============================================================================
 
 /// Reason why a pending SL/TP entry was cancelled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,10 +180,6 @@ impl std::fmt::Display for CancellationReason {
         }
     }
 }
-
-// =============================================================================
-// Exit Entry Status
-// =============================================================================
 
 /// Status of a pending exit order entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -248,10 +228,6 @@ pub struct ExitEntryStatusInfo {
     /// When the status was last updated.
     pub updated_at: Option<DateTime<Utc>>,
 }
-
-// =============================================================================
-// Placeholder ID Helpers
-// =============================================================================
 
 /// Generates a placeholder ID for an exit order.
 ///
@@ -315,10 +291,6 @@ pub const fn side_to_str(side: Side) -> &'static str {
     }
 }
 
-// =============================================================================
-// Exit Entry Info
-// =============================================================================
-
 /// Information about an exit entry needed for reconciliation.
 #[derive(Debug, Clone)]
 pub struct ExitEntryInfo {
@@ -347,10 +319,6 @@ pub struct FailedExitInfo {
     pub actual_order_ids: Vec<String>,
 }
 
-// =============================================================================
-// Cancelled Exit Info
-// =============================================================================
-
 /// Information about a cancelled exit entry.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -373,10 +341,6 @@ pub struct CancelledExitInfo {
     pub quantity: Decimal,
 }
 
-// =============================================================================
-// Cancel Exit Result (Simplified -- for ExitHandling trait)
-// =============================================================================
-
 /// Simplified result of cancelling exit orders (returned by `ExitHandling` trait).
 #[derive(Debug, Clone)]
 pub struct CancelExitResult {
@@ -385,10 +349,6 @@ pub struct CancelExitResult {
     /// Order IDs that failed to cancel.
     pub failed: Vec<String>,
 }
-
-// =============================================================================
-// Cancel Exit Result (Internal -- full state machine)
-// =============================================================================
 
 /// Internal result of attempting to cancel an exit entry.
 ///
@@ -429,10 +389,6 @@ pub enum CancelExitResultInternal {
         status: ExitEntryStatus,
     },
 }
-
-// =============================================================================
-// Exit Entry
-// =============================================================================
 
 /// Parameters for creating a new [`ExitEntry`].
 ///
@@ -633,10 +589,6 @@ impl ExitEntry {
     }
 }
 
-// =============================================================================
-// Registered Exit Legs
-// =============================================================================
-
 /// Result of registering exit orders for a primary order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegisteredExitLegs {
@@ -669,10 +621,6 @@ pub struct ExitBackupRegistration {
     /// Placeholder IDs for the backup exit entries.
     pub placeholder_ids: Vec<String>,
 }
-
-// =============================================================================
-// Exit Handler Configuration
-// =============================================================================
 
 /// Configuration for the Exit Handler.
 #[derive(Debug, Clone)]
@@ -717,10 +665,6 @@ impl ExitHandlerConfig {
         Self::default()
     }
 }
-
-// =============================================================================
-// Placement Result Types
-// =============================================================================
 
 /// Result of a single exit order placement attempt.
 #[derive(Debug, Clone)]
@@ -859,10 +803,6 @@ impl PlacementResult {
     }
 }
 
-// =============================================================================
-// Error Classification
-// =============================================================================
-
 /// Classification of errors for circuit breaker behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
@@ -942,10 +882,6 @@ impl PlaceOrderError {
     }
 }
 
-// =============================================================================
-// Exit Order Type (simplified, for EventRouter compatibility)
-// =============================================================================
-
 /// Type of exit order (simplified enum for `EventRouter` pattern matching).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExitOrderType {
@@ -963,10 +899,6 @@ impl From<ExitLegType> for ExitOrderType {
         }
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {

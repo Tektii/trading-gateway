@@ -5,10 +5,6 @@
 
 use serde::Deserialize;
 
-// ============================================================================
-// Combined Stream Envelope
-// ============================================================================
-
 /// Wrapper for Binance combined-stream messages.
 ///
 /// Combined streams (`/stream?streams=...`) wrap each payload in:
@@ -22,10 +18,6 @@ pub struct CombinedStreamMessage {
     /// Raw payload — deserialized later based on stream suffix.
     pub data: serde_json::Value,
 }
-
-// ============================================================================
-// Market Data — Book Ticker
-// ============================================================================
 
 /// Best bid/ask update from `@bookTicker` stream.
 #[derive(Debug, Deserialize)]
@@ -50,10 +42,6 @@ pub struct WsBookTickerEvent {
     #[serde(rename = "A")]
     pub ask_qty: String,
 }
-
-// ============================================================================
-// Market Data — Kline
-// ============================================================================
 
 /// Kline/candlestick event from `@kline_<interval>` stream.
 #[derive(Debug, Deserialize)]
@@ -107,10 +95,6 @@ pub struct WsKlineData {
     #[allow(dead_code)]
     pub is_closed: bool,
 }
-
-// ============================================================================
-// Spot / Margin — User Data Stream
-// ============================================================================
 
 /// Spot/Margin order execution report (`executionReport`).
 #[derive(Debug, Deserialize)]
@@ -211,10 +195,6 @@ pub struct SpotBalanceUpdate {
     #[serde(rename = "l")]
     pub locked: String,
 }
-
-// ============================================================================
-// Futures / Coin-Futures — User Data Stream
-// ============================================================================
 
 /// Futures order update (`ORDER_TRADE_UPDATE`).
 #[derive(Debug, Deserialize)]
@@ -373,10 +353,6 @@ pub struct FuturesPositionUpdate {
     #[serde(rename = "ps")]
     pub position_side: String,
 }
-
-// ============================================================================
-// Generic User Data Stream Envelope
-// ============================================================================
 
 /// Minimal envelope to peek at the event type before full deserialization.
 #[derive(Debug, Deserialize)]
