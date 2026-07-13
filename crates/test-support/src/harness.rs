@@ -130,6 +130,17 @@ pub async fn spawn_test_gateway(adapter: MockTradingAdapter) -> TestGateway {
     spawn_test_gateway_with_adapter(Arc::new(adapter)).await
 }
 
+/// Spawn a full gateway with no provider registered.
+///
+/// For tests that register a real `WebSocketProvider` themselves (e.g. the
+/// tektii engine provider against a mock engine WS server) via
+/// `gw.state.provider_registry().register_provider(...)`. The returned
+/// [`TestGateway::event_tx`] is not wired to any provider — `inject_event`
+/// is a no-op.
+pub async fn spawn_test_gateway_without_provider(adapter: Arc<MockTradingAdapter>) -> TestGateway {
+    spawn_gateway_inner(adapter, false, false).await
+}
+
 /// Spawn a full gateway backed by a shared mock adapter reference.
 ///
 /// Like [`spawn_test_gateway`], but accepts an `Arc<MockTradingAdapter>` so the caller
@@ -154,6 +165,14 @@ pub async fn spawn_test_gateway_with_exit_management(
 async fn spawn_gateway(
     adapter: Arc<MockTradingAdapter>,
     with_exit_management: bool,
+) -> TestGateway {
+    spawn_gateway_inner(adapter, with_exit_management, true).await
+}
+
+async fn spawn_gateway_inner(
+    adapter: Arc<MockTradingAdapter>,
+    with_exit_management: bool,
+    with_mock_provider: bool,
 ) -> TestGateway {
     let platform = adapter.platform();
     let adapter: Arc<dyn TradingAdapter> = adapter;
@@ -209,11 +228,13 @@ async fn spawn_gateway(
 
     // Create provider event stream and register
     let (event_tx, stream) = MockWebSocketProvider::make_event_stream();
-    let provider = MockWebSocketProvider::new(false); // no reconnection needed
-    provider_registry
-        .register_provider(platform, Box::new(provider), stream, vec![], vec![])
-        .await
-        .expect("register_provider should succeed");
+    if with_mock_provider {
+        let provider = MockWebSocketProvider::new(false); // no reconnection needed
+        provider_registry
+            .register_provider(platform, Box::new(provider), stream, vec![], vec![])
+            .await
+            .expect("register_provider should succeed");
+    }
 
     // Build Axum router (REST + WebSocket)
     let (router, _api) = create_gateway_router().split_for_parts();
