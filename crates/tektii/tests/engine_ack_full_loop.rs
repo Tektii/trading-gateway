@@ -87,6 +87,205 @@ async fn echoed_id_acked_by_strategy_releases_the_engine_fifo() {
     assert_eq!(released, vec!["evt-loop-1".to_string()]);
 }
 
+/// Strict-ID release: the ACK names which event it acknowledges, and exactly
+/// that event is released — not whatever happens to sit at the queue head.
+#[tokio::test]
+async fn ack_releases_the_exact_echoed_id_not_the_queue_head() {
+    let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
+    let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
+    gw.state
+        .provider_registry()
+        .set_tektii_ack_bridge(bridge.clone())
+        .await;
+
+    let mut client = StrategyClient::connect(&gw).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Two engine events delivered back-to-back.
+    for id in ["evt-a", "evt-b"] {
+        bridge.register_pending(id.to_string()).await;
+        gw.event_tx
+            .send(ProviderEvent::engine(
+                WsMessage::quote(test_quote("AAPL")),
+                id.to_string(),
+            ))
+            .expect("event stream open");
+    }
+    for _ in 0..2 {
+        recv_quote_event_id(&mut client)
+            .await
+            .expect("strategy never received the quote");
+    }
+
+    // The strategy acks the SECOND event's id. Exactly evt-b must be
+    // released — under positional release the head (evt-a) would leak out.
+    client.send_json(&event_ack(&["evt-b"])).await;
+
+    let released = tokio::time::timeout(TIMEOUT, engine_ack_rx.recv())
+        .await
+        .expect("engine never received the ACK")
+        .expect("bridge engine ACK channel closed");
+    assert_eq!(released, vec!["evt-b".to_string()]);
+}
+
+/// A lost delivery must not wedge the FIFO: an ACK for a *delivered* event
+/// releases that event even when an older, never-delivered event still sits
+/// at the queue head. Under positional release the ACK deferred forever
+/// behind the wedged head and the engine starved to its halt threshold.
+#[tokio::test]
+async fn ack_for_a_delivered_event_releases_it_past_an_undelivered_head() {
+    let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
+    let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
+    gw.state
+        .provider_registry()
+        .set_tektii_ack_bridge(bridge.clone())
+        .await;
+
+    let mut client = StrategyClient::connect(&gw).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // evt-lost is registered pending but never delivered (dropped between the
+    // engine WS read and the strategy connection — e.g. a send failure).
+    bridge.register_pending("evt-lost".to_string()).await;
+
+    // evt-next is delivered normally.
+    bridge.register_pending("evt-next".to_string()).await;
+    gw.event_tx
+        .send(ProviderEvent::engine(
+            WsMessage::quote(test_quote("AAPL")),
+            "evt-next".to_string(),
+        ))
+        .expect("event stream open");
+    let echoed = recv_quote_event_id(&mut client)
+        .await
+        .expect("strategy never received the quote")
+        .expect("engine event_id was not echoed on the wire");
+    assert_eq!(echoed, "evt-next");
+
+    client.send_json(&event_ack(&[&echoed])).await;
+
+    let released = tokio::time::timeout(TIMEOUT, engine_ack_rx.recv())
+        .await
+        .expect("ACK for a delivered event must not wedge behind an undelivered head")
+        .expect("bridge engine ACK channel closed");
+    assert_eq!(released, vec!["evt-next".to_string()]);
+}
+
+/// An ACK naming an id the bridge never registered must release nothing —
+/// under positional release any non-empty ACK popped the queue head,
+/// whatever id it carried.
+#[tokio::test]
+async fn ack_with_unknown_id_releases_nothing() {
+    let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
+    let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
+    gw.state
+        .provider_registry()
+        .set_tektii_ack_bridge(bridge.clone())
+        .await;
+
+    let mut client = StrategyClient::connect(&gw).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    bridge.register_pending("evt-real".to_string()).await;
+    gw.event_tx
+        .send(ProviderEvent::engine(
+            WsMessage::quote(test_quote("AAPL")),
+            "evt-real".to_string(),
+        ))
+        .expect("event stream open");
+    recv_quote_event_id(&mut client)
+        .await
+        .expect("strategy never received the quote");
+
+    client.send_json(&event_ack(&["evt-bogus"])).await;
+
+    let result = tokio::time::timeout(Duration::from_millis(300), engine_ack_rx.recv()).await;
+    assert!(
+        result.is_err(),
+        "an unknown-id ACK must not release the pending event, got {result:?}"
+    );
+}
+
+/// One ACK frame naming several ids (a batch ACK over the real wire) must
+/// release all of them — a regression that truncates `events_processed` to
+/// its first element anywhere on the inbound path would fail this.
+#[tokio::test]
+async fn single_ack_frame_naming_multiple_ids_releases_all_of_them() {
+    let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
+    let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
+    gw.state
+        .provider_registry()
+        .set_tektii_ack_bridge(bridge.clone())
+        .await;
+
+    let mut client = StrategyClient::connect(&gw).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for id in ["evt-b1", "evt-b2"] {
+        bridge.register_pending(id.to_string()).await;
+        gw.event_tx
+            .send(ProviderEvent::engine(
+                WsMessage::quote(test_quote("AAPL")),
+                id.to_string(),
+            ))
+            .expect("event stream open");
+    }
+    for _ in 0..2 {
+        recv_quote_event_id(&mut client)
+            .await
+            .expect("strategy never received the quote");
+    }
+
+    client.send_json(&event_ack(&["evt-b1", "evt-b2"])).await;
+
+    let released = tokio::time::timeout(TIMEOUT, engine_ack_rx.recv())
+        .await
+        .expect("engine never received the batch ACK")
+        .expect("bridge engine ACK channel closed");
+    assert_eq!(released, vec!["evt-b1".to_string(), "evt-b2".to_string()]);
+}
+
+/// Duplicate ACKs for the same id are idempotent: the first releases the
+/// event, the second finds nothing and releases nothing.
+#[tokio::test]
+async fn duplicate_ack_for_the_same_id_releases_once() {
+    let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;
+    let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
+    gw.state
+        .provider_registry()
+        .set_tektii_ack_bridge(bridge.clone())
+        .await;
+
+    let mut client = StrategyClient::connect(&gw).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    bridge.register_pending("evt-once".to_string()).await;
+    gw.event_tx
+        .send(ProviderEvent::engine(
+            WsMessage::quote(test_quote("AAPL")),
+            "evt-once".to_string(),
+        ))
+        .expect("event stream open");
+    recv_quote_event_id(&mut client)
+        .await
+        .expect("strategy never received the quote");
+
+    client.send_json(&event_ack(&["evt-once"])).await;
+    client.send_json(&event_ack(&["evt-once"])).await;
+
+    let released = tokio::time::timeout(TIMEOUT, engine_ack_rx.recv())
+        .await
+        .expect("first ACK must release the event")
+        .expect("bridge engine ACK channel closed");
+    assert_eq!(released, vec!["evt-once".to_string()]);
+
+    let second = tokio::time::timeout(Duration::from_millis(300), engine_ack_rx.recv()).await;
+    assert!(
+        second.is_err(),
+        "duplicate ACK must not release anything further, got {second:?}"
+    );
+}
+
 #[tokio::test]
 async fn empty_strategy_ack_does_not_release_the_engine_fifo() {
     let gw = spawn_test_gateway(MockTradingAdapter::new(TradingPlatform::AlpacaPaper)).await;

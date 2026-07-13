@@ -289,17 +289,25 @@ impl Default for AckManager {
 ///    `connection_manager.send_to` returns successfully. Only events that
 ///    have been marked sent are eligible for release by a strategy ACK.
 ///
-/// `handle_strategy_ack` releases exactly the oldest `sent = true` event —
-/// strategies ACK once per delivered event, after handling it, so one ACK
-/// frees one event (FIFO). Releasing everything delivered would ack events
-/// the strategy hasn't consumed yet, letting the engine advance sim time
-/// before the strategy's response orders land (TEK-1026). Events still in
-/// flight (registered but not yet sent) remain pending until delivered.
+/// # Strict-ID release
+///
+/// `handle_strategy_ack` releases exactly the events the ACK names: the
+/// gateway echoes the engine `event_id` on every outbound engine frame, the
+/// SDK returns it in `events_processed`, and the bridge releases those ids —
+/// never by queue position. An ACK naming an unknown id releases nothing; an
+/// empty ACK (gateway-local events carry no engine id) releases nothing.
+/// Positional release required the bridge's queue to mirror the engine's
+/// send order perfectly across every delivery failure — one lost event or
+/// stray ACK offset it permanently, surfacing far away as over-popped sim
+/// time (0-trade runs) or a starved-FIFO halt. Naming the id makes each
+/// release self-describing and delivery losses self-healing. Events still
+/// in flight (registered but not yet sent) have their ACK held until
+/// `mark_sent` confirms delivery.
 #[async_trait]
 pub trait AckBridge: Send + Sync {
-    /// Handle an ACK from a connected strategy. Releases the oldest event
-    /// that has been marked sent.
-    async fn handle_strategy_ack(&self);
+    /// Handle an ACK from a connected strategy, releasing exactly the named
+    /// events (once delivered). Unknown ids and empty ACKs release nothing.
+    async fn handle_strategy_ack(&self, event_ids: &[String]);
 
     /// Register events as pending acknowledgment (phase 1: WS read).
     async fn register_pending(&self, event_ids: Vec<String>);

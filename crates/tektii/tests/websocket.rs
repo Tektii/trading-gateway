@@ -548,15 +548,15 @@ async fn multiple_pending_events_released_one_per_ack() {
         ])
         .await;
 
-    // Each strategy ACK releases exactly one event — the oldest delivered —
-    // never everything delivered (TEK-1026: a single ACK draining the whole
+    // Each strategy ACK names the event it answers and releases exactly that
+    // event — never everything delivered (a single ACK draining the whole
     // batch let the engine advance sim time past events the strategy hadn't
     // consumed yet).
     for expected in ["evt-1", "evt-2", "evt-3"] {
         provider
             .handle_ack(EventAckMessage {
                 correlation_id: "batch".to_string(),
-                events_processed: vec!["any".to_string()],
+                events_processed: vec![expected.to_string()],
                 timestamp: 0,
             })
             .await
@@ -574,7 +574,7 @@ async fn multiple_pending_events_released_one_per_ack() {
                 assert_eq!(
                     events_processed,
                     vec![expected.to_string()],
-                    "each strategy ACK must release exactly the oldest delivered event"
+                    "each strategy ACK must release exactly the event it names"
                 );
             }
             other => panic!("Expected EventAck, got {other:?}"),

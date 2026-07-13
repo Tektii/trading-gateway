@@ -343,9 +343,12 @@ async fn engine_receives_ack_after_strategy_acks_event_delivered_through_registr
         .expect("channel closed before candle arrived");
     assert!(matches!(strategy_msg, WsMessage::Candle { .. }));
 
-    // Strategy ACKs. The registry should already have called `mark_sent`
-    // post `send_to`, so this drains and forwards to the engine.
-    bridge.handle_strategy_ack().await;
+    // Strategy ACKs the candle by its echoed id. The registry should already
+    // have called `mark_sent` post `send_to`, so this releases the event and
+    // forwards to the engine.
+    bridge
+        .handle_strategy_ack(&["evt-candle-1".to_string()])
+        .await;
 
     // Engine receives the EventAck on its WebSocket — proves the registry
     // correctly called `mark_sent`.
@@ -569,7 +572,9 @@ async fn undelivered_engine_event_with_no_strategy_is_not_marked_sent() {
         .await
         .expect("strategy never received candle-1")
         .expect("channel closed before candle-1 arrived");
-    bridge.handle_strategy_ack().await;
+    bridge
+        .handle_strategy_ack(&["evt-candle-1".to_string()])
+        .await;
     let ack_raw = timeout(Duration::from_secs(2), engine_rx.recv())
         .await
         .expect("engine never received ACK for candle-1")
@@ -607,8 +612,12 @@ async fn undelivered_engine_event_with_no_strategy_is_not_marked_sent() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // A stale strategy ACK arrives (e.g. a late frame from the old
-    // connection). It must NOT release the undelivered candle-2.
-    bridge.handle_strategy_ack().await;
+    // connection) — even one naming candle-2. It must NOT release the
+    // undelivered candle-2: delivery was never confirmed, so the ACK is held
+    // until a `mark_sent` that will never come.
+    bridge
+        .handle_strategy_ack(&["evt-candle-2".to_string()])
+        .await;
 
     assert!(
         timeout(Duration::from_millis(300), engine_rx.recv())
@@ -691,7 +700,9 @@ async fn failed_strategy_send_does_not_mark_event_sent() {
     // Let the loop register the event and hit the failing `send_to`.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    bridge.handle_strategy_ack().await;
+    bridge
+        .handle_strategy_ack(&["evt-candle-1".to_string()])
+        .await;
 
     assert!(
         timeout(Duration::from_millis(300), engine_rx.recv())

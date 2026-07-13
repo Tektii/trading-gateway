@@ -271,7 +271,7 @@ impl WebSocketProvider for TektiiWebSocketProvider {
                 events_processed = ack.events_processed.len(),
                 "Forwarding strategy ACK to engine"
             );
-            b.handle_strategy_ack().await;
+            b.handle_strategy_ack(&ack.events_processed).await;
         } else {
             warn!("handle_ack called before connect() - ACK bridge not initialized");
         }

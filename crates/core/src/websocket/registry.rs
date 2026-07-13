@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 use tokio::sync::{RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::adapter::TradingAdapter;
@@ -368,31 +368,29 @@ impl ProviderRegistry {
         info!("ACK bridge registered");
     }
 
-    /// Handle strategy ACK by forwarding to the ACK bridge.
+    /// Handle strategy ACK by forwarding the acked `event_id`s to the ACK
+    /// bridge, which releases exactly those events (strict-ID release).
     ///
-    /// A non-empty ACK releases the oldest delivered event (FIFO) — strategies
-    /// ACK once per event, after handling it. FIFO release order comes from
-    /// delivery position, not the acked id; the id only marks the ACK as
-    /// engine-paced.
-    ///
-    /// `events_processed` carries the engine `event_id`s the strategy acked. An
-    /// empty payload is DROPPED without touching the bridge: the gateway echoes
-    /// the engine `event_id` on outbound engine frames, so real engine ACKs are
-    /// non-empty. Gateway-local events (connection / data-freshness / error /
-    /// rate-limit) carry no engine id, so the SDK ACKs them with an empty
-    /// payload — forwarding one popped the oldest delivered ENGINE event off the
-    /// FIFO, silently advancing the engine ahead of the strategy into free-run
-    /// sim time and silent 0-trade backtests (TEK-1309 / TEK-1312 / TEK-1331).
+    /// The gateway echoes the engine `event_id` on every outbound engine
+    /// frame and the SDK returns it in `events_processed`, so an ACK names
+    /// precisely what it acknowledges. Gateway-local events (connection /
+    /// data-freshness / error / rate-limit) carry no engine id and produce
+    /// empty ACKs, which release nothing — they can never pop an engine
+    /// event and advance the sim ahead of the strategy. Unknown ids release
+    /// nothing either, and an ACK for a delivered event releases it even
+    /// when an older, never-delivered event is still pending — a delivery
+    /// loss costs the engine one ACK-window timeout instead of wedging the
+    /// run.
     pub async fn handle_strategy_ack(&self, events_processed: &[String]) {
-        if events_processed.is_empty() {
-            trace!("Dropping empty strategy ACK (gateway-local event, no engine id)");
-            return;
-        }
-
         let bridge = self.tektii_ack_bridge.read().await;
         if let Some(ref b) = *bridge {
-            info!("Forwarding strategy ACK to bridge");
-            b.handle_strategy_ack().await;
+            if !events_processed.is_empty() {
+                info!(
+                    acked = events_processed.len(),
+                    "Forwarding strategy ACK to bridge"
+                );
+            }
+            b.handle_strategy_ack(events_processed).await;
         } else {
             debug!("No ACK bridge set - ACK is informational only");
         }
@@ -854,14 +852,15 @@ impl ProviderRegistry {
                                     true
                                 };
 
-                                // TEK-1315: only mark the engine event sent once it was
-                                // actually handed to at least one strategy connection
-                                // (or the registry filter declined it). Only `sent =
-                                // true` events are releasable by a strategy ACK; marking
-                                // an undelivered event sent permanently offsets the ACK
-                                // FIFO and degrades the run into the constant-in-flight
-                                // halt (TEK-1179). Leaving it pending-undelivered lets
-                                // the engine's own ACK timeout surface the stall loudly.
+                                // Only mark the engine event sent once it was actually
+                                // handed to at least one strategy connection (or the
+                                // registry filter declined it). Only `sent = true`
+                                // events are releasable by a strategy ACK — a strategy
+                                // cannot legitimately ack an event it never received,
+                                // so a lost delivery stays pending-undelivered and the
+                                // engine's own ACK timeout surfaces the loss loudly
+                                // (one timed-out window; later events still release by
+                                // their own ids).
                                 if let Some(id) = engine_event_id {
                                     if delivered {
                                         let bridge_opt = {

@@ -1,13 +1,14 @@
-//! Engine-id ACK pacing: the strategy-facing ACK path paces the engine FIFO
-//! only on ACKs that carry an engine `event_id`, and drops empty ones.
+//! Engine-id ACK pacing: the strategy-facing ACK path releases exactly the
+//! engine events the ACK names (strict-ID), and releases nothing for empty
+//! or unknown payloads.
 //!
 //! The gateway echoes the engine `event_id` on outbound engine frames, so the
-//! backtest SDK returns it in `events_processed`. Engine-paced events therefore
-//! ACK with a non-empty payload and release the oldest delivered event (FIFO).
-//! Gateway-local events (connection / data-freshness / error / rate-limit) carry
-//! no engine id, so the SDK ACKs them with an empty payload — those must NOT pop
-//! the FIFO, or they advance the engine ahead of the strategy and free-run sim
-//! time into silent 0-trade backtests.
+//! backtest SDK returns it in `events_processed`. Engine-paced events
+//! therefore ACK with the id of the event they answer, and exactly that event
+//! is released. Gateway-local events (connection / data-freshness / error /
+//! rate-limit) carry no engine id, so the SDK ACKs them with an empty payload
+//! — those release nothing, or they would advance the engine ahead of the
+//! strategy and free-run sim time into silent 0-trade backtests.
 
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ fn build_registry() -> Arc<ProviderRegistry> {
 }
 
 #[tokio::test]
-async fn non_empty_ack_releases_one_fifo_event_empty_ack_releases_none() {
+async fn ack_releases_the_named_event_empty_ack_releases_none() {
     let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
     let registry = build_registry();
     registry.set_tektii_ack_bridge(bridge.clone()).await;
@@ -44,43 +45,41 @@ async fn non_empty_ack_releases_one_fifo_event_empty_ack_releases_none() {
         .await;
 
     // A gateway-local event (connection / data-freshness / error / rate-limit)
-    // yields an empty-payload ACK. It must be dropped — the engine FIFO is
+    // yields an empty-payload ACK. It releases nothing — the engine FIFO is
     // untouched, so the engine cannot advance ahead of the strategy.
     registry.handle_strategy_ack(&[]).await;
     assert!(
         engine_ack_rx.try_recv().is_err(),
-        "empty events_processed ACK must not pop the engine FIFO"
+        "empty events_processed ACK must not release any engine event"
     );
 
-    // A real engine ACK carries the echoed `event_id` — non-empty. It releases
-    // exactly the oldest delivered event; FIFO release order comes from delivery
-    // position, not the acked id.
+    // A real engine ACK carries the echoed `event_id` — exactly that event is
+    // released.
     registry.handle_strategy_ack(&["evt-0".to_string()]).await;
     let released = engine_ack_rx
         .recv()
         .await
-        .expect("non-empty ACK must release the oldest delivered event");
+        .expect("ACK must release the event it names");
     assert_eq!(released, vec!["evt-0".to_string()]);
     assert!(
         engine_ack_rx.try_recv().is_err(),
-        "exactly one event released per non-empty ACK"
+        "exactly the named event released per ACK"
     );
 
-    // The next non-empty ACK releases the next event, in delivery order.
     registry.handle_strategy_ack(&["evt-1".to_string()]).await;
     let released = engine_ack_rx
         .recv()
         .await
-        .expect("second non-empty ACK releases the next delivered event");
+        .expect("second ACK releases the event it names");
     assert_eq!(released, vec!["evt-1".to_string()]);
     assert!(
         engine_ack_rx.try_recv().is_err(),
-        "exactly one event released per non-empty ACK"
+        "exactly the named event released per ACK"
     );
 }
 
 #[tokio::test]
-async fn non_empty_ack_releases_fifo_head_regardless_of_the_acked_id() {
+async fn ack_with_unknown_id_releases_nothing() {
     let (bridge, mut engine_ack_rx) = TektiiAckBridge::create();
     let registry = build_registry();
     registry.set_tektii_ack_bridge(bridge.clone()).await;
@@ -88,16 +87,23 @@ async fn non_empty_ack_releases_fifo_head_regardless_of_the_acked_id() {
     bridge.register_pending("evt-0".to_string()).await;
     bridge.mark_sent(vec!["evt-0".to_string()]).await;
 
-    // The payload only marks the ACK as engine-paced; release order comes from
-    // delivery position, not the acked id. An unrelated/stale id in a non-empty
-    // ACK must still release the true FIFO head — this guards against anyone
-    // "fixing" the drop-guard into real id-correlation (the reverted #109).
+    // Under positional release any non-empty ACK popped the FIFO head,
+    // whatever id it carried — a confused or stale client could advance the
+    // sim. Strict-ID release: an id the bridge never registered releases
+    // nothing.
     registry
         .handle_strategy_ack(&["some-unrelated-id".to_string()])
         .await;
+    assert!(
+        engine_ack_rx.try_recv().is_err(),
+        "an unknown id must not release the pending engine event"
+    );
+
+    // The event is still releasable by its own id.
+    registry.handle_strategy_ack(&["evt-0".to_string()]).await;
     let released = engine_ack_rx
         .recv()
         .await
-        .expect("non-empty ACK must release the FIFO head even with a stale id");
+        .expect("the named event must still be releasable");
     assert_eq!(released, vec!["evt-0".to_string()]);
 }
