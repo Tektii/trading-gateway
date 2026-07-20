@@ -42,12 +42,16 @@ pub trait ExitHandling: Send + Sync {
     /// Handle a fill event by placing exit orders (SL/TP).
     ///
     /// Returns placement results for each exit order attempted.
+    /// `position_id` is the filled entry order's position, when the provider
+    /// reports one. Exit legs must name it or a hedging provider treats them as
+    /// new opposite positions instead of closes.
     async fn handle_fill(
         &self,
         primary_order_id: &str,
         filled_qty: Decimal,
         total_qty: Decimal,
         position_qty: Option<Decimal>,
+        position_id: Option<&str>,
         adapter: &dyn TradingAdapter,
     ) -> Vec<PlacementResult>;
 
@@ -92,6 +96,7 @@ pub(super) struct BufferedFill {
     pub(super) filled_qty: Decimal,
     pub(super) total_qty: Decimal,
     pub(super) position_qty: Option<Decimal>,
+    pub(super) position_id: Option<String>,
     pub(super) buffered_at: std::time::Instant,
 }
 
@@ -579,6 +584,7 @@ impl ExitHandling for ExitHandler {
         filled_qty: Decimal,
         total_qty: Decimal,
         position_qty: Option<Decimal>,
+        position_id: Option<&str>,
         adapter: &dyn TradingAdapter,
     ) -> Vec<PlacementResult> {
         self.handle_fill_internal(
@@ -586,6 +592,7 @@ impl ExitHandling for ExitHandler {
             filled_qty,
             total_qty,
             position_qty,
+            position_id,
             adapter,
         )
         .await

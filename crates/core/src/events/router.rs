@@ -648,6 +648,7 @@ impl EventRouter {
                 order.filled_quantity,
                 order.quantity,
                 None,
+                order.position_id.as_deref(),
                 adapter,
             )
             .await;
