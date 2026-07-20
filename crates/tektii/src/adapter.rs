@@ -52,6 +52,8 @@ struct EngineErrorEnvelope {
 #[derive(Debug, Deserialize)]
 struct EngineErrorBody {
     message: String,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 impl EngineErrorBody {
@@ -201,6 +203,26 @@ impl TektiiAdapter {
         }
     }
 
+    /// Map a 422 body to `OrderRejected`, unwrapping the engine's error envelope.
+    fn map_order_rejected(body: String) -> GatewayError {
+        let details = serde_json::from_str::<serde_json::Value>(&body).ok();
+        // A body that isn't the envelope (proxy/infra anomaly) keeps its raw
+        // text rather than being swallowed.
+        let Ok(envelope) = serde_json::from_str::<EngineErrorEnvelope>(&body) else {
+            warn!(body = %body, "Engine 422 body is not the error envelope");
+            return GatewayError::OrderRejected {
+                reason: body,
+                reject_code: None,
+                details,
+            };
+        };
+        GatewayError::OrderRejected {
+            reason: envelope.error.message,
+            reject_code: envelope.error.code,
+            details,
+        }
+    }
+
     /// Handle HTTP response, checking status and parsing JSON.
     async fn handle_response<T: DeserializeOwned>(response: reqwest::Response) -> GatewayResult<T> {
         let status = response.status();
@@ -222,17 +244,7 @@ impl TektiiAdapter {
                     retry_after_seconds,
                     reset_at: None,
                 }),
-                422 => {
-                    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
-                    let reject_code = parsed
-                        .as_ref()
-                        .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(String::from));
-                    Err(GatewayError::OrderRejected {
-                        reason: body,
-                        reject_code,
-                        details: parsed,
-                    })
-                }
+                422 => Err(Self::map_order_rejected(body)),
                 503 => Err(GatewayError::ProviderUnavailable { message: body }),
                 _ => Err(Self::provider_error(body)),
             };
