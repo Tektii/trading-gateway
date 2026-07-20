@@ -92,6 +92,7 @@ impl ExitHandler {
         filled_qty: Decimal,
         total_qty: Decimal,
         position_qty: Option<Decimal>,
+        position_id: Option<&str>,
         adapter: &dyn TradingAdapter,
     ) -> Vec<PlacementResult> {
         let _fill_guard = self.fill_processing_lock.lock().await;
@@ -122,7 +123,13 @@ impl ExitHandler {
             // Otherwise the fill may have beaten exit registration (the
             // submit path registers only after the broker's submit response).
             // Buffer it for replay by `process_buffered_fill`.
-            self.buffer_unmatched_fill(primary_order_id, filled_qty, total_qty, position_qty);
+            self.buffer_unmatched_fill(
+                primary_order_id,
+                filled_qty,
+                total_qty,
+                position_qty,
+                position_id,
+            );
 
             // Registration may have landed between the lookup above and the
             // buffer insert — in which case the submit task's replay already
@@ -158,7 +165,7 @@ impl ExitHandler {
                     filled_qty,
                     total_qty,
                     position_qty,
-                    is_partial_fill,
+                    position_id,
                     adapter,
                 )
                 .await;
@@ -199,6 +206,7 @@ impl ExitHandler {
             fill.filled_qty,
             fill.total_qty,
             fill.position_qty,
+            fill.position_id.as_deref(),
             adapter,
         )
         .await
@@ -213,6 +221,7 @@ impl ExitHandler {
         filled_qty: Decimal,
         total_qty: Decimal,
         position_qty: Option<Decimal>,
+        position_id: Option<&str>,
     ) {
         self.sweep_unmatched_fills();
 
@@ -234,6 +243,7 @@ impl ExitHandler {
                 filled_qty,
                 total_qty,
                 position_qty,
+                position_id: position_id.map(ToString::to_string),
                 buffered_at: Instant::now(),
             },
         );
@@ -467,9 +477,11 @@ impl ExitHandler {
         filled_qty: Decimal,
         total_qty: Decimal,
         position_qty: Option<Decimal>,
-        is_partial_fill: bool,
+        position_id: Option<&str>,
         adapter: &dyn TradingAdapter,
     ) -> PlacementResult {
+        let is_partial_fill = filled_qty < total_qty;
+
         let entry = match self.validate_entry_for_fill(placeholder_id, filled_qty) {
             Ok(entry) => entry,
             Err(result) => return *result,
@@ -498,8 +510,12 @@ impl ExitHandler {
             );
         }
 
-        let order_request =
-            Self::build_exit_order_request(&entry, qty_to_place, existing_orders.len());
+        let order_request = Self::build_exit_order_request(
+            &entry,
+            qty_to_place,
+            existing_orders.len(),
+            position_id,
+        );
         let placement_result = self
             .place_order_with_retry(&order_request, adapter, placeholder_id, &entry)
             .await;
@@ -791,6 +807,7 @@ impl ExitHandler {
         entry: &ExitEntry,
         quantity: Decimal,
         existing_order_count: usize,
+        position_id: Option<&str>,
     ) -> OrderRequest {
         use crate::models::{OrderType, TimeInForce};
 
@@ -831,14 +848,18 @@ impl ExitHandler {
             trailing_type: None,
             stop_loss: None,
             take_profit: None,
-            position_id: None,
+            position_id: position_id.map(ToString::to_string),
             display_quantity: None,
             margin_mode: None,
             leverage: None,
             oco_group_id: None,
             hidden: false,
             post_only: false,
-            reduce_only: false,
+            // Only meaningful alongside a position: a hedging provider rejects a
+            // reduce-only order that names no position to reduce. This assumes
+            // any provider reporting a position id also accepts reduce_only --
+            // there is no capability gate for the pair.
+            reduce_only: position_id.is_some(),
         }
     }
 
@@ -975,7 +996,7 @@ mod tests {
             platform: TradingPlatform::BinanceSpotLive,
         });
 
-        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0);
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0, None);
 
         assert_eq!(
             order.client_order_id,
@@ -998,7 +1019,7 @@ mod tests {
             platform: TradingPlatform::BinanceSpotLive,
         });
 
-        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0);
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0, None);
 
         assert_eq!(
             order.client_order_id,
@@ -1021,8 +1042,8 @@ mod tests {
             platform: TradingPlatform::AlpacaLive,
         });
 
-        let order1 = ExitHandler::build_exit_order_request(&entry, dec!(2), 0);
-        let order2 = ExitHandler::build_exit_order_request(&entry, dec!(2), 0);
+        let order1 = ExitHandler::build_exit_order_request(&entry, dec!(2), 0, None);
+        let order2 = ExitHandler::build_exit_order_request(&entry, dec!(2), 0, None);
 
         assert_eq!(
             order1.client_order_id, order2.client_order_id,
@@ -1044,9 +1065,9 @@ mod tests {
             platform: TradingPlatform::BinanceSpotLive,
         });
 
-        let first = ExitHandler::build_exit_order_request(&entry, dec!(0.5), 0);
-        let second = ExitHandler::build_exit_order_request(&entry, dec!(0.3), 1);
-        let third = ExitHandler::build_exit_order_request(&entry, dec!(0.2), 2);
+        let first = ExitHandler::build_exit_order_request(&entry, dec!(0.5), 0, None);
+        let second = ExitHandler::build_exit_order_request(&entry, dec!(0.3), 1, None);
+        let third = ExitHandler::build_exit_order_request(&entry, dec!(0.2), 2, None);
 
         assert_eq!(
             first.client_order_id,
@@ -1087,7 +1108,7 @@ mod tests {
             platform: TradingPlatform::OandaLive,
         });
 
-        let order = ExitHandler::build_exit_order_request(&entry, dec!(1000), 0);
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1000), 0, None);
 
         assert_eq!(
             order.client_order_id,
@@ -1123,8 +1144,8 @@ mod tests {
             platform: TradingPlatform::Tektii,
         });
 
-        let order_a = ExitHandler::build_exit_order_request(&leg_a, dec!(500), 0);
-        let order_b = ExitHandler::build_exit_order_request(&leg_b, dec!(500), 0);
+        let order_a = ExitHandler::build_exit_order_request(&leg_a, dec!(500), 0, None);
+        let order_b = ExitHandler::build_exit_order_request(&leg_b, dec!(500), 0, None);
 
         assert_eq!(
             order_a.client_order_id,
@@ -1151,7 +1172,7 @@ mod tests {
             platform: TradingPlatform::BinanceSpotLive,
         });
 
-        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0);
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0, None);
 
         assert_eq!(
             order.client_order_id,
@@ -1176,7 +1197,7 @@ mod tests {
             platform: TradingPlatform::BinanceSpotLive,
         });
 
-        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0);
+        let order = ExitHandler::build_exit_order_request(&entry, dec!(1), 0, None);
 
         assert_eq!(
             order.client_order_id,
@@ -1201,9 +1222,9 @@ mod tests {
             platform: TradingPlatform::BinanceSpotLive,
         });
 
-        let first = ExitHandler::build_exit_order_request(&entry, dec!(0.5), 0);
-        let second = ExitHandler::build_exit_order_request(&entry, dec!(0.3), 1);
-        let third = ExitHandler::build_exit_order_request(&entry, dec!(0.2), 2);
+        let first = ExitHandler::build_exit_order_request(&entry, dec!(0.5), 0, None);
+        let second = ExitHandler::build_exit_order_request(&entry, dec!(0.3), 1, None);
+        let third = ExitHandler::build_exit_order_request(&entry, dec!(0.2), 2, None);
 
         assert_eq!(
             first.client_order_id,
