@@ -22,6 +22,7 @@ pub struct HandleFillCall {
     pub filled_qty: Decimal,
     pub total_qty: Decimal,
     pub position_qty: Option<Decimal>,
+    pub position_id: Option<String>,
 }
 
 /// Mock exit handler that records calls for test assertions.
@@ -69,6 +70,7 @@ impl ExitHandling for MockExitHandler {
         filled_qty: Decimal,
         total_qty: Decimal,
         position_qty: Option<Decimal>,
+        position_id: Option<&str>,
         _adapter: &dyn TradingAdapter,
     ) -> Vec<PlacementResult> {
         self.fill_calls.lock().expect("lock").push(HandleFillCall {
@@ -76,6 +78,7 @@ impl ExitHandling for MockExitHandler {
             filled_qty,
             total_qty,
             position_qty,
+            position_id: position_id.map(ToString::to_string),
         });
         Vec::new()
     }
