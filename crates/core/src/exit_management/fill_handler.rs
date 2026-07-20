@@ -684,6 +684,7 @@ impl ExitHandler {
                             status: order_handle.status,
                             reject_reason: None,
                             position_id: order.position_id.clone(),
+                            parent_order_id: None,
                             reduce_only: Some(order.reduce_only),
                             post_only: Some(order.post_only),
                             hidden: Some(order.hidden),

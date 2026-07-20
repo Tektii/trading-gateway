@@ -735,7 +735,7 @@ impl ProviderRegistry {
                                     .increment(1);
                                 }
 
-                                Self::route_event_through_router(
+                                let tracked_parent = Self::route_event_through_router(
                                     &event,
                                     platform,
                                     &event_routers,
@@ -745,6 +745,11 @@ impl ProviderRegistry {
                                 let event = match event {
                                     WsMessage::Order { event: evt, mut order, parent_order_id, timestamp } => {
                                         order.correlation_id = correlation_store.get(&order.id);
+
+                                        // Providers that report the link themselves win; otherwise
+                                        // expose the exits this gateway synthesized and tracks.
+                                        let parent_order_id = parent_order_id.or(tracked_parent);
+                                        order.parent_order_id.clone_from(&parent_order_id);
 
                                         if matches!(evt,
                                             OrderEventType::OrderFilled
@@ -1065,20 +1070,21 @@ impl ProviderRegistry {
     }
 
     /// Route an event through the `EventRouter` for state management.
+    ///
+    /// Returns the entry order id for order events on a tracked exit leg, so the
+    /// broadcast can expose the link the exit handler resolved.
     async fn route_event_through_router(
         event: &WsMessage,
         platform: TradingPlatform,
         event_routers: &Arc<RwLock<HashMap<TradingPlatform, Arc<EventRouter>>>>,
         _trading_adapters: &Arc<RwLock<HashMap<TradingPlatform, Arc<dyn TradingAdapter>>>>,
-    ) {
+    ) -> Option<String> {
         let router = {
             let routers = event_routers.read().await;
             routers.get(&platform).cloned()
         };
 
-        let Some(router) = router else {
-            return;
-        };
+        let router = router?;
 
         match event {
             WsMessage::Order {
@@ -1094,9 +1100,16 @@ impl ProviderRegistry {
                     "Routing order event through EventRouter"
                 );
 
+                // Resolved before routing: a terminal event on an exit leg drops
+                // its entry from tracking, and that fill is exactly when a
+                // strategy needs to know which entry the leg closed.
+                let tracked_parent = router.parent_order_id_for(&order.id);
+
                 router
                     .handle_order_event(*event_type, order, parent_order_id.as_deref())
                     .await;
+
+                return tracked_parent;
             }
             WsMessage::Position {
                 event: event_type,
@@ -1114,6 +1127,8 @@ impl ProviderRegistry {
             }
             _ => {}
         }
+
+        None
     }
 
     /// Clear staleness for an instrument when a market data event arrives.

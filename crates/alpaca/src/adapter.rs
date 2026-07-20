@@ -493,6 +493,7 @@ impl AlpacaAdapter {
             trailing_type: None,
             reject_reason: None,
             position_id: None,
+            parent_order_id: None,
             reduce_only: None,
             post_only: None,
             hidden: None,

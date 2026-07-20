@@ -912,6 +912,12 @@ impl EventRouter {
         }
     }
 
+    /// Find the entry order that `order_id` exits, if it is a tracked exit leg.
+    #[must_use]
+    pub fn parent_order_id_for(&self, order_id: &str) -> Option<String> {
+        self.exit_handler.parent_order_id_for(order_id)
+    }
+
     /// Broadcast an order event to strategies.
     fn broadcast_order_event(
         &self,
@@ -1392,6 +1398,7 @@ mod tests {
             status,
             reject_reason: None,
             position_id: None,
+            parent_order_id: None,
             reduce_only: None,
             post_only: None,
             hidden: None,
@@ -1442,6 +1449,7 @@ mod tests {
             status: OrderStatus::Filled,
             reject_reason: None,
             position_id: None,
+            parent_order_id: None,
             reduce_only: None,
             post_only: None,
             hidden: None,

@@ -97,6 +97,10 @@ impl ExitHandling for MockExitHandler {
         false
     }
 
+    fn parent_order_id_for(&self, _order_id: &str) -> Option<String> {
+        None
+    }
+
     async fn cancel_for_position_close(
         &self,
         _symbol: &str,

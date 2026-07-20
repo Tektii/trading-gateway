@@ -285,6 +285,7 @@ pub fn engine_order_to_api(order: &engine::Order) -> api::Order {
         },
         reject_reason: None, // Engine doesn't create rejected orders
         position_id: order.position_id.clone(),
+        parent_order_id: None,
         reduce_only: None,
         post_only: None,
         hidden: None,

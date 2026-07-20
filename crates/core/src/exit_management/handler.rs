@@ -63,6 +63,9 @@ pub trait ExitHandling: Send + Sync {
     /// Check if there are pending exit orders for a primary order.
     fn has_pending_for_primary(&self, primary_order_id: &str) -> bool;
 
+    /// Find the entry order that `order_id` exits, if it is a tracked exit leg.
+    fn parent_order_id_for(&self, order_id: &str) -> Option<String>;
+
     /// Cancel exit orders when a position closes.
     ///
     /// Returns placeholder IDs that were cancelled.
@@ -185,6 +188,23 @@ impl ExitHandler {
             .get(primary_order_id)
             .map(|entry| entry.value().clone())
             .unwrap_or_default()
+    }
+
+    /// Find the entry order that `order_id` exits, if it is a tracked exit leg.
+    ///
+    /// Scans tracked entries rather than keeping a reverse index: the map holds
+    /// only live exits, and the link is dropped once the leg resolves.
+    #[must_use]
+    pub fn parent_order_id_for(&self, order_id: &str) -> Option<String> {
+        self.pending_by_placeholder.iter().find_map(|entry| {
+            let entry = entry.value();
+            entry
+                .status
+                .actual_orders()
+                .iter()
+                .any(|actual| actual.order_id == order_id)
+                .then(|| entry.primary_order_id.clone())
+        })
     }
 
     #[must_use]
@@ -361,14 +381,7 @@ impl ExitHandler {
     }
 
     pub(super) fn get_actual_orders_from_entry(entry: &ExitEntry) -> Vec<ActualOrder> {
-        match &entry.status {
-            ExitEntryStatus::PartiallyTriggered { actual_orders, .. }
-            | ExitEntryStatus::Placed { actual_orders }
-            | ExitEntryStatus::Failed { actual_orders, .. } => {
-                actual_orders.iter().cloned().collect()
-            }
-            _ => Vec::new(),
-        }
+        entry.status.actual_orders().to_vec()
     }
 
     /// Register pending SL/TP orders for a primary order.
@@ -601,6 +614,10 @@ impl ExitHandling for ExitHandler {
 
     fn has_pending_for_primary(&self, primary_order_id: &str) -> bool {
         Self::has_pending_for_primary(self, primary_order_id)
+    }
+
+    fn parent_order_id_for(&self, order_id: &str) -> Option<String> {
+        Self::parent_order_id_for(self, order_id)
     }
 
     async fn cancel_for_position_close(
@@ -1108,6 +1125,7 @@ mod tests {
                     status: OrderStatus::Cancelled,
                     reject_reason: None,
                     position_id: None,
+                    parent_order_id: None,
                     reduce_only: None,
                     post_only: None,
                     hidden: None,

@@ -218,6 +218,19 @@ pub enum ExitEntryStatus {
     Expired { expired_at: DateTime<Utc> },
 }
 
+impl ExitEntryStatus {
+    /// Orders actually placed at the provider for this entry, if any.
+    #[must_use]
+    pub fn actual_orders(&self) -> &[ActualOrder] {
+        match self {
+            Self::PartiallyTriggered { actual_orders, .. }
+            | Self::Placed { actual_orders }
+            | Self::Failed { actual_orders, .. } => actual_orders,
+            Self::Pending | Self::Cancelled { .. } | Self::Expired { .. } => &[],
+        }
+    }
+}
+
 /// Status information for a pending exit entry including audit timestamps.
 #[derive(Debug, Clone)]
 pub struct ExitEntryStatusInfo {

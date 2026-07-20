@@ -1997,6 +1997,13 @@
             "$ref": "#/components/schemas/OrderType",
             "description": "Order type"
           },
+          "parent_order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Entry order this order exits, for gateway-synthesized SL/TP legs.\n\nOnly populated while the exit leg is tracked by the gateway's exit\nhandler; brokers that manage brackets natively do not report the link."
+          },
           "position_id": {
             "type": [
               "string",

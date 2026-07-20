@@ -256,6 +256,7 @@ pub async fn get_order(
     let adapter = state.adapter();
     let mut order = adapter.get_order(&order_id).await?;
     order.correlation_id = state.correlation_store().get(&order.id);
+    order.parent_order_id = state.parent_order_id_for(&order.id);
     Ok(Json(order))
 }
 
@@ -284,6 +285,7 @@ pub async fn get_orders(
     let store = state.correlation_store();
     for order in &mut orders {
         order.correlation_id = store.get(&order.id);
+        order.parent_order_id = state.parent_order_id_for(&order.id);
     }
     Ok(Json(orders))
 }
@@ -313,6 +315,7 @@ pub async fn get_order_history(
     let store = state.correlation_store();
     for order in &mut orders {
         order.correlation_id = store.get(&order.id);
+        order.parent_order_id = state.parent_order_id_for(&order.id);
     }
     Ok(Json(orders))
 }

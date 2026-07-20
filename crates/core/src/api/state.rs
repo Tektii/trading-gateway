@@ -103,6 +103,14 @@ impl GatewayState {
         &self.correlation_store
     }
 
+    /// Find the entry order that `order_id` exits, if it is a tracked exit leg.
+    #[must_use]
+    pub fn parent_order_id_for(&self, order_id: &str) -> Option<String> {
+        self.exit_handler_registry
+            .get(&self.platform())
+            .and_then(|handler| handler.parent_order_id_for(order_id))
+    }
+
     /// Get a reference to the configured API key (if any).
     #[must_use]
     pub fn api_key(&self) -> Option<&SecretBox<String>> {
