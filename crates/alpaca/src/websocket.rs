@@ -371,6 +371,7 @@ fn alpaca_order_to_trading_order(info: &AlpacaTradingOrderInfo) -> Order {
         status,
         reject_reason: None,
         position_id: None,
+        parent_order_id: None,
         reduce_only: None,
         post_only: None,
         hidden: None,

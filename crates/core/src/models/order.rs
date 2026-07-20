@@ -493,6 +493,13 @@ pub struct Order {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position_id: Option<String>,
 
+    /// Entry order this order exits, for gateway-synthesized SL/TP legs.
+    ///
+    /// Only populated while the exit leg is tracked by the gateway's exit
+    /// handler; brokers that manage brackets natively do not report the link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_order_id: Option<String>,
+
     /// Whether this is a reduce-only order
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduce_only: Option<bool>,

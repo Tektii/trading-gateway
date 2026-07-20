@@ -135,6 +135,7 @@ manual_midpoint = "allow"              # nursery: (a + b) / 2 vs midpoint() — 
 many_single_char_names = "allow"       # pedantic: common in math/protocol code (x, y, t, s)
 significant_drop_in_scrutinee = "allow" # nursery: lock-in-if-let patterns reviewed and acceptable
 format_push_string = "allow"           # nursery: format!+push_str is clearer than write! in many cases
+large_enum_variant = "allow"           # WsMessage::Order dominates by size and volume; boxing it would allocate on the broadcast path
 
 [package]
 name = "tektii-gateway"
