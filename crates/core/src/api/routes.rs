@@ -20,12 +20,14 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::circuit_breaker::CircuitBreakerSnapshot;
 use crate::error::{ApiError, ErrorCode, GatewayError};
+use crate::exit_management::{ExitLegType, ReplaceExitLegError};
 use crate::models::{
     Account, AssetClass, Bar, BarParams, CancelAllResult, CancelOrderResult, Capabilities,
-    ClosePositionRequest, ConnectionStatus, DetailedHealthStatus, HealthStatus, MarginMode,
-    ModifyOrderRequest, ModifyOrderResult, Order, OrderHandle, OrderQueryParams, OrderRequest,
-    OrderStatus, OrderType, OverallStatus, Position, PositionMode, PositionSide, ProviderHealth,
-    Quote, ReadyStatus, RejectReason, Side, Timeframe, Trade, TradeQueryParams, TradingPlatform,
+    ClosePositionRequest, ConnectionStatus, DetailedHealthStatus, ExitLegPlacement, HealthStatus,
+    MarginMode, ModifyOrderRequest, ModifyOrderResult, ModifyPositionExitsRequest,
+    ModifyPositionExitsResult, Order, OrderHandle, OrderQueryParams, OrderRequest, OrderStatus,
+    OrderType, OverallStatus, Position, PositionMode, PositionSide, ProviderHealth, Quote,
+    ReadyStatus, RejectReason, Side, Timeframe, Trade, TradeQueryParams, TradingPlatform,
     TrailingType,
 };
 use crate::websocket::messages::{
@@ -515,6 +517,141 @@ pub async fn close_position(
     Ok(Json(handle))
 }
 
+/// Move a position's resting stop-loss or take-profit.
+///
+/// Moves the exit orders the gateway placed for this position when its entry
+/// filled. The gateway uses the provider's native order modify where it exists,
+/// and otherwise cancels and re-places the leg; if the replacement is rejected
+/// the original exit is restored, so a failed call leaves the position as
+/// protected as it was. A `502` means the original could not be restored and the
+/// position is genuinely uncovered for that leg -- the same condition reported
+/// on the WebSocket as `POSITION_UNPROTECTED`.
+///
+/// Only legs already tracked for the position can be moved; this does not
+/// attach an exit to a position that has none. A leg that filled in parts rests
+/// as several orders, and all of them move together.
+///
+/// Legs are moved one at a time and are not rolled back as a set: if a request
+/// names both legs and the second fails, the first stays at its new price and
+/// the call still reports the failure. Re-read the position to see where each
+/// leg ended up.
+#[utoipa::path(
+    patch,
+    path = "/positions/{position_id}",
+    params(
+        ("position_id" = String, Path, description = "Position ID")
+    ),
+    request_body = ModifyPositionExitsRequest,
+    responses(
+        (status = 200, description = "Exit legs moved", body = ModifyPositionExitsResult),
+        (status = 400, description = "Request moves neither leg", body = ApiError),
+        (status = 404, description = "Position not found", body = ApiError),
+        (status = 409, description = "Leg not tracked, or move rejected and the original exit restored", body = ApiError),
+        (status = 502, description = "Exit cancelled and could not be re-established — position unprotected", body = ApiError),
+        (status = 503, description = "Provider unavailable", body = ApiError)
+    ),
+    tag = "positions"
+)]
+#[instrument(skip(state, request), fields(provider))]
+pub async fn modify_position_exits(
+    State(state): State<GatewayState>,
+    Path(position_id): Path<String>,
+    ValidatedJson(request): ValidatedJson<ModifyPositionExitsRequest>,
+) -> Result<impl IntoResponse, GatewayError> {
+    let platform = state.platform();
+    tracing::Span::current().record("platform", platform.to_string());
+
+    let adapter = state.adapter();
+    adapter.get_position(&position_id).await?;
+
+    let handler = state
+        .exit_handler_registry()
+        .get(&platform)
+        .ok_or_else(|| GatewayError::unsupported("exit management", platform.to_string()))?;
+
+    let mut result = ModifyPositionExitsResult {
+        position_id: position_id.clone(),
+        stop_loss: None,
+        take_profit: None,
+    };
+
+    for (leg_type, new_price) in [
+        (ExitLegType::StopLoss, request.stop_loss),
+        (ExitLegType::TakeProfit, request.take_profit),
+    ] {
+        let Some(new_price) = new_price else {
+            continue;
+        };
+
+        let entry = handler
+            .live_exit_leg(&position_id, leg_type)
+            .ok_or_else(|| GatewayError::OrderNotModifiable {
+                order_id: position_id.clone(),
+                reason: format!("position has no resting {leg_type} leg to move"),
+            })?;
+
+        let placement = match handler
+            .replace_exit_leg(&entry.placeholder_id, new_price, adapter.as_ref())
+            .await
+        {
+            Ok(placement) => placement,
+            Err(e) => return Err(unprotected_or(&state, &position_id, leg_type, e).await),
+        };
+
+        match leg_type {
+            ExitLegType::StopLoss => result.stop_loss = Some(placement),
+            ExitLegType::TakeProfit => result.take_profit = Some(placement),
+        }
+    }
+
+    Ok(Json(result))
+}
+
+/// Convert a failed leg move into a `GatewayError`, broadcasting to connected
+/// strategies first when the position was left without cover.
+async fn unprotected_or(
+    state: &GatewayState,
+    position_id: &str,
+    leg_type: ExitLegType,
+    error: ReplaceExitLegError,
+) -> GatewayError {
+    match error {
+        ReplaceExitLegError::StillProtected(e) => e,
+        ReplaceExitLegError::Unprotected {
+            cancelled_order_id,
+            source,
+            restore_error,
+        } => {
+            let message = format!(
+                "{leg_type} for position {position_id} was cancelled and could not be \
+                 re-established — the position is unprotected"
+            );
+            let details = serde_json::json!({
+                "position_id": position_id,
+                "leg_type": leg_type.to_string(),
+                "cancelled_order_id": cancelled_order_id,
+                "error": source.to_string(),
+                "restore_error": restore_error.to_string(),
+            });
+
+            state
+                .ws_connection_manager()
+                .broadcast(WsMessage::error_with_details(
+                    WsErrorCode::PositionUnprotected,
+                    message.clone(),
+                    details,
+                ))
+                .await;
+
+            GatewayError::ProviderError {
+                message,
+                provider: None,
+                source: None,
+            }
+        }
+    }
+}
+
 /// Close all positions.
 ///
 /// Closes all open positions, optionally filtered by symbol.
@@ -885,6 +1022,9 @@ pub async fn get_health(State(state): State<GatewayState>) -> impl IntoResponse 
         CancelAllOrdersParams,
         Position,
         ClosePositionRequest,
+        ModifyPositionExitsRequest,
+        ModifyPositionExitsResult,
+        ExitLegPlacement,
         CloseAllPositionsParams,
         GetPositionsParams,
         Trade,
@@ -956,7 +1096,7 @@ pub fn create_gateway_router() -> OpenApiRouter<GatewayState> {
         .routes(routes!(submit_order, get_orders, cancel_all_orders))
         .routes(routes!(get_order, modify_order, cancel_order))
         .routes(routes!(get_positions, close_all_positions))
-        .routes(routes!(get_position, close_position))
+        .routes(routes!(get_position, close_position, modify_position_exits))
         .routes(routes!(get_trades))
         .routes(routes!(get_quote))
         .routes(routes!(get_bars))

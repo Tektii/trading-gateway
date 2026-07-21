@@ -510,6 +510,8 @@ impl ExitHandler {
             );
         }
 
+        self.record_position_id(placeholder_id, position_id);
+
         let order_request = Self::build_exit_order_request(
             &entry,
             qty_to_place,
@@ -804,7 +806,7 @@ impl ExitHandler {
     /// `existing_order_count` is the number of actual orders already placed for
     /// this exit entry. Used to generate unique-but-deterministic `client_order_id`
     /// values across partial fills while preserving idempotency within retries.
-    fn build_exit_order_request(
+    pub(super) fn build_exit_order_request(
         entry: &ExitEntry,
         quantity: Decimal,
         existing_order_count: usize,
@@ -861,6 +863,19 @@ impl ExitHandler {
             // any provider reporting a position id also accepts reduce_only --
             // there is no capability gate for the pair.
             reduce_only: position_id.is_some(),
+        }
+    }
+
+    /// Record the position this leg protects, learned from the entry's fill.
+    ///
+    /// Kept on the entry so a later `PATCH /positions/{id}` can resolve which
+    /// resting order to move.
+    fn record_position_id(&self, placeholder_id: &str, position_id: Option<&str>) {
+        let Some(position_id) = position_id else {
+            return;
+        };
+        if let Some(mut entry) = self.pending_by_placeholder.get_mut(placeholder_id) {
+            entry.position_id = Some(position_id.to_string());
         }
     }
 

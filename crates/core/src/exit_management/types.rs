@@ -439,6 +439,12 @@ pub struct ExitEntry {
     pub placeholder_id: String,
     /// ID of the primary order this exit order is attached to.
     pub primary_order_id: String,
+    /// The position this leg protects, learned from the entry order's fill.
+    ///
+    /// `None` until the entry fills, and on providers that report no position
+    /// id. Without it a leg cannot be resolved from a position id, which is how
+    /// `PATCH /positions/{id}` finds the order to move.
+    pub position_id: Option<String>,
     /// The parent order's client-assigned ID, if it carried one.
     ///
     /// Seeds the synthesized exit's wire `client_order_id` when present, so the
@@ -482,6 +488,7 @@ impl std::fmt::Debug for ExitEntry {
         f.debug_struct("ExitEntry")
             .field("placeholder_id", &self.placeholder_id)
             .field("primary_order_id", &self.primary_order_id)
+            .field("position_id", &self.position_id)
             .field("parent_client_order_id", &self.parent_client_order_id)
             .field("order_type", &self.order_type)
             .field("symbol", &self.symbol)
@@ -512,6 +519,7 @@ impl ExitEntry {
         Self {
             placeholder_id,
             primary_order_id: params.primary_order_id,
+            position_id: None,
             parent_client_order_id: params.parent_client_order_id,
             order_type: params.order_type,
             symbol: params.symbol,
