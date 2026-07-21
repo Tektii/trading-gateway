@@ -2442,7 +2442,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tektii-gateway"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-alpaca"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-binance"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-mock"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-oanda"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-saxo"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-tektii"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-gateway-test-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "tektii-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "rust_decimal",

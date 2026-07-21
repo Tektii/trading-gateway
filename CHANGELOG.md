@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0](https://github.com/Tektii/trading-gateway/compare/v0.2.0...v0.3.0) (2026-07-21)
+
+
+### Features
+
+* **core:** add position endpoint for moving resting SL/TP ([#128](https://github.com/Tektii/trading-gateway/issues/128)) ([8d4d8d7](https://github.com/Tektii/trading-gateway/commit/8d4d8d7500f74d08b9a03789b72a92185bfc9de3))
+* **core:** expose parent order id for gateway-synthesized exit legs ([#121](https://github.com/Tektii/trading-gateway/issues/121)) ([fdb1c67](https://github.com/Tektii/trading-gateway/commit/fdb1c678586a68948b85f9f6acbb07e439d1a3c2))
+* **examples:** size ma_crossover template by equity fraction ([#77](https://github.com/Tektii/trading-gateway/issues/77)) ([896beab](https://github.com/Tektii/trading-gateway/commit/896beab07c4b870d1a1b00495001d399113c49de))
+* **examples:** size rsi_momentum by equity fraction; fix README env vars ([#83](https://github.com/Tektii/trading-gateway/issues/83)) ([20cd49d](https://github.com/Tektii/trading-gateway/commit/20cd49d9864934dfb3ab507cfcac238f7141a2e4))
+* **exit-management:** seed synthesized-exit client_order_id from parent ([#79](https://github.com/Tektii/trading-gateway/issues/79)) ([f106bb5](https://github.com/Tektii/trading-gateway/commit/f106bb56ac69dacf44287bb3c901769d1574912e))
+* **gateway:** propagate clean end-of-backtest terminal to strategies ([#67](https://github.com/Tektii/trading-gateway/issues/67)) ([69c802e](https://github.com/Tektii/trading-gateway/commit/69c802eda7f0373f1fc0c939b54802f0d78b7b4b))
+* **oanda:** emit per-fill account snapshots on the live WS stream ([#80](https://github.com/Tektii/trading-gateway/issues/80)) ([134fbc0](https://github.com/Tektii/trading-gateway/commit/134fbc067db185ddd1809dfcdae3f891339302cd))
+* **oanda:** forward per-fill commission and financing on the stream ([#74](https://github.com/Tektii/trading-gateway/issues/74)) ([fca88d7](https://github.com/Tektii/trading-gateway/commit/fca88d79d377a90b67e261ac055530f591ee8003))
+* **tektii:** forward time-in-force to the engine and map it back ([#90](https://github.com/Tektii/trading-gateway/issues/90)) ([b7fce58](https://github.com/Tektii/trading-gateway/commit/b7fce58eb324885d0bc21a9a66243177183bdfba))
+
+
+### Bug Fixes
+
+* **core:** register attached SL/TP exits in the order-submit path ([#81](https://github.com/Tektii/trading-gateway/issues/81)) ([6e0d677](https://github.com/Tektii/trading-gateway/commit/6e0d67789f3051c162ef1b84b96cb39186e3f2c5))
+* **examples:** make ma_crossover and rsi_momentum templates symbol-agnostic ([#75](https://github.com/Tektii/trading-gateway/issues/75)) ([97e5763](https://github.com/Tektii/trading-gateway/commit/97e57638980d18344cf32963e2a1f2728e4502ef))
+* **examples:** make ma_crossover template trade in backtests ([#72](https://github.com/Tektii/trading-gateway/issues/72)) ([e139e27](https://github.com/Tektii/trading-gateway/commit/e139e27a1e181e86f17ed4f39a35b02257b89e59))
+* **examples:** pin linux/amd64 in template Dockerfiles ([#103](https://github.com/Tektii/trading-gateway/issues/103)) ([00477e9](https://github.com/Tektii/trading-gateway/commit/00477e97f8b252da941ddc938e128a3c2add1783))
+* **exit-management:** target the parent position on synthesized exit legs ([#122](https://github.com/Tektii/trading-gateway/issues/122)) ([860fef7](https://github.com/Tektii/trading-gateway/commit/860fef7579e69214040101552c97c3720f5a56e1))
+* **gateway:** echo engine event_id so local acks don't pace the sim ([#115](https://github.com/Tektii/trading-gateway/issues/115)) ([a8e4401](https://github.com/Tektii/trading-gateway/commit/a8e4401d1d0d3a43db4a957578908b98d72cb1a1))
+* **gateway:** relay engine's end-of-backtest terminal and flush-ack ([#68](https://github.com/Tektii/trading-gateway/issues/68)) ([9be83f7](https://github.com/Tektii/trading-gateway/commit/9be83f730955dfa99fc5388a5f4142abf99f1437))
+* **gateway:** release engine ACKs by echoed event_id, not queue position ([#116](https://github.com/Tektii/trading-gateway/issues/116)) ([cbc24ae](https://github.com/Tektii/trading-gateway/commit/cbc24ae4990ee14781a8ae6a8ff1a1cf2173b799))
+* **oanda:** derive stream-fill order context from the fill reason ([#92](https://github.com/Tektii/trading-gateway/issues/92)) ([e63f798](https://github.com/Tektii/trading-gateway/commit/e63f7989f91fa969d07f2a247c60f5993d1a4f0d))
+* **oanda:** deserialize orderID/tradeID wire spelling on transactions ([#87](https://github.com/Tektii/trading-gateway/issues/87)) ([eb12373](https://github.com/Tektii/trading-gateway/commit/eb12373f74fad73767e2484b4e15d4ed6ff2c6a0))
+* **oanda:** emit per-fill account snapshots from the REST fill path ([#86](https://github.com/Tektii/trading-gateway/issues/86)) ([036fcdc](https://github.com/Tektii/trading-gateway/commit/036fcdc7d0ab3fbfe506e3124673094077757476))
+* **oanda:** emit transaction-stream events inline and dedupe against REST fills ([#91](https://github.com/Tektii/trading-gateway/issues/91)) ([3dc4f0e](https://github.com/Tektii/trading-gateway/commit/3dc4f0ee661a2db9c0f970c25c819eae4791adcb))
+* **oanda:** propagate client ids onto native TP/SL legs ([#82](https://github.com/Tektii/trading-gateway/issues/82)) ([3f8bbd1](https://github.com/Tektii/trading-gateway/commit/3f8bbd1067f5a6798ed18617c5a7ac77d1ddd834))
+* **oanda:** report real quantities for partially filled IOC orders ([#88](https://github.com/Tektii/trading-gateway/issues/88)) ([e918283](https://github.com/Tektii/trading-gateway/commit/e9182832b3f6121ef42cf0c5b721535f06e7b7a9))
+* **oanda:** report synchronous order cancels from the REST create response ([#85](https://github.com/Tektii/trading-gateway/issues/85)) ([b6d55c8](https://github.com/Tektii/trading-gateway/commit/b6d55c84ea9ef22b7f9f0f66ca71c9fc763a0f0a))
+* **oanda:** retry the candle poll on transient HTTP failures ([#93](https://github.com/Tektii/trading-gateway/issues/93)) ([5553fbf](https://github.com/Tektii/trading-gateway/commit/5553fbf17d140014a6b30f0755f76e73ccfdf950))
+* **oanda:** surface native bracket SL/TP legs as order events ([#99](https://github.com/Tektii/trading-gateway/issues/99)) ([7ee948f](https://github.com/Tektii/trading-gateway/commit/7ee948f5225cd9e85346645a1b140608135d9bbe))
+* **registry:** don't mark undelivered engine events as sent (TEK-1315) ([#110](https://github.com/Tektii/trading-gateway/issues/110)) ([c33a059](https://github.com/Tektii/trading-gateway/commit/c33a059eb2c3b10fb233025d34ec7484902b7946))
+* **tektii:** connect to the engine only after a strategy attaches ([#104](https://github.com/Tektii/trading-gateway/issues/104)) ([b5abab1](https://github.com/Tektii/trading-gateway/commit/b5abab1cb66b2ba66047c5f5efcc9230db782889))
+* **tektii:** drop empty strategy ACKs so they don't pop the engine FIFO ([#109](https://github.com/Tektii/trading-gateway/issues/109)) ([dac10bc](https://github.com/Tektii/trading-gateway/commit/dac10bcc56f6af43e73d0d964c19e7650a9d36bd))
+* **tektii:** preserve engine error distinction on 404s ([#101](https://github.com/Tektii/trading-gateway/issues/101)) ([d518fbd](https://github.com/Tektii/trading-gateway/commit/d518fbd905a0f5950d4d241c537aa1a97b09864b))
+* **tektii:** release engine events FIFO one-per-ack instead of drain-all ([#89](https://github.com/Tektii/trading-gateway/issues/89)) ([a854882](https://github.com/Tektii/trading-gateway/commit/a8548828a404768bfdf0ef99a6c01364a283de62))
+* **tektii:** restore auto-correlation ACK pacing (revert [#109](https://github.com/Tektii/trading-gateway/issues/109)) ([#114](https://github.com/Tektii/trading-gateway/issues/114)) ([0f71e1a](https://github.com/Tektii/trading-gateway/commit/0f71e1a090038db52615edc8ff4eacde6c59b562))
+* **tektii:** set TCP_NODELAY on the engine socket to kill the ~40ms ACK stall ([#111](https://github.com/Tektii/trading-gateway/issues/111)) ([3dc4221](https://github.com/Tektii/trading-gateway/commit/3dc422147d28ff0a7cce0c3cc755634d278bbd73))
+* **tektii:** surface engine validation message on rejected orders ([#123](https://github.com/Tektii/trading-gateway/issues/123)) ([dffb561](https://github.com/Tektii/trading-gateway/commit/dffb56105d9aa4c8e5e84785f53ecf89d0ce56fd))
+
 ## [0.2.0](https://github.com/Tektii/trading-gateway/compare/v0.1.0...v0.2.0) (2026-05-26)
 
 
