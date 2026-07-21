@@ -18,11 +18,13 @@ pub mod coverage;
 pub mod fill_handler;
 pub mod handler;
 pub mod registry;
+pub mod replace;
 pub mod types;
 
 pub use circuit_breaker::{CircuitState, ExitOrderCircuitBreaker};
 pub use handler::{ExitHandler, ExitHandling};
 pub use registry::ExitHandlerRegistry;
+pub use replace::ReplaceExitLegError;
 
 pub use types::{
     ActualOrder, ActualOrderStatus, CancelExitResult, CancelExitResultInternal, CancellationReason,

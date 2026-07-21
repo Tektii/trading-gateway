@@ -20,7 +20,10 @@ pub use order::{
 pub use platform::{
     GatewayMode, TradingPlatform, TradingPlatformKind, TradingPlatformParseError, VALID_PROVIDERS,
 };
-pub use position::{CloseAllPositionsResult, ClosePositionRequest, Position};
+pub use position::{
+    CloseAllPositionsResult, ClosePositionRequest, ExitLegPlacement, ModifyPositionExitsRequest,
+    ModifyPositionExitsResult, Position,
+};
 pub use quote::Quote;
 pub use system::{
     Capabilities, ConnectionStatus, DetailedHealthStatus, HealthStatus, OverallStatus,

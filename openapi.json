@@ -1141,6 +1141,97 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "positions"
+        ],
+        "summary": "Move a position's resting stop-loss or take-profit.",
+        "description": "Moves the exit orders the gateway placed for this position when its entry\nfilled. The gateway uses the provider's native order modify where it exists,\nand otherwise cancels and re-places the leg; if the replacement is rejected\nthe original exit is restored, so a failed call leaves the position as\nprotected as it was. A `502` means the original could not be restored and the\nposition is genuinely uncovered for that leg -- the same condition reported\non the WebSocket as `POSITION_UNPROTECTED`.\n\nOnly legs already tracked for the position can be moved; this does not\nattach an exit to a position that has none. A leg that filled in parts rests\nas several orders, and all of them move together.\n\nLegs are moved one at a time and are not rolled back as a set: if a request\nnames both legs and the second fails, the first stays at its new price and\nthe call still reports the failure. Re-read the position to see where each\nleg ended up.",
+        "operationId": "modify_position_exits",
+        "parameters": [
+          {
+            "name": "position_id",
+            "in": "path",
+            "description": "Position ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModifyPositionExitsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Exit legs moved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModifyPositionExitsResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request moves neither leg",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Position not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Leg not tracked, or move rejected and the original exit restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Exit cancelled and could not be re-established — position unprotected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/quotes/{symbol}": {
@@ -1812,6 +1903,27 @@
           "PROVIDER_UNAVAILABLE"
         ]
       },
+      "ExitLegPlacement": {
+        "type": "object",
+        "description": "The orders now holding an exit leg, after it was moved.",
+        "required": [
+          "order_ids",
+          "trigger_price"
+        ],
+        "properties": {
+          "order_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Provider order IDs resting at the new price. A leg spans more than one\norder when the entry filled in parts. IDs differ from the previous ones\nwhere the provider could not modify in place and the gateway replaced\nthe order."
+          },
+          "trigger_price": {
+            "type": "string",
+            "description": "The price the leg now triggers at"
+          }
+        }
+      },
       "GetPositionsParams": {
         "type": "object",
         "description": "Request body for get positions with optional symbol filter.",
@@ -1911,6 +2023,61 @@
               "null"
             ],
             "description": "Previous order ID if the provider used cancel-replace.\n`None` if the order was modified in-place."
+          }
+        }
+      },
+      "ModifyPositionExitsRequest": {
+        "type": "object",
+        "description": "Request to move a position's resting stop-loss or take-profit.\n\nEach field names the new trigger price for that leg; omitting a field leaves\nthat leg untouched. Only legs the gateway already placed for this position\ncan be moved -- this does not attach an exit to an unprotected position.",
+        "properties": {
+          "stop_loss": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New stop-loss trigger price"
+          },
+          "take_profit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New take-profit trigger price"
+          }
+        }
+      },
+      "ModifyPositionExitsResult": {
+        "type": "object",
+        "description": "Result of moving a position's exit legs.",
+        "required": [
+          "position_id"
+        ],
+        "properties": {
+          "position_id": {
+            "type": "string",
+            "description": "The position whose exits were moved"
+          },
+          "stop_loss": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExitLegPlacement",
+                "description": "The stop-loss leg, if the request moved it"
+              }
+            ]
+          },
+          "take_profit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExitLegPlacement",
+                "description": "The take-profit leg, if the request moved it"
+              }
+            ]
           }
         }
       },

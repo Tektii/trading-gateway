@@ -81,6 +81,65 @@ const fn default_true() -> bool {
     true
 }
 
+/// Request to move a position's resting stop-loss or take-profit.
+///
+/// Each field names the new trigger price for that leg; omitting a field leaves
+/// that leg untouched. Only legs the gateway already placed for this position
+/// can be moved -- this does not attach an exit to an unprotected position.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, Validate)]
+#[serde(rename_all = "snake_case")]
+#[validate(schema(function = "validate_moves_a_leg"))]
+pub struct ModifyPositionExitsRequest {
+    /// New stop-loss trigger price
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_loss: Option<Decimal>,
+
+    /// New take-profit trigger price
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take_profit: Option<Decimal>,
+}
+
+fn validate_moves_a_leg(
+    request: &ModifyPositionExitsRequest,
+) -> Result<(), validator::ValidationError> {
+    if request.stop_loss.is_none() && request.take_profit.is_none() {
+        return Err(validator::ValidationError::new(
+            "at least one of stop_loss or take_profit is required",
+        ));
+    }
+    Ok(())
+}
+
+/// The orders now holding an exit leg, after it was moved.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ExitLegPlacement {
+    /// Provider order IDs resting at the new price. A leg spans more than one
+    /// order when the entry filled in parts. IDs differ from the previous ones
+    /// where the provider could not modify in place and the gateway replaced
+    /// the order.
+    pub order_ids: Vec<String>,
+
+    /// The price the leg now triggers at
+    pub trigger_price: Decimal,
+}
+
+/// Result of moving a position's exit legs.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ModifyPositionExitsResult {
+    /// The position whose exits were moved
+    pub position_id: String,
+
+    /// The stop-loss leg, if the request moved it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_loss: Option<ExitLegPlacement>,
+
+    /// The take-profit leg, if the request moved it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take_profit: Option<ExitLegPlacement>,
+}
+
 /// Result of closing all positions.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
