@@ -207,6 +207,12 @@ impl OandaAdapter {
         };
         let average_fill_price = parse_price(fill.price.as_deref());
         let order_id = fill.order_id.clone().unwrap_or_else(|| fill.id.clone());
+        let position_id = Self::fill_position_id(
+            fill.instrument.as_deref().unwrap_or(&request.symbol),
+            request.side,
+            fill.trade_opened.is_some(),
+            !fill.trades_closed.is_empty() || fill.trade_reduced.is_some(),
+        );
         let order = Order {
             id: order_id.clone(),
             client_order_id: request.client_order_id.clone(),
@@ -225,7 +231,7 @@ impl OandaAdapter {
             average_fill_price,
             status,
             reject_reason: None,
-            position_id: None,
+            position_id,
             parent_order_id: None,
             reduce_only: None,
             post_only: None,
@@ -1004,6 +1010,9 @@ impl TradingAdapter for OandaAdapter {
                 comment: None,
             });
 
+        // OANDA's order request has no field for `reduce_only` or `position_id`,
+        // so an exit leg's reduce-only intent never reaches the wire. Reducing
+        // rather than opening on a hedging account needs `positionFill`.
         let oanda_request = OandaOrderRequestWrapper {
             order: OandaOrderRequest {
                 order_type: oanda_type.to_string(),
@@ -1805,6 +1814,33 @@ impl OandaAdapter {
         }
 
         (position_id.to_string(), None)
+    }
+
+    /// Build the gateway position id a fill belongs to, in the same
+    /// `{instrument}_{LONG|SHORT}` shape `get_positions` mints and
+    /// `parse_position_id` reads back.
+    ///
+    /// A fill that only closed or reduced trades acted on the side opposite its
+    /// own units — an exit leg sells to close a long — so it names the position
+    /// it reduced, not the one those units would otherwise open. A reversal
+    /// (closed and opened in one fill) names the trade it left open. When the
+    /// wire references no trade at all, the fill's own side names the position.
+    pub(crate) fn fill_position_id(
+        instrument: &str,
+        side: Side,
+        opened_trade: bool,
+        closed_trade: bool,
+    ) -> Option<String> {
+        if instrument.is_empty() {
+            return None;
+        }
+
+        let suffix = match (side, closed_trade && !opened_trade) {
+            (Side::Buy, false) | (Side::Sell, true) => "LONG",
+            (Side::Sell, false) | (Side::Buy, true) => "SHORT",
+        };
+
+        Some(format!("{instrument}_{suffix}"))
     }
 }
 

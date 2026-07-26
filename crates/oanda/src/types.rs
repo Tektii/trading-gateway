@@ -4,6 +4,7 @@
 //! They are used internally by the `OandaAdapter` and `OandaWebSocketProvider`.
 #![allow(dead_code)] // Broker API response types — all fields required for deserialization
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 /// Response from `GET /v3/accounts/{id}/summary`.
@@ -131,9 +132,6 @@ pub struct OandaTransaction {
     /// so it needs an explicit rename rather than the container camelCase.
     #[serde(default, rename = "orderID")]
     pub order_id: Option<String>,
-    /// Trade that was opened or closed. Wire spelling is `tradeID`.
-    #[serde(default, rename = "tradeID")]
-    pub trade_id: Option<String>,
     /// Reason for this transaction.
     #[serde(default)]
     pub reason: Option<String>,
@@ -149,6 +147,15 @@ pub struct OandaTransaction {
     /// overnight position, in the account home currency.
     #[serde(default)]
     pub financing: Option<String>,
+    /// Trade this `ORDER_FILL` opened.
+    #[serde(default)]
+    pub trade_opened: Option<IgnoredAny>,
+    /// Trades this `ORDER_FILL` closed outright.
+    #[serde(default)]
+    pub trades_closed: Vec<IgnoredAny>,
+    /// Trade this `ORDER_FILL` partially closed.
+    #[serde(default)]
+    pub trade_reduced: Option<IgnoredAny>,
 }
 
 /// Response from `GET /v3/accounts/{id}/openPositions`.
@@ -513,6 +520,15 @@ pub struct OandaTransactionStreamLine {
     /// Last transaction ID (present on heartbeats).
     #[serde(default, rename = "lastTransactionID")]
     pub last_transaction_id: Option<String>,
+    /// Trade this `ORDER_FILL` opened.
+    #[serde(default)]
+    pub trade_opened: Option<IgnoredAny>,
+    /// Trades this `ORDER_FILL` closed outright.
+    #[serde(default)]
+    pub trades_closed: Vec<IgnoredAny>,
+    /// Trade this `ORDER_FILL` partially closed.
+    #[serde(default)]
+    pub trade_reduced: Option<IgnoredAny>,
 }
 
 /// One instrument's financing entry within a `DAILY_FINANCING` transaction.
@@ -637,7 +653,6 @@ mod tests {
         let fill = resp.order_fill_transaction.unwrap();
         assert_eq!(fill.price.as_deref(), Some("1.08525"));
         assert_eq!(fill.order_id.as_deref(), Some("6357"));
-        assert_eq!(fill.trade_id.as_deref(), Some("6358"));
     }
 
     #[test]
@@ -870,7 +885,6 @@ mod tests {
         assert_eq!(tx.id, "6360");
         assert_eq!(tx.transaction_type, "ORDER_FILL");
         assert_eq!(tx.order_id.as_deref(), Some("6357"));
-        assert_eq!(tx.trade_id.as_deref(), Some("6358"));
     }
 
     #[test]
@@ -933,6 +947,58 @@ mod tests {
         assert_eq!(tx.units.as_deref(), Some("10000"));
         assert_eq!(tx.price.as_deref(), Some("1.08525"));
         assert_eq!(tx.reason.as_deref(), Some("MARKET_ORDER"));
+    }
+
+    #[test]
+    fn deserialize_transaction_stream_fill_trade_refs() {
+        let tx: OandaTransactionStreamLine = serde_json::from_str(
+            r#"{
+            "id": "6360",
+            "type": "ORDER_FILL",
+            "instrument": "EUR_USD",
+            "units": "-15000",
+            "tradeOpened": {"tradeID": "6365", "units": "-5000"},
+            "tradesClosed": [{"tradeID": "6358", "units": "-10000"}],
+            "tradeReduced": {"tradeID": "6359", "units": "-2000"}
+        }"#,
+        )
+        .unwrap();
+        assert!(tx.trade_opened.is_some());
+        assert_eq!(tx.trades_closed.len(), 1);
+        assert!(tx.trade_reduced.is_some());
+    }
+
+    #[test]
+    fn deserialize_transaction_stream_fill_without_trade_refs() {
+        let tx: OandaTransactionStreamLine = serde_json::from_str(
+            r#"{
+            "id": "6360",
+            "type": "ORDER_FILL",
+            "instrument": "EUR_USD",
+            "units": "10000"
+        }"#,
+        )
+        .unwrap();
+        assert!(tx.trade_opened.is_none());
+        assert!(tx.trades_closed.is_empty());
+        assert!(tx.trade_reduced.is_none());
+    }
+
+    #[test]
+    fn deserialize_transaction_stream_fill_tolerates_unknown_trade_ref_shape() {
+        // An unparseable stream line is dropped whole, taking a real fill with
+        // it, so a shape change inside a trade reference must not be fatal.
+        let tx: OandaTransactionStreamLine = serde_json::from_str(
+            r#"{
+            "id": "6360",
+            "type": "ORDER_FILL",
+            "instrument": "EUR_USD",
+            "units": "-10000",
+            "tradesClosed": [{"unexpected": ["nested", 1]}]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(tx.trades_closed.len(), 1);
     }
 
     #[test]
