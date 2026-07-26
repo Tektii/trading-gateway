@@ -64,6 +64,9 @@ pub struct OandaOrder {
     /// Time in force: GTC, GFD, IOC, FOK.
     #[serde(default)]
     pub time_in_force: Option<String>,
+    /// How a fill may interact with open positions.
+    #[serde(default)]
+    pub position_fill: Option<String>,
     /// Order state: PENDING, FILLED, TRIGGERED, CANCELLED.
     pub state: String,
     /// Creation time (RFC 3339).
@@ -322,6 +325,11 @@ pub struct OandaOrderRequest {
     pub units: String,
     /// Time in force: GTC, GFD, IOC, FOK.
     pub time_in_force: String,
+    /// How the fill may interact with open positions: DEFAULT, OPEN_ONLY,
+    /// `REDUCE_FIRST`, `REDUCE_ONLY`. Omitted means DEFAULT, which on a hedging
+    /// account opens an opposing trade rather than reducing the existing one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_fill: Option<String>,
     /// Trigger price (for limit/stop orders).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<String>,
@@ -785,6 +793,7 @@ mod tests {
                 instrument: "EUR_USD".to_string(),
                 units: "10000".to_string(),
                 time_in_force: "FOK".to_string(),
+                position_fill: None,
                 price: None,
                 stop_loss_on_fill: Some(OandaStopLossOnFill {
                     price: "1.08000".to_string(),
@@ -819,6 +828,7 @@ mod tests {
                 instrument: "GBP_USD".to_string(),
                 units: "-5000".to_string(),
                 time_in_force: "GTC".to_string(),
+                position_fill: None,
                 price: Some("1.27500".to_string()),
                 stop_loss_on_fill: None,
                 take_profit_on_fill: None,
