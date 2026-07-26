@@ -1292,3 +1292,139 @@ async fn cancel_all_orders() {
     let result = adapter.cancel_all_orders(None).await.unwrap();
     assert_eq!(result.cancelled_count, 2);
 }
+
+#[tokio::test]
+async fn market_fill_reports_the_position_it_opened() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({
+            "orderID": "455",
+            "tradeOpened": {"tradeID": "6358", "units": "10000"}
+        })),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order { order, .. } = event.msg else {
+        panic!("expected an order event");
+    };
+    assert_eq!(
+        order.position_id.as_deref(),
+        Some("EUR_USD_LONG"),
+        "a buy that opened a trade belongs to the long position"
+    );
+}
+
+#[tokio::test]
+async fn market_fill_reports_the_position_it_closed() {
+    // The exit leg protecting a long sells to close it. The fill belongs to
+    // the long position it reduced, not the short its units would have opened.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({
+            "orderID": "455",
+            "units": "-10000",
+            "tradesClosed": [{"tradeID": "6358", "units": "-10000"}]
+        })),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Sell, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order { order, .. } = event.msg else {
+        panic!("expected an order event");
+    };
+    assert_eq!(
+        order.position_id.as_deref(),
+        Some("EUR_USD_LONG"),
+        "a sell that closed a trade belongs to the long position it closed"
+    );
+}
+
+#[tokio::test]
+async fn market_fill_without_trade_refs_reports_the_side_it_traded() {
+    // Netting-shape payload: no tradeOpened/tradesClosed to disambiguate, so
+    // the fill's own side names the position.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"orderID": "455", "units": "-10000"})),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Sell, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order { order, .. } = event.msg else {
+        panic!("expected an order event");
+    };
+    assert_eq!(order.position_id.as_deref(), Some("EUR_USD_SHORT"));
+}
+
+#[tokio::test]
+async fn market_fill_without_instrument_falls_back_to_the_requested_symbol() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        json!({
+            "orderFillTransaction": {
+                "id": "456",
+                "type": "ORDER_FILL",
+                "units": "10000",
+                "price": "1.10000",
+                "time": "2024-01-15T10:30:00.000000000Z",
+                "orderID": "455"
+            }
+        }),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order { order, .. } = event.msg else {
+        panic!("expected an order event");
+    };
+    assert_eq!(order.position_id.as_deref(), Some("EUR_USD_LONG"));
+}
