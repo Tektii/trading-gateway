@@ -8,7 +8,8 @@ use super::types::{
     OandaCreateOrderResponse, OandaOrder, OandaOrderRequest, OandaOrderRequestWrapper,
     OandaOrdersResponse, OandaPosition, OandaPositionResponse, OandaPositionsResponse,
     OandaPricingResponse, OandaStopLossOnFill, OandaTakeProfitOnFill, OandaTrade,
-    OandaTradesResponse, OandaTransaction,
+    OandaTradeCloseRequest, OandaTradeRef, OandaTradeResponse, OandaTradesResponse,
+    OandaTransaction,
 };
 
 use async_trait::async_trait;
@@ -56,6 +57,12 @@ const OANDA_LIVE_REST_URL: &str = "https://api-fxtrade.oanda.com";
 /// position. Omitting the field means DEFAULT, which on a hedging account
 /// opens an opposing trade instead of closing the one an exit leg protects.
 const REDUCE_ONLY_POSITION_FILL: &str = "REDUCE_ONLY";
+
+/// Oanda `units` value meaning "the whole thing" on a close request.
+const ALL_UNITS: &str = "ALL";
+
+/// The only `Trade.state` a caller can still act on.
+const OPEN_TRADE_STATE: &str = "OPEN";
 
 /// Oanda REST API adapter implementing `TradingAdapter`.
 pub struct OandaAdapter {
@@ -215,8 +222,9 @@ impl OandaAdapter {
         let position_id = Self::fill_position_id(
             fill.instrument.as_deref().unwrap_or(&request.symbol),
             request.side,
-            fill.trade_opened.is_some(),
-            !fill.trades_closed.is_empty() || fill.trade_reduced.is_some(),
+            fill.trade_opened.as_ref(),
+            &fill.trades_closed,
+            fill.trade_reduced.as_ref(),
         );
         let order = Order {
             id: order_id.clone(),
@@ -773,6 +781,198 @@ impl OandaAdapter {
         })
     }
 
+    /// Represent one Oanda trade as a gateway position.
+    ///
+    /// On a hedging account a trade *is* the unit a caller reduces, so it is
+    /// reported under its own trade id rather than the side-level id
+    /// `translate_oanda_position` mints.
+    fn translate_oanda_trade_to_position(trade: &OandaTrade) -> GatewayResult<Position> {
+        let (side, quantity) = Self::from_oanda_units(&trade.current_units)?;
+        let opened_at = chrono::DateTime::parse_from_rfc3339(&trade.open_time)
+            .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
+
+        Ok(Position {
+            id: trade.id.clone(),
+            symbol: trade.instrument.clone(),
+            side: match side {
+                Side::Buy => PositionSide::Long,
+                Side::Sell => PositionSide::Short,
+            },
+            quantity,
+            average_entry_price: Decimal::from_str(&trade.price).unwrap_or_default(),
+            current_price: Decimal::ZERO,
+            unrealized_pnl: trade
+                .unrealized_pl
+                .as_deref()
+                .and_then(|pl| Decimal::from_str(pl).ok())
+                .unwrap_or_default(),
+            realized_pnl: Decimal::ZERO,
+            margin_mode: None,
+            leverage: None,
+            liquidation_price: None,
+            opened_at,
+            updated_at: Utc::now(),
+        })
+    }
+
+    /// Fetch one open trade by its Oanda trade id.
+    ///
+    /// A trade the broker does not know, or one that is no longer open, is
+    /// reported as a missing position — from a caller's point of view there is
+    /// nothing there to act on either way.
+    async fn fetch_trade(&self, trade_id: &str) -> GatewayResult<OandaTrade> {
+        let url = self.account_url(&format!("/trades/{trade_id}"));
+        let result: GatewayResult<OandaTradeResponse> = self.get_json(&url).await;
+
+        if let Err(ref error) = result {
+            self.record_if_outage(error).await;
+            if matches!(error, GatewayError::ProviderError { message, .. } if message.contains("404"))
+            {
+                return Err(GatewayError::PositionNotFound {
+                    id: trade_id.to_string(),
+                });
+            }
+        }
+
+        let trade = result?.trade;
+        if trade.state != OPEN_TRADE_STATE {
+            return Err(GatewayError::PositionNotFound {
+                id: trade_id.to_string(),
+            });
+        }
+
+        Ok(trade)
+    }
+
+    /// Close `units` of one specific trade via `PUT /trades/{id}/close`.
+    ///
+    /// `units` is either a decimal string or `ALL`.
+    async fn close_trade(&self, trade_id: &str, units: String) -> GatewayResult<OrderHandle> {
+        let url = self.account_url(&format!("/trades/{trade_id}/close"));
+        self.put_close(
+            &url,
+            &OandaTradeCloseRequest { units },
+            trade_id,
+            "orderFillTransaction",
+        )
+        .await
+    }
+
+    /// PUT a close request and report the fill under `fill_key` as the handle.
+    ///
+    /// The position-level and trade-level closes differ only in endpoint, body,
+    /// and which fill transaction the response carries; a 404 means the thing
+    /// being closed is not there.
+    async fn put_close<B: serde::Serialize + Sync>(
+        &self,
+        url: &str,
+        body: &B,
+        closed_id: &str,
+        fill_key: &str,
+    ) -> GatewayResult<OrderHandle> {
+        let downstream_start = Instant::now();
+
+        let response = self
+            .client
+            .put(url)
+            .header("Authorization", self.auth_header())
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| GatewayError::ProviderError {
+                message: format!("Request failed: {e}"),
+                provider: Some("oanda".to_string()),
+                source: None,
+            })?;
+
+        debug!(
+            downstream_ms = downstream_start.elapsed().as_secs_f64() * 1000.0,
+            url, "Oanda close request completed"
+        );
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(GatewayError::PositionNotFound {
+                id: closed_id.to_string(),
+            });
+        }
+        if !status.is_success() {
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({"errorMessage": "Unknown error"}));
+            let error = Self::map_http_error(status, &body);
+            self.record_if_outage(&error).await;
+            return Err(error);
+        }
+
+        let resp_body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| GatewayError::internal(format!("Failed to parse close response: {e}")))?;
+
+        let order_id = resp_body
+            .get(fill_key)
+            .and_then(|tx| tx.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+
+        Ok(OrderHandle {
+            id: order_id,
+            client_order_id: None,
+            correlation_id: None,
+            status: OrderStatus::Filled,
+        })
+    }
+
+    /// Reduce one specific trade on behalf of a reduce-only market order.
+    ///
+    /// `positionFill: REDUCE_ONLY` only constrains the fill to the position, so
+    /// on a hedging account holding several same-side trades Oanda chooses
+    /// which of them to reduce. Naming the trade removes that choice.
+    ///
+    /// The trade is read back first: a position id pointing at another
+    /// instrument, or at a trade already on the order's own side, would
+    /// otherwise close something the caller never meant to touch.
+    async fn reduce_trade(
+        &self,
+        trade_id: &str,
+        request: &tektii_gateway_core::models::OrderRequest,
+    ) -> GatewayResult<OrderHandle> {
+        let trade = self.fetch_trade(trade_id).await?;
+
+        if trade.instrument != request.symbol {
+            return Err(GatewayError::InvalidRequest {
+                message: format!(
+                    "trade {trade_id} is on {}, not {}",
+                    trade.instrument, request.symbol
+                ),
+                field: Some("position_id".to_string()),
+            });
+        }
+
+        let (trade_side, open_units) = Self::from_oanda_units(&trade.current_units)?;
+        if trade_side == request.side {
+            return Err(GatewayError::InvalidRequest {
+                message: format!(
+                    "a {:?} order cannot reduce trade {trade_id}, which is itself {:?}",
+                    request.side, trade_side
+                ),
+                field: Some("position_id".to_string()),
+            });
+        }
+
+        let units = if request.quantity >= open_units {
+            ALL_UNITS.to_string()
+        } else {
+            request.quantity.to_string()
+        };
+
+        self.close_trade(trade_id, units).await
+    }
+
     /// Map HTTP status + response body to `GatewayError`.
     fn map_http_error(status: reqwest::StatusCode, body: &serde_json::Value) -> GatewayError {
         let message = body
@@ -965,6 +1165,18 @@ impl TradingAdapter for OandaAdapter {
     ) -> GatewayResult<OrderHandle> {
         self.check_circuit_breaker().await?;
 
+        // A reduce-only market order naming a trade is a close of that trade,
+        // so it goes to the trade's own close endpoint. Every other shape
+        // relies on `positionFill` below: Oanda closes a trade at market, so a
+        // resting leg has no trade-scoped endpoint to go to.
+        if request.reduce_only
+            && request.order_type == tektii_gateway_core::models::OrderType::Market
+            && let Some(position_id) = request.position_id.as_deref()
+            && let PositionTarget::Trade(trade_id) = Self::parse_position_id(position_id)
+        {
+            return self.reduce_trade(&trade_id, request).await;
+        }
+
         let oanda_type = Self::to_oanda_order_type(request.order_type)?;
         let oanda_units = Self::to_oanda_units(request.side, request.quantity);
 
@@ -1018,8 +1230,6 @@ impl TradingAdapter for OandaAdapter {
                 comment: None,
             });
 
-        // `position_id` still has no wire field: OANDA targets a specific trade
-        // by tradeID, which the gateway does not carry yet.
         let position_fill = request
             .reduce_only
             .then(|| REDUCE_ONLY_POSITION_FILL.to_string());
@@ -1522,9 +1732,13 @@ impl TradingAdapter for OandaAdapter {
     async fn get_position(&self, position_id: &str) -> GatewayResult<Position> {
         self.check_circuit_breaker().await?;
 
-        // Position IDs are in format `{INSTRUMENT}_{LONG|SHORT}` (e.g., `EUR_USD_LONG`)
-        // Or the caller might pass a normalized symbol like `F:EURUSD`
-        let (oanda_instrument, requested_side) = Self::parse_position_id(position_id);
+        let (oanda_instrument, requested_side) = match Self::parse_position_id(position_id) {
+            PositionTarget::Trade(trade_id) => {
+                let trade = self.fetch_trade(&trade_id).await?;
+                return Self::translate_oanda_trade_to_position(&trade);
+            }
+            PositionTarget::Side(instrument, side) => (instrument, side),
+        };
 
         let url = self.account_url(&format!("/positions/{oanda_instrument}"));
         let result: GatewayResult<OandaPositionResponse> = self.get_json(&url).await;
@@ -1568,12 +1782,20 @@ impl TradingAdapter for OandaAdapter {
     ) -> GatewayResult<OrderHandle> {
         self.check_circuit_breaker().await?;
 
-        let (oanda_instrument, requested_side) = Self::parse_position_id(position_id);
+        let (oanda_instrument, requested_side) = match Self::parse_position_id(position_id) {
+            PositionTarget::Trade(trade_id) => {
+                let units = request
+                    .quantity
+                    .map_or_else(|| ALL_UNITS.to_string(), |q| q.to_string());
+                return self.close_trade(&trade_id, units).await;
+            }
+            PositionTarget::Side(instrument, side) => (instrument, side),
+        };
         let side = requested_side.unwrap_or(PositionSide::Long);
 
         let close_amount = request
             .quantity
-            .map_or_else(|| "ALL".to_string(), |q| q.to_string());
+            .map_or_else(|| ALL_UNITS.to_string(), |q| q.to_string());
 
         let close_request = match side {
             PositionSide::Long => OandaClosePositionRequest {
@@ -1586,68 +1808,15 @@ impl TradingAdapter for OandaAdapter {
             },
         };
 
-        let url = self.account_url(&format!("/positions/{oanda_instrument}/close"));
-        let downstream_start = Instant::now();
-
-        let response = self
-            .client
-            .put(&url)
-            .header("Authorization", self.auth_header())
-            .header("Content-Type", "application/json")
-            .json(&close_request)
-            .send()
-            .await
-            .map_err(|e| GatewayError::ProviderError {
-                message: format!("Request failed: {e}"),
-                provider: Some("oanda".to_string()),
-                source: None,
-            })?;
-
-        let downstream_time = downstream_start.elapsed();
-        debug!(
-            downstream_ms = downstream_time.as_secs_f64() * 1000.0,
-            "Oanda PUT /positions/{}/close completed", oanda_instrument
-        );
-
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(GatewayError::PositionNotFound {
-                id: position_id.to_string(),
-            });
-        }
-        if !status.is_success() {
-            let body = response
-                .json::<serde_json::Value>()
-                .await
-                .unwrap_or_else(|_| serde_json::json!({"errorMessage": "Unknown error"}));
-            let error = Self::map_http_error(status, &body);
-            self.record_if_outage(&error).await;
-            return Err(error);
-        }
-
-        let resp_body: serde_json::Value = response.json().await.map_err(|e| {
-            GatewayError::internal(format!("Failed to parse close position response: {e}"))
-        })?;
-
         // Oanda returns `longOrderFillTransaction` or `shortOrderFillTransaction`
         let fill_key = match side {
             PositionSide::Long => "longOrderFillTransaction",
             PositionSide::Short => "shortOrderFillTransaction",
         };
 
-        let order_id = resp_body
-            .get(fill_key)
-            .and_then(|tx| tx.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        Ok(OrderHandle {
-            id: order_id,
-            client_order_id: None,
-            correlation_id: None,
-            status: tektii_gateway_core::models::OrderStatus::Filled,
-        })
+        let url = self.account_url(&format!("/positions/{oanda_instrument}/close"));
+        self.put_close(&url, &close_request, position_id, fill_key)
+            .await
     }
 
     #[instrument(skip(self), name = "oanda_get_quote")]
@@ -1818,44 +1987,82 @@ impl TradingAdapter for OandaAdapter {
     }
 }
 
+/// What a gateway position id points at.
+///
+/// A hedging Oanda account can hold several same-side trades on one instrument,
+/// so the side-level form cannot always name what a caller means.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PositionTarget {
+    /// One specific Oanda trade, by its trade id.
+    Trade(String),
+    /// An instrument, optionally narrowed to one side.
+    Side(String, Option<PositionSide>),
+}
+
 impl OandaAdapter {
-    /// Parse a position ID into `(oanda_instrument, optional_side)`.
+    /// Resolve what a position id points at.
     ///
-    /// Accepts formats:
+    /// Oanda trade ids are decimal integers and instruments never are, so the
+    /// two forms cannot collide:
+    /// - `12345` -> that trade
     /// - `EUR_USD_LONG` -> `("EUR_USD", Some(Long))`
-    /// - `EUR_USD_SHORT` -> `("EUR_USD", Some(Short))`
     /// - `EUR_USD` -> `("EUR_USD", None)`
-    fn parse_position_id(position_id: &str) -> (String, Option<PositionSide>) {
+    pub(crate) fn parse_position_id(position_id: &str) -> PositionTarget {
+        if !position_id.is_empty() && position_id.bytes().all(|b| b.is_ascii_digit()) {
+            return PositionTarget::Trade(position_id.to_string());
+        }
         if let Some(base) = position_id.strip_suffix("_LONG") {
-            return (base.to_string(), Some(PositionSide::Long));
+            return PositionTarget::Side(base.to_string(), Some(PositionSide::Long));
         }
         if let Some(base) = position_id.strip_suffix("_SHORT") {
-            return (base.to_string(), Some(PositionSide::Short));
+            return PositionTarget::Side(base.to_string(), Some(PositionSide::Short));
         }
 
-        (position_id.to_string(), None)
+        PositionTarget::Side(position_id.to_string(), None)
     }
 
-    /// Build the gateway position id a fill belongs to, in the same
-    /// `{instrument}_{LONG|SHORT}` shape `get_positions` mints and
-    /// `parse_position_id` reads back.
+    /// Build the gateway position id a fill belongs to.
     ///
-    /// A fill that only closed or reduced trades acted on the side opposite its
-    /// own units — an exit leg sells to close a long — so it names the position
-    /// it reduced, not the one those units would otherwise open. A reversal
-    /// (closed and opened in one fill) names the trade it left open. When the
-    /// wire references no trade at all, the fill's own side names the position.
+    /// A fill naming exactly one trade reports that trade's id — the handle a
+    /// later reduction needs to target it rather than leaving Oanda to pick
+    /// among an instrument's same-side trades. A reversal (closed and opened in
+    /// one fill) names the trade it left open.
+    ///
+    /// A fill spanning several trades acted on the side as a whole, and one
+    /// naming no trade carries no handle at all; both fall back to the
+    /// `{instrument}_{LONG|SHORT}` shape `get_positions` mints and
+    /// `parse_position_id` reads back. In that fallback a fill that only closed
+    /// trades acted on the side opposite its own units — an exit leg sells to
+    /// close a long — so it names the position it reduced.
     pub(crate) fn fill_position_id(
         instrument: &str,
         side: Side,
-        opened_trade: bool,
-        closed_trade: bool,
+        trade_opened: Option<&OandaTradeRef>,
+        trades_closed: &[OandaTradeRef],
+        trade_reduced: Option<&OandaTradeRef>,
     ) -> Option<String> {
+        // An opened trade wins outright: a reversal leaves it live while the
+        // trades it closed are gone, so an unusable opened id falls through to
+        // the side rather than naming a trade that no longer exists.
+        let named_trade = match (trade_opened, trade_reduced, trades_closed) {
+            (Some(opened), _, _) => Some(opened.trade_id.as_str()),
+            (None, Some(reduced), _) => Some(reduced.trade_id.as_str()),
+            (None, None, [closed]) => Some(closed.trade_id.as_str()),
+            _ => None,
+        }
+        .filter(|id| !id.is_empty());
+
+        if let Some(trade_id) = named_trade {
+            return Some(trade_id.to_string());
+        }
+
         if instrument.is_empty() {
             return None;
         }
 
-        let suffix = match (side, closed_trade && !opened_trade) {
+        let reduced_a_trade =
+            (!trades_closed.is_empty() || trade_reduced.is_some()) && trade_opened.is_none();
+        let suffix = match (side, reduced_a_trade) {
             (Side::Buy, false) | (Side::Sell, true) => "LONG",
             (Side::Sell, false) | (Side::Buy, true) => "SHORT",
         };
@@ -2008,25 +2215,175 @@ mod tests {
         );
     }
 
+    fn trade_ref(trade_id: &str) -> OandaTradeRef {
+        OandaTradeRef {
+            trade_id: trade_id.to_string(),
+        }
+    }
+
     #[test]
     fn parse_position_id_with_long_suffix() {
-        let (inst, side) = OandaAdapter::parse_position_id("EUR_USD_LONG");
-        assert_eq!(inst, "EUR_USD");
-        assert_eq!(side, Some(PositionSide::Long));
+        assert_eq!(
+            OandaAdapter::parse_position_id("EUR_USD_LONG"),
+            PositionTarget::Side("EUR_USD".to_string(), Some(PositionSide::Long))
+        );
     }
 
     #[test]
     fn parse_position_id_with_short_suffix() {
-        let (inst, side) = OandaAdapter::parse_position_id("EUR_USD_SHORT");
-        assert_eq!(inst, "EUR_USD");
-        assert_eq!(side, Some(PositionSide::Short));
+        assert_eq!(
+            OandaAdapter::parse_position_id("EUR_USD_SHORT"),
+            PositionTarget::Side("EUR_USD".to_string(), Some(PositionSide::Short))
+        );
     }
 
     #[test]
     fn parse_position_id_raw_oanda() {
-        let (inst, side) = OandaAdapter::parse_position_id("EUR_USD");
-        assert_eq!(inst, "EUR_USD");
-        assert_eq!(side, None);
+        assert_eq!(
+            OandaAdapter::parse_position_id("EUR_USD"),
+            PositionTarget::Side("EUR_USD".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parse_position_id_all_digits_is_a_trade() {
+        assert_eq!(
+            OandaAdapter::parse_position_id("12345"),
+            PositionTarget::Trade("12345".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_position_id_empty_is_not_a_trade() {
+        assert_eq!(
+            OandaAdapter::parse_position_id(""),
+            PositionTarget::Side(String::new(), None)
+        );
+    }
+
+    #[test]
+    fn fill_position_id_names_the_opened_trade() {
+        assert_eq!(
+            OandaAdapter::fill_position_id(
+                "EUR_USD",
+                Side::Buy,
+                Some(&trade_ref("801")),
+                &[],
+                None
+            )
+            .as_deref(),
+            Some("801")
+        );
+    }
+
+    #[test]
+    fn fill_position_id_names_a_single_closed_trade() {
+        assert_eq!(
+            OandaAdapter::fill_position_id("EUR_USD", Side::Sell, None, &[trade_ref("802")], None)
+                .as_deref(),
+            Some("802")
+        );
+    }
+
+    #[test]
+    fn fill_position_id_names_the_reduced_trade() {
+        assert_eq!(
+            OandaAdapter::fill_position_id(
+                "EUR_USD",
+                Side::Sell,
+                None,
+                &[],
+                Some(&trade_ref("803"))
+            )
+            .as_deref(),
+            Some("803")
+        );
+    }
+
+    #[test]
+    fn fill_position_id_reversal_names_the_trade_left_open() {
+        assert_eq!(
+            OandaAdapter::fill_position_id(
+                "EUR_USD",
+                Side::Sell,
+                Some(&trade_ref("804")),
+                &[trade_ref("805")],
+                None
+            )
+            .as_deref(),
+            Some("804")
+        );
+    }
+
+    #[test]
+    fn fill_position_id_falls_back_to_the_side_when_several_trades_closed() {
+        assert_eq!(
+            OandaAdapter::fill_position_id(
+                "EUR_USD",
+                Side::Sell,
+                None,
+                &[trade_ref("806"), trade_ref("807")],
+                None
+            )
+            .as_deref(),
+            Some("EUR_USD_LONG"),
+            "the sell closed longs; it does not belong to a short position"
+        );
+    }
+
+    #[test]
+    fn fill_position_id_falls_back_to_the_side_when_the_trade_ref_carries_no_id() {
+        // A trade reference whose shape the gateway does not recognise still
+        // deserializes, but names nothing to target.
+        assert_eq!(
+            OandaAdapter::fill_position_id("EUR_USD", Side::Buy, Some(&trade_ref("")), &[], None)
+                .as_deref(),
+            Some("EUR_USD_LONG")
+        );
+        assert_eq!(
+            OandaAdapter::fill_position_id("EUR_USD", Side::Sell, None, &[trade_ref("")], None)
+                .as_deref(),
+            Some("EUR_USD_LONG")
+        );
+        assert_eq!(
+            OandaAdapter::fill_position_id("EUR_USD", Side::Sell, None, &[], Some(&trade_ref("")))
+                .as_deref(),
+            Some("EUR_USD_LONG"),
+            "a sell can only have reduced a long, however the trade ref is spelled"
+        );
+    }
+
+    #[test]
+    fn fill_position_id_unnameable_reversal_names_the_side_it_left_open() {
+        // The opened trade is live but cannot be named; the trades it closed
+        // are gone, so neither is a handle. The side the reversal left open is.
+        assert_eq!(
+            OandaAdapter::fill_position_id(
+                "EUR_USD",
+                Side::Sell,
+                Some(&trade_ref("")),
+                &[trade_ref("808")],
+                None
+            )
+            .as_deref(),
+            Some("EUR_USD_SHORT")
+        );
+    }
+
+    #[test]
+    fn fill_position_id_falls_back_to_the_side_when_no_trade_is_named() {
+        assert_eq!(
+            OandaAdapter::fill_position_id("EUR_USD", Side::Buy, None, &[], None).as_deref(),
+            Some("EUR_USD_LONG")
+        );
+    }
+
+    #[test]
+    fn fill_position_id_without_an_instrument_has_nothing_to_name() {
+        assert_eq!(
+            OandaAdapter::fill_position_id("", Side::Buy, None, &[], None),
+            None
+        );
     }
 
     #[test]

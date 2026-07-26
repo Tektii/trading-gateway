@@ -4,7 +4,6 @@
 //! They are used internally by the `OandaAdapter` and `OandaWebSocketProvider`.
 #![allow(dead_code)] // Broker API response types — all fields required for deserialization
 
-use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 /// Response from `GET /v3/accounts/{id}/summary`.
@@ -152,13 +151,45 @@ pub struct OandaTransaction {
     pub financing: Option<String>,
     /// Trade this `ORDER_FILL` opened.
     #[serde(default)]
-    pub trade_opened: Option<IgnoredAny>,
+    pub trade_opened: Option<OandaTradeRef>,
     /// Trades this `ORDER_FILL` closed outright.
     #[serde(default)]
-    pub trades_closed: Vec<IgnoredAny>,
+    pub trades_closed: Vec<OandaTradeRef>,
     /// Trade this `ORDER_FILL` partially closed.
     #[serde(default)]
-    pub trade_reduced: Option<IgnoredAny>,
+    pub trade_reduced: Option<OandaTradeRef>,
+}
+
+/// A trade an `ORDER_FILL` acted on (`tradeOpened`, `tradesClosed[]`,
+/// `tradeReduced`).
+///
+/// Only the id is read: it is the handle a later reduction uses to target this
+/// exact trade on a hedging account, where an instrument can hold several
+/// same-side trades at once.
+#[derive(Debug, Deserialize)]
+pub struct OandaTradeRef {
+    /// The trade's id. OANDA spells the wire field `tradeID` (capital ID).
+    ///
+    /// Defaulted rather than required: an unparseable stream line is dropped
+    /// whole, taking a real fill with it, so a shape change inside a trade
+    /// reference must not be fatal. Callers treat an empty id as "no trade
+    /// named".
+    #[serde(default, rename = "tradeID")]
+    pub trade_id: String,
+}
+
+/// Response from `GET /v3/accounts/{id}/trades/{tradeSpecifier}`.
+#[derive(Debug, Deserialize)]
+pub struct OandaTradeResponse {
+    /// The requested trade.
+    pub trade: OandaTrade,
+}
+
+/// Body for `PUT /v3/accounts/{id}/trades/{tradeSpecifier}/close`.
+#[derive(Debug, Serialize)]
+pub struct OandaTradeCloseRequest {
+    /// Units to close: a decimal string, or "ALL" for the whole trade.
+    pub units: String,
 }
 
 /// Response from `GET /v3/accounts/{id}/openPositions`.
@@ -530,13 +561,13 @@ pub struct OandaTransactionStreamLine {
     pub last_transaction_id: Option<String>,
     /// Trade this `ORDER_FILL` opened.
     #[serde(default)]
-    pub trade_opened: Option<IgnoredAny>,
+    pub trade_opened: Option<OandaTradeRef>,
     /// Trades this `ORDER_FILL` closed outright.
     #[serde(default)]
-    pub trades_closed: Vec<IgnoredAny>,
+    pub trades_closed: Vec<OandaTradeRef>,
     /// Trade this `ORDER_FILL` partially closed.
     #[serde(default)]
-    pub trade_reduced: Option<IgnoredAny>,
+    pub trade_reduced: Option<OandaTradeRef>,
 }
 
 /// One instrument's financing entry within a `DAILY_FINANCING` transaction.
@@ -973,9 +1004,24 @@ mod tests {
         }"#,
         )
         .unwrap();
-        assert!(tx.trade_opened.is_some());
-        assert_eq!(tx.trades_closed.len(), 1);
-        assert!(tx.trade_reduced.is_some());
+        // Asserting the ids, not just presence: `trade_id` defaults, so a
+        // mismatched rename would still deserialize and leave every id empty,
+        // silently dropping back to side-level position ids.
+        assert_eq!(
+            tx.trade_opened.as_ref().map(|t| t.trade_id.as_str()),
+            Some("6365")
+        );
+        assert_eq!(
+            tx.trades_closed
+                .iter()
+                .map(|t| t.trade_id.as_str())
+                .collect::<Vec<_>>(),
+            ["6358"]
+        );
+        assert_eq!(
+            tx.trade_reduced.as_ref().map(|t| t.trade_id.as_str()),
+            Some("6359")
+        );
     }
 
     #[test]

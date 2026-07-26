@@ -1541,8 +1541,9 @@ fn transaction_fill_to_messages(
     let position_id = OandaAdapter::fill_position_id(
         &symbol,
         side,
-        tx.trade_opened.is_some(),
-        !tx.trades_closed.is_empty() || tx.trade_reduced.is_some(),
+        tx.trade_opened.as_ref(),
+        &tx.trades_closed,
+        tx.trade_reduced.as_ref(),
     );
 
     let order = Order {
@@ -1847,12 +1848,17 @@ fn transaction_reject_to_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::OandaPriceBucket;
-    use serde::de::IgnoredAny;
+    use crate::types::{OandaPriceBucket, OandaTradeRef};
     use tektii_gateway_core::websocket::messages::TradeEventType;
     use tektii_gateway_test_support::wiremock_helpers::{
         mount_json, mount_json_with_delay, start_mock_server,
     };
+
+    fn trade_ref(trade_id: &str) -> OandaTradeRef {
+        OandaTradeRef {
+            trade_id: trade_id.to_string(),
+        }
+    }
 
     /// Helper to create a test transaction stream line with sensible defaults.
     fn test_tx(id: &str, tx_type: &str) -> OandaTransactionStreamLine {
@@ -2028,12 +2034,12 @@ mod tests {
     }
 
     #[test]
-    fn transaction_fill_reports_the_position_it_opened() {
+    fn transaction_fill_reports_the_trade_it_opened() {
         let tx = OandaTransactionStreamLine {
             instrument: Some("EUR_USD".to_string()),
             units: Some("10000".to_string()),
             price: Some("1.08525".to_string()),
-            trade_opened: Some(IgnoredAny),
+            trade_opened: Some(trade_ref("801")),
             ..test_tx("6360", "ORDER_FILL")
         };
 
@@ -2042,19 +2048,42 @@ mod tests {
 
         match &msgs[0] {
             WsMessage::Order { order, .. } => {
-                assert_eq!(order.position_id.as_deref(), Some("EUR_USD_LONG"));
+                assert_eq!(order.position_id.as_deref(), Some("801"));
             }
             other => panic!("Expected Order event, got {other:?}"),
         }
     }
 
     #[test]
-    fn transaction_fill_reports_the_position_it_closed() {
+    fn transaction_fill_reports_the_trade_it_closed() {
         let tx = OandaTransactionStreamLine {
             instrument: Some("EUR_USD".to_string()),
             units: Some("-10000".to_string()),
             price: Some("1.08525".to_string()),
-            trades_closed: vec![IgnoredAny],
+            trades_closed: vec![trade_ref("802")],
+            ..test_tx("6362", "ORDER_FILL")
+        };
+
+        let msgs = transaction_to_messages(&tx, TradingPlatform::OandaPractice);
+        assert_eq!(msgs.len(), 2);
+
+        match &msgs[0] {
+            WsMessage::Order { order, .. } => {
+                assert_eq!(order.position_id.as_deref(), Some("802"));
+            }
+            other => panic!("Expected Order event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transaction_fill_closing_several_trades_reports_the_side_it_reduced() {
+        // One fill spanning several trades acted on the side, not on any one
+        // trade: the sell closed longs, so it names the long position.
+        let tx = OandaTransactionStreamLine {
+            instrument: Some("EUR_USD".to_string()),
+            units: Some("-10000".to_string()),
+            price: Some("1.08525".to_string()),
+            trades_closed: vec![trade_ref("802"), trade_ref("803")],
             ..test_tx("6362", "ORDER_FILL")
         };
 
@@ -2066,7 +2095,7 @@ mod tests {
                 assert_eq!(
                     order.position_id.as_deref(),
                     Some("EUR_USD_LONG"),
-                    "the sell closed a long; it does not belong to a short position"
+                    "the sell closed longs; it does not belong to a short position"
                 );
             }
             other => panic!("Expected Order event, got {other:?}"),
@@ -2074,12 +2103,12 @@ mod tests {
     }
 
     #[test]
-    fn transaction_fill_reports_the_position_it_reduced() {
+    fn transaction_fill_reports_the_trade_it_reduced() {
         let tx = OandaTransactionStreamLine {
             instrument: Some("EUR_USD".to_string()),
             units: Some("5000".to_string()),
             price: Some("1.08525".to_string()),
-            trade_reduced: Some(IgnoredAny),
+            trade_reduced: Some(trade_ref("804")),
             ..test_tx("6363", "ORDER_FILL")
         };
 
@@ -2088,22 +2117,22 @@ mod tests {
 
         match &msgs[0] {
             WsMessage::Order { order, .. } => {
-                assert_eq!(order.position_id.as_deref(), Some("EUR_USD_SHORT"));
+                assert_eq!(order.position_id.as_deref(), Some("804"));
             }
             other => panic!("Expected Order event, got {other:?}"),
         }
     }
 
     #[test]
-    fn transaction_fill_reversal_reports_the_position_it_opened() {
+    fn transaction_fill_reversal_reports_the_trade_it_opened() {
         // A sell larger than the open long closes it and opens a short in one
-        // fill. The newly opened trade is the position the fill leaves behind.
+        // fill. The newly opened trade is the one the fill leaves behind.
         let tx = OandaTransactionStreamLine {
             instrument: Some("EUR_USD".to_string()),
             units: Some("-15000".to_string()),
             price: Some("1.08525".to_string()),
-            trade_opened: Some(IgnoredAny),
-            trades_closed: vec![IgnoredAny],
+            trade_opened: Some(trade_ref("805")),
+            trades_closed: vec![trade_ref("806")],
             ..test_tx("6364", "ORDER_FILL")
         };
 
@@ -2112,7 +2141,7 @@ mod tests {
 
         match &msgs[0] {
             WsMessage::Order { order, .. } => {
-                assert_eq!(order.position_id.as_deref(), Some("EUR_USD_SHORT"));
+                assert_eq!(order.position_id.as_deref(), Some("805"));
             }
             other => panic!("Expected Order event, got {other:?}"),
         }

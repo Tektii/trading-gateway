@@ -146,14 +146,32 @@ pub fn oanda_position_json(instrument: &str, long_units: &str, short_units: &str
 }
 
 pub fn oanda_trade_json(instrument: &str, units: &str) -> Value {
+    oanda_trade_json_with_id("1", instrument, units)
+}
+
+pub fn oanda_trade_json_with_id(id: &str, instrument: &str, units: &str) -> Value {
     json!({
-        "id": "1",
+        "id": id,
         "instrument": instrument,
         "currentUnits": units,
         "price": "1.10000",
         "openTime": "2024-01-15T10:30:00.000000000Z",
         "state": "OPEN",
         "unrealizedPL": "50.00"
+    })
+}
+
+/// Oanda `PUT /trades/{id}/close` response.
+pub fn oanda_trade_close_json(transaction_id: &str, units: &str) -> Value {
+    json!({
+        "orderFillTransaction": {
+            "id": transaction_id,
+            "type": "ORDER_FILL",
+            "instrument": "EUR_USD",
+            "units": units,
+            "price": "1.10500",
+            "time": "2024-01-15T11:00:00.000000000Z"
+        }
     })
 }
 
