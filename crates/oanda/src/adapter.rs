@@ -52,6 +52,11 @@ const OANDA_PRACTICE_REST_URL: &str = "https://api-fxpractice.oanda.com";
 /// Base URL for Oanda live (real money) accounts.
 const OANDA_LIVE_REST_URL: &str = "https://api-fxtrade.oanda.com";
 
+/// `positionFill` that forbids opening: the fill may only reduce an existing
+/// position. Omitting the field means DEFAULT, which on a hedging account
+/// opens an opposing trade instead of closing the one an exit leg protects.
+const REDUCE_ONLY_POSITION_FILL: &str = "REDUCE_ONLY";
+
 /// Oanda REST API adapter implementing `TradingAdapter`.
 pub struct OandaAdapter {
     /// HTTP client with connection pooling.
@@ -654,7 +659,10 @@ impl OandaAdapter {
             reject_reason: None,
             position_id: None,
             parent_order_id: None,
-            reduce_only: None,
+            reduce_only: oanda_order
+                .position_fill
+                .as_deref()
+                .map(|fill| fill == REDUCE_ONLY_POSITION_FILL),
             post_only: None,
             hidden: None,
             display_quantity: None,
@@ -1010,15 +1018,19 @@ impl TradingAdapter for OandaAdapter {
                 comment: None,
             });
 
-        // OANDA's order request has no field for `reduce_only` or `position_id`,
-        // so an exit leg's reduce-only intent never reaches the wire. Reducing
-        // rather than opening on a hedging account needs `positionFill`.
+        // `position_id` still has no wire field: OANDA targets a specific trade
+        // by tradeID, which the gateway does not carry yet.
+        let position_fill = request
+            .reduce_only
+            .then(|| REDUCE_ONLY_POSITION_FILL.to_string());
+
         let oanda_request = OandaOrderRequestWrapper {
             order: OandaOrderRequest {
                 order_type: oanda_type.to_string(),
                 instrument: request.symbol.clone(),
                 units: oanda_units,
                 time_in_force: tif.to_string(),
+                position_fill,
                 price,
                 stop_loss_on_fill,
                 take_profit_on_fill,
@@ -1288,6 +1300,13 @@ impl TradingAdapter for OandaAdapter {
         // ModifyOrderRequest doesn't include time_in_force; preserve the current order's TIF
         let tif = Self::to_oanda_tif(current.time_in_force);
 
+        // A PUT replaces rather than patches, so reduce-only intent the caller
+        // never restates would be dropped on the floor.
+        let position_fill = current
+            .reduce_only
+            .unwrap_or(false)
+            .then(|| REDUCE_ONLY_POSITION_FILL.to_string());
+
         let price = request
             .limit_price
             .or(request.stop_price)
@@ -1301,6 +1320,7 @@ impl TradingAdapter for OandaAdapter {
                 instrument: current.symbol.clone(),
                 units: oanda_units,
                 time_in_force: tif.to_string(),
+                position_fill,
                 price,
                 stop_loss_on_fill: None,
                 take_profit_on_fill: None,

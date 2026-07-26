@@ -1428,3 +1428,177 @@ async fn market_fill_without_instrument_falls_back_to_the_requested_symbol() {
     };
     assert_eq!(order.position_id.as_deref(), Some("EUR_USD_LONG"));
 }
+
+#[tokio::test]
+async fn reduce_only_order_asks_oanda_to_only_reduce() {
+    // Without positionFill, a hedging account treats an exit leg's opposing
+    // units as a brand-new trade instead of closing the one it protects.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"id": "470"})),
+    )
+    .await;
+
+    let request = OrderRequest {
+        reduce_only: true,
+        ..forex_order("EUR_USD", Side::Sell, OrderType::Market, dec!(10000))
+    };
+    adapter.submit_order(&request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    assert_eq!(body["order"]["positionFill"], "REDUCE_ONLY");
+}
+
+#[tokio::test]
+async fn entry_order_leaves_position_fill_to_oanda() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({"id": "471"})),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Buy, OrderType::Market, dec!(10000));
+    assert!(!request.reduce_only);
+    adapter.submit_order(&request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    assert!(body["order"].get("positionFill").is_none());
+}
+
+#[tokio::test]
+async fn reduce_only_survives_on_a_resting_limit_order() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_pending_order_json(&json!({})),
+    )
+    .await;
+
+    let request = OrderRequest {
+        reduce_only: true,
+        limit_price: Some(dec!(1.10000)),
+        client_order_id: Some("strat-42-tp".to_string()),
+        ..forex_order("EUR_USD", Side::Sell, OrderType::Limit, dec!(10000))
+    };
+    adapter.submit_order(&request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value = requests[0].body_json().unwrap();
+    let order = &body["order"];
+    assert_eq!(order["positionFill"], "REDUCE_ONLY");
+    assert_eq!(order["price"], "1.10000");
+    assert_eq!(order["clientExtensions"]["id"], "strat-42-tp");
+}
+
+/// OANDA's modify is a full replacement, so anything the PUT omits is reset
+/// rather than inherited from the order being replaced.
+async fn modified_order_body(server: &wiremock::MockServer) -> serde_json::Value {
+    let requests = server.received_requests().await.unwrap();
+    let put = requests
+        .iter()
+        .find(|r| r.method == wiremock::http::Method::PUT)
+        .expect("a replacement was sent");
+    put.body_json().unwrap()
+}
+
+async fn mount_modify_exchange(server: &wiremock::MockServer, current: serde_json::Value) {
+    mount_json(
+        server,
+        "GET",
+        "/v3/accounts/test-account-123/orders/100",
+        200,
+        json!({"order": current}),
+    )
+    .await;
+    mount_json(
+        server,
+        "PUT",
+        "/v3/accounts/test-account-123/orders/100",
+        201,
+        json!({
+            "orderCancelTransaction": {"id": "101", "type": "ORDER_CANCEL"},
+            "orderCreateTransaction": {"id": "102", "type": "LIMIT_ORDER"}
+        }),
+    )
+    .await;
+    mount_json(
+        server,
+        "GET",
+        "/v3/accounts/test-account-123/orders/102",
+        200,
+        json!({"order": oanda_order_json(&json!({"id": "102"}))}),
+    )
+    .await;
+}
+
+fn move_trigger_to(price: Decimal) -> ModifyOrderRequest {
+    ModifyOrderRequest {
+        limit_price: Some(price),
+        stop_price: None,
+        quantity: None,
+        stop_loss: None,
+        take_profit: None,
+        trailing_distance: None,
+    }
+}
+
+#[tokio::test]
+async fn moving_a_resting_exit_leg_keeps_it_reduce_only() {
+    // Moving an SL/TP leg's trigger price must not hand its protection back:
+    // a replacement without positionFill reverts to DEFAULT, which opens an
+    // opposing trade on a hedging account instead of closing the one it guards.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_modify_exchange(
+        &server,
+        oanda_order_json(&json!({"id": "100", "positionFill": "REDUCE_ONLY"})),
+    )
+    .await;
+
+    adapter
+        .modify_order("100", &move_trigger_to(dec!(1.11000)))
+        .await
+        .unwrap();
+
+    let body = modified_order_body(&server).await;
+    assert_eq!(body["order"]["positionFill"], "REDUCE_ONLY");
+}
+
+#[tokio::test]
+async fn moving_a_plain_order_leaves_position_fill_to_oanda() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_modify_exchange(&server, oanda_order_json(&json!({"id": "100"}))).await;
+
+    adapter
+        .modify_order("100", &move_trigger_to(dec!(1.11000)))
+        .await
+        .unwrap();
+
+    let body = modified_order_body(&server).await;
+    assert!(body["order"].get("positionFill").is_none());
+}
