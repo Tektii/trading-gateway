@@ -1294,7 +1294,7 @@ async fn cancel_all_orders() {
 }
 
 #[tokio::test]
-async fn market_fill_reports_the_position_it_opened() {
+async fn market_fill_reports_the_trade_it_opened() {
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
@@ -1322,15 +1322,16 @@ async fn market_fill_reports_the_position_it_opened() {
     };
     assert_eq!(
         order.position_id.as_deref(),
-        Some("EUR_USD_LONG"),
-        "a buy that opened a trade belongs to the long position"
+        Some("6358"),
+        "the fill names the trade it opened, so an exit can target that trade"
     );
 }
 
 #[tokio::test]
-async fn market_fill_reports_the_position_it_closed() {
-    // The exit leg protecting a long sells to close it. The fill belongs to
-    // the long position it reduced, not the short its units would have opened.
+async fn market_fill_reports_the_trade_it_closed() {
+    // The exit leg protecting a long sells to close it. The fill names that
+    // trade, so a strategy holding several same-side trades can tell which one
+    // it just exited.
     let (server, base_url) = start_mock_server().await;
     let adapter = test_adapter(&base_url);
 
@@ -1359,8 +1360,81 @@ async fn market_fill_reports_the_position_it_closed() {
     };
     assert_eq!(
         order.position_id.as_deref(),
+        Some("6358"),
+        "the fill names the one trade it closed"
+    );
+}
+
+#[tokio::test]
+async fn market_fill_reports_the_trade_it_reduced() {
+    // A partial close leaves the trade open, so naming it is what lets a later
+    // exit finish the job against that same trade.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({
+            "orderID": "455",
+            "units": "-4000",
+            "tradeReduced": {"tradeID": "6358", "units": "-4000"}
+        })),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Sell, OrderType::Market, dec!(4000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order { order, .. } = event.msg else {
+        panic!("expected an order event");
+    };
+    assert_eq!(order.position_id.as_deref(), Some("6358"));
+}
+
+#[tokio::test]
+async fn market_fill_closing_several_trades_reports_the_side_it_reduced() {
+    // One fill spanning several trades acted on the side, not on any single
+    // trade — naming one of them would be a lie.
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    *adapter.provider_event_tx_handle().write().await = Some(tx);
+
+    mount_json(
+        &server,
+        "POST",
+        "/v3/accounts/test-account-123/orders",
+        201,
+        oanda_market_fill_json(&json!({
+            "orderID": "455",
+            "units": "-20000",
+            "tradesClosed": [
+                {"tradeID": "6358", "units": "-10000"},
+                {"tradeID": "6359", "units": "-10000"}
+            ]
+        })),
+    )
+    .await;
+
+    let request = forex_order("EUR_USD", Side::Sell, OrderType::Market, dec!(20000));
+    adapter.submit_order(&request).await.unwrap();
+
+    let event = rx.try_recv().expect("fill event published");
+    let WsMessage::Order { order, .. } = event.msg else {
+        panic!("expected an order event");
+    };
+    assert_eq!(
+        order.position_id.as_deref(),
         Some("EUR_USD_LONG"),
-        "a sell that closed a trade belongs to the long position it closed"
+        "a sell that closed several longs belongs to the long position"
     );
 }
 
