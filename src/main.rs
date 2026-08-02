@@ -529,7 +529,14 @@ async fn register_adapter(
             use tektii_gateway_mock::MockProviderAdapter;
 
             let (tx, _) = broadcast::channel::<WsMessage>(256);
-            let adapter = Arc::new(MockProviderAdapter::new(tx, platform));
+            let mut mock_adapter = MockProviderAdapter::new(tx, platform);
+            if let Ok(raw) = env::var("MOCK_PARTIAL_FILL_RATIO") {
+                match raw.parse::<rust_decimal::Decimal>() {
+                    Ok(ratio) => mock_adapter = mock_adapter.with_partial_fill_ratio(ratio),
+                    Err(e) => warn!("Invalid MOCK_PARTIAL_FILL_RATIO '{raw}': {e} — ignoring"),
+                }
+            }
+            let adapter = Arc::new(mock_adapter);
 
             // Store the adapter so connect_mock can create a WS provider that shares
             // the same PriceGenerator and event sink

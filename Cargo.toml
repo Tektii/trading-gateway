@@ -157,7 +157,7 @@ binance = ["dep:tektii-gateway-binance"]
 oanda = ["dep:tektii-gateway-oanda"]
 saxo = ["dep:tektii-gateway-saxo"]
 tektii = ["dep:tektii-gateway-tektii"]
-mock = ["dep:tektii-gateway-mock"]
+mock = ["dep:tektii-gateway-mock", "dep:rust_decimal"]
 
 [dependencies]
 tektii-gateway-core = { workspace = true }
@@ -167,6 +167,9 @@ tektii-gateway-oanda = { workspace = true, optional = true }
 tektii-gateway-saxo = { workspace = true, optional = true }
 tektii-gateway-tektii = { workspace = true, optional = true }
 tektii-gateway-mock = { workspace = true, optional = true }
+
+# Only needed to parse MOCK_PARTIAL_FILL_RATIO for the mock adapter
+rust_decimal = { workspace = true, optional = true }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

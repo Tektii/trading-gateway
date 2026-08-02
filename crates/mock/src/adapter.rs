@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::broadcast;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use tektii_gateway_core::adapter::TradingAdapter;
@@ -167,6 +167,9 @@ pub struct MockProviderAdapter {
     /// Shared event sink — order events pushed here flow through the ProviderRegistry
     /// to reach strategy WebSocket clients. Set when the MockWebSocketProvider connects.
     event_sink: EventSink,
+    /// When set, orders fill in two tranches instead of one so strategies can
+    /// exercise partial-fill handling. See [`MockProviderAdapter::with_partial_fill_ratio`].
+    partial_fill_ratio: Option<Decimal>,
 }
 
 impl MockProviderAdapter {
@@ -193,7 +196,29 @@ impl MockProviderAdapter {
             exit_handler,
             event_router,
             event_sink: crate::websocket::new_event_sink(),
+            partial_fill_ratio: None,
         }
+    }
+
+    /// Simulate partial fills: every order fills `ratio` of its quantity first
+    /// (emitting `OrderPartiallyFilled`), then the remainder one tick later
+    /// (emitting `OrderFilled`). Deterministic, so strategy runs stay reproducible.
+    ///
+    /// The ratio must be between 0 and 1 exclusive; anything else is ignored with a
+    /// warning and orders keep filling in a single tranche.
+    ///
+    /// The price condition of a limit or stop order is checked once, before the first
+    /// tranche — once an order starts filling, the remainder always follows. Real venues
+    /// can leave a partially filled order hanging; the mock keeps it simple.
+    #[must_use]
+    pub fn with_partial_fill_ratio(mut self, ratio: Decimal) -> Self {
+        if ratio > Decimal::ZERO && ratio < Decimal::ONE {
+            self.partial_fill_ratio = Some(ratio);
+            info!(%ratio, "Mock: partial fills enabled");
+        } else {
+            warn!(%ratio, "Mock: partial fill ratio must be between 0 and 1 exclusive — ignoring");
+        }
+        self
     }
 
     pub fn state_manager(&self) -> Arc<StateManager> {
@@ -242,6 +267,7 @@ impl MockProviderAdapter {
         let state = Arc::clone(&self.state);
         let price_gen = Arc::clone(&self.price_generator);
         let event_sink = Arc::clone(&self.event_sink);
+        let partial_fill_ratio = self.partial_fill_ratio;
 
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -285,57 +311,126 @@ impl MockProviderAdapter {
                 return;
             }
 
-            let order = {
-                let mut orders = state.orders.write();
-                let Some(order) = orders.get_mut(&order_id) else {
+            // Split the fill into an initial tranche plus a remainder when partial
+            // fills are enabled and the ratio yields a tranche smaller than the order.
+            let first_tranche = partial_fill_ratio
+                .map(|ratio| quantity * ratio)
+                .filter(|tranche| *tranche > Decimal::ZERO && *tranche < quantity);
+
+            let filled = if let Some(tranche) = first_tranche {
+                let Some(order) =
+                    Self::apply_fill(&state, &order_id, &symbol, side, tranche, fill_price)
+                else {
                     return;
                 };
-                if order.status == OrderStatus::Cancelled {
-                    return;
-                }
-                order.status = OrderStatus::Filled;
-                order.filled_quantity = quantity;
-                order.remaining_quantity = Decimal::ZERO;
-                order.average_fill_price = Some(fill_price);
-                order.updated_at = Utc::now();
-                order.clone()
+                let remainder = order.remaining_quantity;
+
+                Self::send_event(
+                    &event_sink,
+                    WsMessage::Order {
+                        event: OrderEventType::OrderPartiallyFilled,
+                        order,
+                        parent_order_id: None,
+                        timestamp: Utc::now(),
+                    },
+                );
+
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let remainder_price = price_gen.get_price(&symbol);
+                Self::apply_fill(&state, &order_id, &symbol, side, remainder, remainder_price)
+            } else {
+                Self::apply_fill(&state, &order_id, &symbol, side, quantity, fill_price)
             };
 
-            let trade = Trade {
-                id: Uuid::new_v4().to_string(),
-                order_id: order_id.clone(),
-                symbol: symbol.clone(),
-                side,
-                quantity,
-                price: fill_price,
-                commission: dec!(0),
-                commission_currency: "USD".to_string(),
-                is_maker: Some(false),
-                timestamp: Utc::now(),
+            // Cancelled between tranches — the remainder never landed.
+            let Some(order) = filled else {
+                return;
             };
-            state.trades.write().push(trade);
 
-            info!(
-                order_id,
-                %symbol,
-                ?side,
-                %quantity,
-                %fill_price,
-                "Mock: order filled"
-            );
-
-            state.upsert_position(&symbol, side, quantity, fill_price);
+            // Normally the last tranche completes the order. It won't if the order was
+            // resized upwards while it sat open, so report whatever state it reached.
+            let event = if order.status == OrderStatus::Filled {
+                OrderEventType::OrderFilled
+            } else {
+                OrderEventType::OrderPartiallyFilled
+            };
 
             Self::send_event(
                 &event_sink,
                 WsMessage::Order {
-                    event: OrderEventType::OrderFilled,
+                    event,
                     order,
                     parent_order_id: None,
                     timestamp: Utc::now(),
                 },
             );
         });
+    }
+
+    /// Apply one fill tranche: update the order, record the trade, and move the
+    /// position. Returns the updated order, or `None` if the order vanished or was
+    /// cancelled before this tranche landed.
+    fn apply_fill(
+        state: &MockState,
+        order_id: &str,
+        symbol: &str,
+        side: Side,
+        fill_quantity: Decimal,
+        fill_price: Decimal,
+    ) -> Option<Order> {
+        let order = {
+            let mut orders = state.orders.write();
+            let order = orders.get_mut(order_id)?;
+            if order.status == OrderStatus::Cancelled {
+                return None;
+            }
+
+            let previously_filled = order.filled_quantity;
+            let total_filled = previously_filled + fill_quantity;
+            if total_filled > Decimal::ZERO {
+                let notional = order.average_fill_price.unwrap_or(Decimal::ZERO)
+                    * previously_filled
+                    + fill_price * fill_quantity;
+                order.average_fill_price = Some(notional / total_filled);
+            }
+            order.filled_quantity = total_filled;
+            order.remaining_quantity = order.quantity - total_filled;
+            order.status = if order.remaining_quantity > Decimal::ZERO {
+                OrderStatus::PartiallyFilled
+            } else {
+                OrderStatus::Filled
+            };
+            order.updated_at = Utc::now();
+            order.clone()
+        };
+
+        state.trades.write().push(Trade {
+            id: Uuid::new_v4().to_string(),
+            order_id: order_id.to_string(),
+            symbol: symbol.to_string(),
+            side,
+            quantity: fill_quantity,
+            price: fill_price,
+            commission: dec!(0),
+            commission_currency: "USD".to_string(),
+            is_maker: Some(false),
+            timestamp: Utc::now(),
+        });
+
+        info!(
+            order_id,
+            %symbol,
+            ?side,
+            %fill_quantity,
+            %fill_price,
+            status = ?order.status,
+            "Mock: order fill applied"
+        );
+
+        state.upsert_position(symbol, side, fill_quantity, fill_price);
+
+        Some(order)
     }
 }
 
@@ -963,6 +1058,210 @@ mod tests {
         let adapter = make_adapter();
         let result = adapter.get_position("nonexistent").await;
         assert!(matches!(result, Err(GatewayError::PositionNotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn partial_fill_ratio_fills_in_two_tranches() {
+        let adapter = make_adapter().with_partial_fill_ratio(dec!(0.4));
+        let request = OrderRequest::market("AAPL", Side::Buy, dec!(10));
+        let handle = adapter.submit_order(&request).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let order = adapter.get_order(&handle.id).await.unwrap();
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+        assert_eq!(order.filled_quantity, dec!(4));
+        assert_eq!(order.remaining_quantity, dec!(6));
+        assert!(order.average_fill_price.is_some());
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let order = adapter.get_order(&handle.id).await.unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+        assert_eq!(order.filled_quantity, dec!(10));
+        assert_eq!(order.remaining_quantity, Decimal::ZERO);
+
+        // The final price must be the quantity-weighted average of both tranches,
+        // not just the price of the last one.
+        let trades = adapter
+            .get_trades(&TradeQueryParams {
+                order_id: Some(handle.id.clone()),
+                ..TradeQueryParams::default()
+            })
+            .await
+            .unwrap();
+        let notional: Decimal = trades.iter().map(|t| t.price * t.quantity).sum();
+        let expected_average = notional / order.filled_quantity;
+        let average = order.average_fill_price.expect("filled order has a price");
+        assert!(
+            (average - expected_average).abs() < dec!(0.0000001),
+            "average fill price {average} should be the weighted average {expected_average} \
+             of tranche prices {:?}",
+            trades.iter().map(|t| t.price).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_fill_opens_a_short_position_on_the_sell_side() {
+        let adapter = make_adapter().with_partial_fill_ratio(dec!(0.4));
+        let handle = adapter
+            .submit_order(&OrderRequest::market("AAPL", Side::Sell, dec!(10)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let positions = adapter.get_positions(Some("AAPL")).await.unwrap();
+        assert_eq!(positions[0].side, PositionSide::Short);
+        assert_eq!(positions[0].quantity, dec!(4));
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let order = adapter.get_order(&handle.id).await.unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+
+        let positions = adapter.get_positions(Some("AAPL")).await.unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].side, PositionSide::Short);
+        assert_eq!(positions[0].quantity, dec!(10));
+    }
+
+    #[tokio::test]
+    async fn partial_fills_do_not_bypass_the_price_condition() {
+        let adapter = make_adapter().with_partial_fill_ratio(dec!(0.5));
+        // AAPL seeds around 180 — a limit buy at 1 can never be met.
+        let handle = adapter
+            .submit_order(&OrderRequest::limit("AAPL", Side::Buy, dec!(10), dec!(1)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+
+        let order = adapter.get_order(&handle.id).await.unwrap();
+        assert_eq!(order.status, OrderStatus::Open);
+        assert_eq!(order.filled_quantity, Decimal::ZERO);
+
+        let trades = adapter
+            .get_trades(&TradeQueryParams {
+                order_id: Some(handle.id.clone()),
+                ..TradeQueryParams::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            trades.is_empty(),
+            "Unfillable order must not book a tranche"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_fill_emits_partially_filled_before_filled() {
+        use tektii_gateway_core::websocket::provider::{ProviderConfig, WebSocketProvider};
+
+        let adapter = make_adapter().with_partial_fill_ratio(dec!(0.5));
+        let ws = adapter.create_ws_provider();
+        let mut stream = ws
+            .connect(ProviderConfig {
+                platform: TradingPlatform::Mock,
+                symbols: vec!["AAPL".to_string()],
+                event_types: vec!["order".to_string()],
+                credentials: None,
+                tektii_params: None,
+            })
+            .await
+            .unwrap();
+
+        adapter
+            .submit_order(&OrderRequest::market("AAPL", Side::Buy, dec!(8)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+
+        let mut order_events = Vec::new();
+        while let Ok(event) = stream.try_recv() {
+            if let WsMessage::Order { event, .. } = event.msg {
+                order_events.push(event);
+            }
+        }
+
+        assert_eq!(
+            order_events,
+            vec![
+                OrderEventType::OrderCreated,
+                OrderEventType::OrderPartiallyFilled,
+                OrderEventType::OrderFilled,
+            ],
+            "Expected a partial fill between creation and the full fill"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_fill_records_a_trade_per_tranche() {
+        let adapter = make_adapter().with_partial_fill_ratio(dec!(0.25));
+        let handle = adapter
+            .submit_order(&OrderRequest::market("MSFT", Side::Buy, dec!(20)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+
+        let trades = adapter
+            .get_trades(&TradeQueryParams {
+                order_id: Some(handle.id.clone()),
+                ..TradeQueryParams::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(trades.len(), 2, "Expected one trade per tranche");
+        let total: Decimal = trades.iter().map(|t| t.quantity).sum();
+        assert_eq!(total, dec!(20));
+
+        let positions = adapter.get_positions(Some("MSFT")).await.unwrap();
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0].quantity, dec!(20));
+    }
+
+    #[tokio::test]
+    async fn cancel_between_tranches_stops_the_remainder() {
+        let adapter = make_adapter().with_partial_fill_ratio(dec!(0.3));
+        let handle = adapter
+            .submit_order(&OrderRequest::market("AAPL", Side::Buy, dec!(10)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        adapter.cancel_order(&handle.id).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let order = adapter.get_order(&handle.id).await.unwrap();
+        assert_eq!(order.status, OrderStatus::Cancelled);
+        assert_eq!(order.filled_quantity, dec!(3));
+
+        let positions = adapter.get_positions(Some("AAPL")).await.unwrap();
+        assert_eq!(positions[0].quantity, dec!(3), "Remainder must not fill");
+    }
+
+    #[tokio::test]
+    async fn out_of_range_partial_fill_ratio_is_ignored() {
+        for ratio in [dec!(0), dec!(1), dec!(1.5), dec!(-0.5)] {
+            let adapter = make_adapter().with_partial_fill_ratio(ratio);
+            let handle = adapter
+                .submit_order(&OrderRequest::market("AAPL", Side::Buy, dec!(10)))
+                .await
+                .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+            let order = adapter.get_order(&handle.id).await.unwrap();
+            assert_eq!(
+                order.status,
+                OrderStatus::Filled,
+                "Ratio {ratio} should be rejected and fill fully"
+            );
+            assert_eq!(order.filled_quantity, dec!(10));
+        }
     }
 
     #[tokio::test]
