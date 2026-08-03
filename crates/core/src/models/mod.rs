@@ -111,6 +111,24 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    /// Wire spelling of the status, matching its serde representation.
+    ///
+    /// Use this whenever a status has to go out as a bare string (query
+    /// parameters, log fields) — `Debug` formatting is not the wire form.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::PendingCancel => "PENDING_CANCEL",
+            Self::Open => "OPEN",
+            Self::PartiallyFilled => "PARTIALLY_FILLED",
+            Self::Filled => "FILLED",
+            Self::Cancelled => "CANCELLED",
+            Self::Rejected => "REJECTED",
+            Self::Expired => "EXPIRED",
+        }
+    }
+
     /// Whether the order has resolved and can no longer change state.
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
@@ -240,6 +258,23 @@ mod tests {
             serde_json::from_str::<OrderType>(r#""stop_limit""#).unwrap(),
             OrderType::StopLimit
         );
+    }
+
+    #[test]
+    fn order_status_as_str_matches_serde() {
+        for status in [
+            OrderStatus::Pending,
+            OrderStatus::PendingCancel,
+            OrderStatus::Open,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::Filled,
+            OrderStatus::Cancelled,
+            OrderStatus::Rejected,
+            OrderStatus::Expired,
+        ] {
+            let serialized = serde_json::to_string(&status).unwrap();
+            assert_eq!(format!("\"{}\"", status.as_str()), serialized);
+        }
     }
 
     #[test]

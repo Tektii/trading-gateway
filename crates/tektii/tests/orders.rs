@@ -421,6 +421,66 @@ async fn get_orders_with_filters() {
     assert_eq!(orders[1].id, "order-2");
 }
 
+/// Query values the adapter actually put on the wire for `key`, percent-decoded
+/// — i.e. what the engine's extractor sees.
+async fn query_values(server: &wiremock::MockServer, key: &str) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .expect("request log enabled")
+        .first()
+        .expect("a request was sent")
+        .url
+        .query_pairs()
+        .filter(|(k, _)| k == key)
+        .map(|(_, v)| v.into_owned())
+        .collect()
+}
+
+/// Every requested status must reach the engine, spelled the way the enum
+/// serialises. Sending only the first would silently drop results, and a
+/// `Debug`-derived spelling mangles the compound variants.
+#[tokio::test]
+async fn get_orders_sends_every_status_in_serde_form() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(&server, "GET", "/api/v1/orders", 200, json!({"orders": []})).await;
+
+    let params = OrderQueryParams {
+        status: Some(vec![
+            OrderStatus::Open,
+            OrderStatus::PartiallyFilled,
+            OrderStatus::PendingCancel,
+        ]),
+        ..Default::default()
+    };
+    adapter.get_orders(&params).await.unwrap();
+
+    assert_eq!(
+        query_values(&server, "status").await,
+        vec!["OPEN,PARTIALLY_FILLED,PENDING_CANCEL"]
+    );
+}
+
+/// An empty list is no filter at all — sending a bare `status=` would just make
+/// the engine reject the request.
+#[tokio::test]
+async fn get_orders_omits_an_empty_status_filter() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(&server, "GET", "/api/v1/orders", 200, json!({"orders": []})).await;
+
+    let params = OrderQueryParams {
+        status: Some(vec![]),
+        ..Default::default()
+    };
+    adapter.get_orders(&params).await.unwrap();
+
+    assert!(query_values(&server, "status").await.is_empty());
+}
+
 #[tokio::test]
 async fn get_orders_empty() {
     let (server, base_url) = start_mock_server().await;

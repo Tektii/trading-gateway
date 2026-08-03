@@ -367,12 +367,16 @@ impl TradingAdapter for TektiiAdapter {
         if let Some(symbol) = &params.symbol {
             request = request.query(&[("symbol", symbol)]);
         }
-        // Engine takes a single status, gateway takes Vec<OrderStatus>.
-        // Send the first element if present.
+        // The engine takes the same status vocabulary as the gateway, comma-separated.
         if let Some(statuses) = &params.status
-            && let Some(first_status) = statuses.first()
+            && !statuses.is_empty()
         {
-            request = request.query(&[("status", format!("{first_status:?}").to_lowercase())]);
+            let statuses = statuses
+                .iter()
+                .map(OrderStatus::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            request = request.query(&[("status", statuses)]);
         }
 
         let start = Instant::now();
