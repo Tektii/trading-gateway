@@ -233,6 +233,20 @@ async fn register_pending_exits(state: &GatewayState, request: &OrderRequest, or
     }
 }
 
+/// Fill in the entry order an exit leg protects, leaving an already-resolved
+/// link alone.
+///
+/// Adapters for brokers with native brackets resolve the link during
+/// translation, since only they see the broker payload that carries it. The
+/// gateway's own `ExitHandler` is the fallback, covering the legs it
+/// synthesized. This mirrors the precedence the broadcast path applies, so a
+/// REST read and an order event agree on the same value.
+fn resolve_parent_order_id(state: &GatewayState, order: &mut Order) {
+    if order.parent_order_id.is_none() {
+        order.parent_order_id = state.parent_order_id_for(&order.id);
+    }
+}
+
 /// Get order by ID.
 #[utoipa::path(
     get,
@@ -258,7 +272,7 @@ pub async fn get_order(
     let adapter = state.adapter();
     let mut order = adapter.get_order(&order_id).await?;
     order.correlation_id = state.correlation_store().get(&order.id);
-    order.parent_order_id = state.parent_order_id_for(&order.id);
+    resolve_parent_order_id(&state, &mut order);
     Ok(Json(order))
 }
 
@@ -287,7 +301,7 @@ pub async fn get_orders(
     let store = state.correlation_store();
     for order in &mut orders {
         order.correlation_id = store.get(&order.id);
-        order.parent_order_id = state.parent_order_id_for(&order.id);
+        resolve_parent_order_id(&state, order);
     }
     Ok(Json(orders))
 }
@@ -317,7 +331,7 @@ pub async fn get_order_history(
     let store = state.correlation_store();
     for order in &mut orders {
         order.correlation_id = store.get(&order.id);
-        order.parent_order_id = state.parent_order_id_for(&order.id);
+        resolve_parent_order_id(&state, order);
     }
     Ok(Json(orders))
 }

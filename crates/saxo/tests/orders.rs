@@ -407,3 +407,189 @@ async fn cancel_order_success() {
 }
 
 use tektii_gateway_core::models::OrderRequest;
+
+// --- Native bracket links -------------------------------------------------
+//
+// Saxo reports its bracket legs as `RelatedOpenOrders` on the entry order, each
+// carrying the leg's own `OrderId`. The legs are also listed as orders in their
+// own right, but with nothing pointing back at the entry.
+
+/// A Saxo entry order whose SL/TP legs are already working at the broker.
+fn saxo_entry_with_legs_json() -> serde_json::Value {
+    saxo_order_json(&json!({
+        "OrderId": "ENTRY-1",
+        "Status": "Filled",
+        "FilledAmount": 100_000.0,
+        "RelatedOpenOrders": [
+            {"OrderId": "SL-1", "OrderType": "StopIfTraded", "Price": 1.05, "Status": "Working"},
+            {"OrderId": "TP-1", "OrderType": "Limit", "Price": 1.15, "Status": "Working"},
+        ]
+    }))
+}
+
+fn saxo_leg_json(order_id: &str, order_type: &str, price: f64) -> serde_json::Value {
+    saxo_order_json(&json!({
+        "OrderId": order_id,
+        "OrderType": order_type,
+        "BuySell": "Sell",
+        "Price": price
+    }))
+}
+
+#[tokio::test]
+async fn get_orders_reports_parent_on_native_bracket_legs() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&server, &base_url).await;
+
+    mount_json(
+        &server,
+        "GET",
+        "/port/v1/orders/me",
+        200,
+        json!({"Data": [
+            saxo_entry_with_legs_json(),
+            saxo_leg_json("SL-1", "Stop", 1.05),
+            saxo_leg_json("TP-1", "Limit", 1.15),
+        ]}),
+    )
+    .await;
+
+    let orders = adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    for leg_id in ["SL-1", "TP-1"] {
+        let leg = orders.iter().find(|o| o.id == leg_id).unwrap();
+        assert_eq!(
+            leg.parent_order_id.as_deref(),
+            Some("ENTRY-1"),
+            "leg {leg_id} should point at the entry order"
+        );
+    }
+
+    let entry = orders.iter().find(|o| o.id == "ENTRY-1").unwrap();
+    assert_eq!(entry.parent_order_id, None, "the entry order has no parent");
+}
+
+#[tokio::test]
+async fn get_orders_links_legs_listed_before_their_entry() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&server, &base_url).await;
+
+    // Saxo does not guarantee an order; a leg ahead of its entry must still link.
+    mount_json(
+        &server,
+        "GET",
+        "/port/v1/orders/me",
+        200,
+        json!({"Data": [
+            saxo_leg_json("SL-1", "Stop", 1.05),
+            saxo_entry_with_legs_json(),
+        ]}),
+    )
+    .await;
+
+    let orders = adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    let leg = orders.iter().find(|o| o.id == "SL-1").unwrap();
+    assert_eq!(leg.parent_order_id.as_deref(), Some("ENTRY-1"));
+}
+
+#[tokio::test]
+async fn get_order_reports_parent_on_a_native_bracket_leg() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&server, &base_url).await;
+
+    mount_json(
+        &server,
+        "GET",
+        "/port/v1/orders/me",
+        200,
+        json!({"Data": [saxo_entry_with_legs_json(), saxo_leg_json("SL-1", "Stop", 1.05)]}),
+    )
+    .await;
+
+    let leg = adapter.get_order("SL-1").await.unwrap();
+    assert_eq!(leg.parent_order_id.as_deref(), Some("ENTRY-1"));
+}
+
+#[tokio::test]
+async fn get_orders_leaves_parent_unset_without_related_open_orders() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&server, &base_url).await;
+
+    mount_json(
+        &server,
+        "GET",
+        "/port/v1/orders/me",
+        200,
+        json!({"Data": [saxo_order_json(&json!({"OrderId": "ORD-9"}))]}),
+    )
+    .await;
+
+    let orders = adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    assert_eq!(orders.len(), 1);
+    assert_eq!(
+        orders[0].parent_order_id, None,
+        "a plain order must not gain a parent"
+    );
+}
+
+#[tokio::test]
+async fn a_filled_leg_still_reports_its_parent_on_the_fill() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&server, &base_url).await;
+
+    let mut filled_leg = saxo_leg_json("SL-1", "Stop", 1.05);
+    filled_leg["Status"] = json!("Filled");
+    filled_leg["FilledAmount"] = json!(100_000.0);
+
+    mount_json(
+        &server,
+        "GET",
+        "/port/v1/orders/me",
+        200,
+        json!({"Data": [saxo_entry_with_legs_json(), filled_leg]}),
+    )
+    .await;
+
+    let leg = adapter.get_order("SL-1").await.unwrap();
+
+    assert_eq!(leg.status, OrderStatus::Filled);
+    assert_eq!(
+        leg.parent_order_id.as_deref(),
+        Some("ENTRY-1"),
+        "the response reporting the fill still carries the link"
+    );
+}
+
+#[tokio::test]
+async fn get_order_history_reports_parent_on_native_bracket_legs() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&server, &base_url).await;
+
+    mount_json(
+        &server,
+        "GET",
+        "/port/v1/orders/me",
+        200,
+        json!({"Data": [saxo_entry_with_legs_json(), saxo_leg_json("SL-1", "Stop", 1.05)]}),
+    )
+    .await;
+
+    let orders = adapter
+        .get_order_history(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    let leg = orders.iter().find(|o| o.id == "SL-1").unwrap();
+    assert_eq!(leg.parent_order_id.as_deref(), Some("ENTRY-1"));
+}

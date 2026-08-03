@@ -37,11 +37,12 @@ use crate::capabilities::{AlpacaCapabilities, is_crypto_symbol};
 use crate::credentials::AlpacaCredentials;
 
 // Import trading models
-use tektii_gateway_core::adapter::{ProviderCapabilities, TradingAdapter};
+use tektii_gateway_core::adapter::{BracketLinks, ProviderCapabilities, TradingAdapter};
 use tektii_gateway_core::models::{
     Account, Bar, BarParams, CancelAllResult, CancelOrderResult, Capabilities,
     ClosePositionRequest, ConnectionStatus, ModifyOrderRequest, ModifyOrderResult, Order,
-    OrderHandle, OrderQueryParams, Position, Quote, Trade, TradeQueryParams, TradingPlatform,
+    OrderHandle, OrderQueryParams, OrderStatus, Position, Quote, Trade, TradeQueryParams,
+    TradingPlatform,
 };
 
 const ALPACA_DATA_URL: &str = "https://data.alpaca.markets";
@@ -75,6 +76,9 @@ pub struct AlpacaAdapter {
 
     /// Data feed for market data requests (`"iex"` free tier, `"sip"` paid).
     feed: String,
+
+    /// Entry↔leg links read off Alpaca's native bracket `legs` arrays.
+    bracket_links: BracketLinks,
 }
 
 impl AlpacaAdapter {
@@ -158,6 +162,7 @@ impl AlpacaAdapter {
             platform,
             circuit_breaker,
             feed,
+            bracket_links: BracketLinks::new(),
         })
     }
 
@@ -450,9 +455,32 @@ impl AlpacaAdapter {
         }
     }
 
-    fn translate_alpaca_order(alpaca_order: AlpacaOrder) -> Result<Order, GatewayError> {
+    /// Note the entry each of `alpaca_order`'s bracket legs belongs to.
+    ///
+    /// No-op for the ordinary case of an order without legs.
+    fn record_bracket_legs(&self, alpaca_order: &AlpacaOrder) {
+        let Some(legs) = alpaca_order.legs.as_ref() else {
+            return;
+        };
+        for leg in legs {
+            self.bracket_links.record(leg.id.clone(), &alpaca_order.id);
+        }
+    }
+
+    /// Translate one Alpaca order, resolving its native bracket link.
+    ///
+    /// Alpaca reports a bracket only on the entry, as a `legs` array. This
+    /// records those links on the way past so a leg fetched or streamed on its
+    /// own — where Alpaca says nothing about the entry — still reports one.
+    /// The legs themselves are returned separately by
+    /// [`Self::translate_alpaca_orders`]; this call yields only `alpaca_order`.
+    fn translate_alpaca_order(&self, alpaca_order: AlpacaOrder) -> Result<Order, GatewayError> {
         use rust_decimal::Decimal;
         use std::str::FromStr;
+
+        self.record_bracket_legs(&alpaca_order);
+
+        let parent_order_id = self.bracket_links.parent_of(&alpaca_order.id);
 
         let qty = Decimal::from_str(&alpaca_order.qty).unwrap_or_default();
         let filled_qty = Decimal::from_str(&alpaca_order.filled_qty).unwrap_or_default();
@@ -470,6 +498,14 @@ impl AlpacaAdapter {
             .stop_price
             .as_ref()
             .and_then(|s| Decimal::from_str(s).ok());
+
+        let status = Self::translate_order_status(&alpaca_order.status)?;
+
+        // Resolved above, released here: this response still reports the link,
+        // and a resolved leg cannot acquire a new one.
+        if status.is_terminal() {
+            self.bracket_links.release(&alpaca_order.id);
+        }
 
         Ok(Order {
             id: alpaca_order.id,
@@ -493,7 +529,7 @@ impl AlpacaAdapter {
             trailing_type: None,
             reject_reason: None,
             position_id: None,
-            parent_order_id: None,
+            parent_order_id,
             reduce_only: None,
             post_only: None,
             hidden: None,
@@ -503,6 +539,38 @@ impl AlpacaAdapter {
             created_at,
             updated_at,
         })
+    }
+
+    /// Translate a list response, flattening any nested bracket legs.
+    ///
+    /// The list endpoints ask Alpaca for `nested=true` so entries arrive with
+    /// their `legs` attached — that is the only form in which the bracket link
+    /// appears. Nesting is a transport detail of Alpaca's, though: the gateway
+    /// models every leg as an order in its own right, so they are flattened back
+    /// out alongside their entry, now each carrying `parent_order_id`.
+    ///
+    /// Orders that fail to translate are logged and skipped rather than failing
+    /// the whole listing.
+    fn translate_alpaca_orders(&self, alpaca_orders: Vec<AlpacaOrder>) -> Vec<Order> {
+        let mut orders = Vec::with_capacity(alpaca_orders.len());
+
+        for mut alpaca_order in alpaca_orders {
+            // Recorded before the legs are detached, while the link is visible.
+            self.record_bracket_legs(&alpaca_order);
+            let legs = alpaca_order.legs.take().unwrap_or_default();
+
+            for alpaca_order in std::iter::once(alpaca_order).chain(legs) {
+                let order_id = alpaca_order.id.clone();
+                match self.translate_alpaca_order(alpaca_order) {
+                    Ok(order) => orders.push(order),
+                    Err(e) => {
+                        warn!(error = ?e, order_id, "Failed to translate order, skipping");
+                    }
+                }
+            }
+        }
+
+        orders
     }
 
     fn map_http_error(
@@ -636,6 +704,14 @@ impl TradingAdapter for AlpacaAdapter {
 
     fn provider_name(&self) -> &'static str {
         "alpaca"
+    }
+
+    fn parent_order_id_for(&self, order_id: &str, status: OrderStatus) -> Option<String> {
+        let parent = self.bracket_links.parent_of(order_id);
+        if status.is_terminal() {
+            self.bracket_links.release(order_id);
+        }
+        parent
     }
 
     #[instrument(skip(self), name = "alpaca_get_account")]
@@ -807,7 +883,7 @@ impl TradingAdapter for AlpacaAdapter {
 
         let alpaca_order = result?;
 
-        let mut order = Self::translate_alpaca_order(alpaca_order)?;
+        let mut order = self.translate_alpaca_order(alpaca_order)?;
 
         // Enrich with oco_group_id from StateManager
         order.oco_group_id = self.state_manager.get_oco_group_id(&order.id);
@@ -1287,7 +1363,7 @@ impl AlpacaAdapter {
             .await
             .map_err(|e| GatewayError::internal(format!("Failed to parse response: {e}")))?;
 
-        Self::translate_alpaca_order(alpaca_order)
+        self.translate_alpaca_order(alpaca_order)
             .map_err(|e| GatewayError::internal(format!("Failed to translate order: {e}")))
     }
 
@@ -1353,9 +1429,11 @@ impl AlpacaAdapter {
         let translation_start = Instant::now();
         let mut url = String::with_capacity(self.base_url.len() + 128);
         url.push_str(&self.base_url);
-        url.push_str("/v2/orders");
-
-        let mut first_param = true;
+        // `nested=true` rolls bracket legs up under their entry, which is the
+        // only form in which Alpaca reports the entry↔leg link. The legs are
+        // flattened back out after translation, so the listing is unchanged
+        // apart from now carrying `parent_order_id`.
+        url.push_str("/v2/orders?nested=true");
 
         if let Some(statuses) = &params.status {
             let alpaca_status = if statuses.iter().any(|s| {
@@ -1370,30 +1448,21 @@ impl AlpacaAdapter {
             } else {
                 "closed"
             };
-            url.push(if first_param { '?' } else { '&' });
-            url.push_str("status=");
+            url.push_str("&status=");
             url.push_str(alpaca_status);
-            first_param = false;
         }
         if let Some(symbol) = &params.symbol {
-            url.push(if first_param { '?' } else { '&' });
-            url.push_str("symbols=");
+            url.push_str("&symbols=");
             url.push_str(symbol);
-            first_param = false;
         }
         if let Some(limit) = params.limit {
-            url.push(if first_param { '?' } else { '&' });
-            url.push_str(&format!("limit={limit}"));
-            first_param = false;
+            url.push_str(&format!("&limit={limit}"));
         }
         if let Some(since) = &params.since {
-            url.push(if first_param { '?' } else { '&' });
-            url.push_str(&format!("after={}", since.to_rfc3339()));
-            first_param = false;
+            url.push_str(&format!("&after={}", since.to_rfc3339()));
         }
         if let Some(until) = &params.until {
-            url.push(if first_param { '?' } else { '&' });
-            url.push_str(&format!("until={}", until.to_rfc3339()));
+            url.push_str(&format!("&until={}", until.to_rfc3339()));
         }
 
         let translation_time = translation_start.elapsed();
@@ -1442,17 +1511,7 @@ impl AlpacaAdapter {
             .await
             .map_err(|e| GatewayError::internal(format!("Failed to parse response: {e}")))?;
 
-        let mut orders = Vec::with_capacity(alpaca_orders.len());
-        for alpaca_order in alpaca_orders {
-            match Self::translate_alpaca_order(alpaca_order) {
-                Ok(order) => orders.push(order),
-                Err(e) => {
-                    warn!(error = ?e, "Failed to translate order, skipping");
-                }
-            }
-        }
-
-        Ok(orders)
+        Ok(self.translate_alpaca_orders(alpaca_orders))
     }
 
     async fn cancel_order_internal(&self, order_id: &str) -> GatewayResult<()> {
@@ -1572,7 +1631,8 @@ impl AlpacaAdapter {
             .await
             .map_err(|e| GatewayError::internal(format!("Failed to parse response: {e}")))?;
 
-        let order = Self::translate_alpaca_order(alpaca_order)
+        let order = self
+            .translate_alpaca_order(alpaca_order)
             .map_err(|e| GatewayError::internal(format!("Failed to translate order: {e}")))?;
 
         Ok(ModifyOrderResult {
@@ -1933,7 +1993,7 @@ impl AlpacaAdapter {
         let translation_start = Instant::now();
         let mut url = String::with_capacity(self.base_url.len() + 128);
         url.push_str(&self.base_url);
-        url.push_str("/v2/orders?status=all");
+        url.push_str("/v2/orders?status=all&nested=true");
 
         if let Some(symbol) = &params.symbol {
             url.push_str(&format!("&symbols={symbol}"));
@@ -1997,17 +2057,7 @@ impl AlpacaAdapter {
             .await
             .map_err(|e| GatewayError::internal(format!("Failed to parse orders: {e}")))?;
 
-        let mut orders = Vec::with_capacity(alpaca_orders.len());
-        for alpaca_order in alpaca_orders {
-            match Self::translate_alpaca_order(alpaca_order) {
-                Ok(order) => orders.push(order),
-                Err(e) => {
-                    warn!(error = ?e, "Failed to translate order in history, skipping");
-                }
-            }
-        }
-
-        Ok(orders)
+        Ok(self.translate_alpaca_orders(alpaca_orders))
     }
 
     #[instrument(skip(self), fields(symbol = ?symbol), name = "alpaca_cancel_all_orders")]

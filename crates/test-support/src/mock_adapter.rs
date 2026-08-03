@@ -42,6 +42,8 @@ pub struct MockTradingAdapter {
     close_position_responses: Mutex<HashMap<String, GatewayResult<OrderHandle>>>,
     modified_orders: Mutex<Vec<(String, ModifyOrderRequest)>>,
     modify_order_responses: Mutex<HashMap<String, GatewayResult<ModifyOrderResult>>>,
+    /// Native bracket links, keyed by exit leg id.
+    bracket_links: Mutex<HashMap<String, String>>,
 }
 
 impl MockTradingAdapter {
@@ -66,7 +68,33 @@ impl MockTradingAdapter {
             close_position_responses: Mutex::new(HashMap::new()),
             modified_orders: Mutex::new(Vec::new()),
             modify_order_responses: Mutex::new(HashMap::new()),
+            bracket_links: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Record a broker-native bracket link, as an adapter does when it reads one
+    /// off a provider payload.
+    ///
+    /// Orders served by `get_order()` / `get_orders()` report `parent_order_id`
+    /// from these links, and so does [`TradingAdapter::parent_order_id_for`].
+    #[must_use]
+    pub fn with_bracket_link(self, exit_order_id: &str, parent_order_id: &str) -> Self {
+        self.bracket_links
+            .lock()
+            .expect("lock")
+            .insert(exit_order_id.to_string(), parent_order_id.to_string());
+        self
+    }
+
+    /// Stamp the recorded bracket link onto an order being served.
+    fn with_link_applied(&self, mut order: Order) -> Order {
+        order.parent_order_id = self
+            .bracket_links
+            .lock()
+            .expect("lock")
+            .get(&order.id)
+            .cloned();
+        order
     }
 
     /// Add an order that `get_order()` and `get_orders()` will return.
@@ -274,15 +302,27 @@ impl TradingAdapter for MockTradingAdapter {
         Ok(test_order_handle())
     }
 
+    fn parent_order_id_for(&self, order_id: &str, status: OrderStatus) -> Option<String> {
+        let mut links = self.bracket_links.lock().expect("lock");
+        let parent = links.get(order_id).cloned();
+        if status.is_terminal() {
+            links.remove(order_id);
+        }
+        parent
+    }
+
     async fn get_order(&self, order_id: &str) -> GatewayResult<Order> {
-        self.orders
+        let order = self
+            .orders
             .lock()
             .expect("lock")
             .get(order_id)
             .cloned()
             .ok_or_else(|| GatewayError::OrderNotFound {
                 id: order_id.to_string(),
-            })
+            })?;
+
+        Ok(self.with_link_applied(order))
     }
 
     async fn get_orders(&self, params: &OrderQueryParams) -> GatewayResult<Vec<Order>> {
@@ -290,8 +330,14 @@ impl TradingAdapter for MockTradingAdapter {
             return Err(err);
         }
 
-        let orders = self.orders.lock().expect("lock");
-        let mut result: Vec<Order> = orders.values().cloned().collect();
+        let mut result: Vec<Order> = {
+            let orders = self.orders.lock().expect("lock");
+            orders.values().cloned().collect()
+        };
+        result = result
+            .into_iter()
+            .map(|order| self.with_link_applied(order))
+            .collect();
 
         if let Some(ref statuses) = params.status {
             result.retain(|o| statuses.contains(&o.status));

@@ -493,10 +493,12 @@ pub struct Order {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position_id: Option<String>,
 
-    /// Entry order this order exits, for gateway-synthesized SL/TP legs.
+    /// Entry order this order exits, for SL/TP legs.
     ///
-    /// Only populated while the exit leg is tracked by the gateway's exit
-    /// handler; brokers that manage brackets natively do not report the link.
+    /// Set for legs the gateway synthesized itself, and for the native brackets
+    /// of brokers that report the link (Alpaca, Saxo). Only populated while the
+    /// leg is live: once it fills or cancels the link is released, so read it
+    /// from the event reporting that state rather than by querying afterwards.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_order_id: Option<String>,
 
