@@ -110,6 +110,17 @@ pub enum OrderStatus {
     Expired,
 }
 
+impl OrderStatus {
+    /// Whether the order has resolved and can no longer change state.
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Filled | Self::Cancelled | Self::Rejected | Self::Expired
+        )
+    }
+}
+
 /// Trailing stop type (how trailing distance is interpreted)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

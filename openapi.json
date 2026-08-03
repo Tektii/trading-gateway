@@ -2169,7 +2169,7 @@
               "string",
               "null"
             ],
-            "description": "Entry order this order exits, for gateway-synthesized SL/TP legs.\n\nOnly populated while the exit leg is tracked by the gateway's exit\nhandler; brokers that manage brackets natively do not report the link."
+            "description": "Entry order this order exits, for SL/TP legs.\n\nSet for legs the gateway synthesized itself, and for the native brackets\nof brokers that report the link (Alpaca, Saxo). Only populated while the\nleg is live: once it fills or cancels the link is released, so read it\nfrom the event reporting that state rather than by querying afterwards."
           },
           "position_id": {
             "type": [

@@ -1,8 +1,10 @@
 //! Core trading adapter traits and registry.
 
+pub mod bracket_links;
 pub mod capabilities;
 pub mod registry;
 
+pub use bracket_links::BracketLinks;
 pub use capabilities::{BracketStrategy, ProviderCapabilities};
 pub use registry::AdapterRegistry;
 
@@ -16,8 +18,8 @@ use crate::error::{GatewayError, GatewayResult};
 use crate::models::{
     Account, Bar, BarParams, CancelAllResult, CancelOrderResult, Capabilities,
     ClosePositionRequest, ConnectionStatus, ModifyOrderRequest, ModifyOrderResult, Order,
-    OrderHandle, OrderQueryParams, OrderRequest, PlaceOcoOrderRequest, PlaceOcoOrderResponse,
-    Position, Quote, Trade, TradeQueryParams, TradingPlatform,
+    OrderHandle, OrderQueryParams, OrderRequest, OrderStatus, PlaceOcoOrderRequest,
+    PlaceOcoOrderResponse, Position, Quote, Trade, TradeQueryParams, TradingPlatform,
 };
 use crate::websocket::provider::ProviderEvent;
 
@@ -51,6 +53,25 @@ pub trait TradingAdapter: Send + Sync {
     fn provider_event_sender(
         &self,
     ) -> Option<Arc<RwLock<Option<mpsc::UnboundedSender<ProviderEvent>>>>> {
+        None
+    }
+
+    /// Entry order that `order_id` exits, for brokers that manage brackets
+    /// themselves and report the link in their own payloads.
+    ///
+    /// Neither Alpaca nor Saxo puts a parent reference on the leg — the link
+    /// only ever appears on the entry, pointing down at its legs. An adapter
+    /// that supports native brackets therefore records the link when it sees an
+    /// entry and answers from that record here; one that does not returns
+    /// `None` and the gateway falls back to the exits it synthesized itself.
+    ///
+    /// `status` is the leg's state in the event being reported. An adapter
+    /// releases the link once that state is terminal — after returning it, so
+    /// the event reporting the resolution still carries it. Events are the
+    /// gateway's primary channel, so this is where a resolved leg's link is
+    /// actually reclaimed; REST reads release on the same rule when they happen
+    /// to be the observer.
+    fn parent_order_id_for(&self, _order_id: &str, _status: OrderStatus) -> Option<String> {
         None
     }
 

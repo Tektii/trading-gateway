@@ -1071,13 +1071,14 @@ impl ProviderRegistry {
 
     /// Route an event through the `EventRouter` for state management.
     ///
-    /// Returns the entry order id for order events on a tracked exit leg, so the
-    /// broadcast can expose the link the exit handler resolved.
+    /// Returns the entry order id for order events on an exit leg, so the
+    /// broadcast can expose the link — whether the exit handler synthesized the
+    /// leg or the adapter read the link off a native bracket.
     async fn route_event_through_router(
         event: &WsMessage,
         platform: TradingPlatform,
         event_routers: &Arc<RwLock<HashMap<TradingPlatform, Arc<EventRouter>>>>,
-        _trading_adapters: &Arc<RwLock<HashMap<TradingPlatform, Arc<dyn TradingAdapter>>>>,
+        trading_adapters: &Arc<RwLock<HashMap<TradingPlatform, Arc<dyn TradingAdapter>>>>,
     ) -> Option<String> {
         let router = {
             let routers = event_routers.read().await;
@@ -1103,7 +1104,21 @@ impl ProviderRegistry {
                 // Resolved before routing: a terminal event on an exit leg drops
                 // its entry from tracking, and that fill is exactly when a
                 // strategy needs to know which entry the leg closed.
-                let tracked_parent = router.parent_order_id_for(&order.id);
+                let mut tracked_parent = router.parent_order_id_for(&order.id);
+
+                if tracked_parent.is_none() {
+                    // Native brackets: the broker reports the link on the entry
+                    // only, so the adapter is the one component that saw it.
+                    // Passing the status lets the adapter reclaim the link once
+                    // the leg resolves — events, not REST reads, are where a
+                    // leg is normally seen reaching a terminal state.
+                    let adapter = {
+                        let adapters = trading_adapters.read().await;
+                        adapters.get(&platform).cloned()
+                    };
+                    tracked_parent = adapter
+                        .and_then(|adapter| adapter.parent_order_id_for(&order.id, order.status));
+                }
 
                 router
                     .handle_order_event(*event_type, order, parent_order_id.as_deref())

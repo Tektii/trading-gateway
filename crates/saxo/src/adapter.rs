@@ -33,11 +33,12 @@ use tektii_gateway_core::websocket::messages::WsMessage;
 use crate::capabilities::SaxoCapabilities;
 use crate::credentials::SaxoCredentials;
 
-use tektii_gateway_core::adapter::{ProviderCapabilities, TradingAdapter};
+use tektii_gateway_core::adapter::{BracketLinks, ProviderCapabilities, TradingAdapter};
 use tektii_gateway_core::models::{
     Account, Bar, BarParams, CancelOrderResult, Capabilities, ClosePositionRequest,
     ConnectionStatus, ModifyOrderRequest, ModifyOrderResult, Order, OrderHandle, OrderQueryParams,
-    Position, PositionSide, Quote, Side, Timeframe, Trade, TradeQueryParams, TradingPlatform,
+    OrderStatus, Position, PositionSide, Quote, Side, Timeframe, Trade, TradeQueryParams,
+    TradingPlatform,
 };
 
 /// Maximum length for Saxo `ExternalReference` field.
@@ -70,6 +71,8 @@ pub struct SaxoAdapter {
     circuit_breaker: Arc<RwLock<AdapterCircuitBreaker>>,
     /// Whether to run pre-trade margin precheck before placing orders.
     precheck_enabled: bool,
+    /// Entry↔leg links read off Saxo's `RelatedOpenOrders`.
+    bracket_links: BracketLinks,
 }
 
 impl SaxoAdapter {
@@ -147,6 +150,7 @@ impl SaxoAdapter {
             platform,
             circuit_breaker,
             precheck_enabled,
+            bracket_links: BracketLinks::new(),
         })
     }
 
@@ -356,6 +360,15 @@ impl SaxoAdapter {
 
         let (stop_loss, take_profit) = Self::extract_sl_tp_from_related(saxo_order);
 
+        self.record_bracket_legs(saxo_order);
+        let parent_order_id = self.bracket_links.parent_of(&saxo_order.order_id);
+
+        // Resolved above, released here: this response still reports the link,
+        // and a resolved leg cannot acquire a new one.
+        if status.is_terminal() {
+            self.bracket_links.release(&saxo_order.order_id);
+        }
+
         let trailing_distance = saxo_order
             .trailing_stop_distance_to_market
             .and_then(rust_decimal::prelude::FromPrimitive::from_f64);
@@ -384,7 +397,7 @@ impl SaxoAdapter {
             trailing_type: None,
             reject_reason: None,
             position_id: None,
-            parent_order_id: None,
+            parent_order_id,
             reduce_only: None,
             post_only: None,
             hidden: None,
@@ -394,6 +407,35 @@ impl SaxoAdapter {
             created_at: now,
             updated_at: now,
         })
+    }
+
+    /// Note the entry each of `order`'s bracket legs belongs to.
+    ///
+    /// `RelatedOpenOrders` is Saxo's report of the legs working against a filled
+    /// entry, and the only place it names them. A leg fetched on its own says
+    /// nothing about the entry, so the link has to be kept from here.
+    ///
+    /// `RelatedOrders` — the pre-fill form — is deliberately not used: it
+    /// carries prices but no order ids, because the legs do not exist yet.
+    /// Record every bracket link in a batch before any of it is translated.
+    ///
+    /// Saxo returns one flat list holding entries and legs in no guaranteed
+    /// order, so a leg can be translated before the entry that names it. This
+    /// pre-pass means a leg resolves its parent regardless of where it sits.
+    fn record_bracket_legs_in(&self, orders: &[SaxoOrder]) {
+        for order in orders {
+            self.record_bracket_legs(order);
+        }
+    }
+
+    fn record_bracket_legs(&self, order: &SaxoOrder) {
+        let Some(related_open) = order.related_open_orders.as_ref() else {
+            return;
+        };
+        for rel in related_open {
+            self.bracket_links
+                .record(rel.order_id.clone(), &order.order_id);
+        }
     }
 
     fn extract_sl_tp_from_related(order: &SaxoOrder) -> (Option<Decimal>, Option<Decimal>) {
@@ -757,6 +799,14 @@ impl TradingAdapter for SaxoAdapter {
         "saxo"
     }
 
+    fn parent_order_id_for(&self, order_id: &str, status: OrderStatus) -> Option<String> {
+        let parent = self.bracket_links.parent_of(order_id);
+        if status.is_terminal() {
+            self.bracket_links.release(order_id);
+        }
+        parent
+    }
+
     #[instrument(skip(self), name = "saxo_get_account")]
     async fn get_account(&self) -> GatewayResult<Account> {
         self.check_circuit_breaker().await?;
@@ -846,6 +896,8 @@ impl TradingAdapter for SaxoAdapter {
 
         let resp = result.map_err(GatewayError::from)?;
 
+        self.record_bracket_legs_in(&resp.data);
+
         resp.data
             .iter()
             .find(|o| o.order_id == order_id)
@@ -869,6 +921,8 @@ impl TradingAdapter for SaxoAdapter {
         }
 
         let resp = result.map_err(GatewayError::from)?;
+
+        self.record_bracket_legs_in(&resp.data);
 
         let mut orders: Vec<Order> = resp
             .data

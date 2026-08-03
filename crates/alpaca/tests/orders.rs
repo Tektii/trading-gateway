@@ -482,3 +482,276 @@ async fn cancel_all_orders_with_symbol() {
     let result = adapter.cancel_all_orders(Some("AAPL")).await.unwrap();
     assert_eq!(result.cancelled_count, 1);
 }
+
+// --- Native bracket links -------------------------------------------------
+//
+// Alpaca manages brackets itself and reports the entry↔leg link as a `legs`
+// array on the entry order. Nothing else in the payload points a leg back at
+// its entry, so the adapter has to remember the link when it sees the entry.
+
+const BRACKET_ENTRY_ID: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+const BRACKET_SL_ID: &str = "aaaaaaaa-0000-0000-0000-000000000002";
+const BRACKET_TP_ID: &str = "aaaaaaaa-0000-0000-0000-000000000003";
+
+/// An Alpaca entry order carrying its two native bracket legs.
+fn bracket_entry_json() -> serde_json::Value {
+    alpaca_order_json(&json!({
+        "id": BRACKET_ENTRY_ID,
+        "status": "filled",
+        "filled_qty": "10",
+        "legs": [
+            alpaca_order_json(&json!({
+                "id": BRACKET_SL_ID,
+                "type": "stop",
+                "side": "sell",
+                "stop_price": "140.00"
+            })),
+            alpaca_order_json(&json!({
+                "id": BRACKET_TP_ID,
+                "type": "limit",
+                "side": "sell",
+                "limit_price": "160.00"
+            })),
+        ]
+    }))
+}
+
+#[tokio::test]
+async fn get_orders_reports_parent_on_native_bracket_legs() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/v2/orders",
+        200,
+        json!([bracket_entry_json()]),
+    )
+    .await;
+
+    let orders = adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    // The legs stay visible as orders in their own right — nesting them under
+    // the entry is a transport detail of the broker, not the gateway's model.
+    let mut ids: Vec<&str> = orders.iter().map(|o| o.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec![BRACKET_ENTRY_ID, BRACKET_SL_ID, BRACKET_TP_ID],
+        "entry and both legs should all be listed"
+    );
+
+    for leg_id in [BRACKET_SL_ID, BRACKET_TP_ID] {
+        let leg = orders.iter().find(|o| o.id == leg_id).unwrap();
+        assert_eq!(
+            leg.parent_order_id.as_deref(),
+            Some(BRACKET_ENTRY_ID),
+            "leg {leg_id} should point at the entry order"
+        );
+    }
+
+    let entry = orders.iter().find(|o| o.id == BRACKET_ENTRY_ID).unwrap();
+    assert_eq!(entry.parent_order_id, None, "the entry order has no parent");
+}
+
+#[tokio::test]
+async fn get_orders_leaves_parent_unset_for_orders_without_legs() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/v2/orders",
+        200,
+        json!([alpaca_order_json(&json!({"id": BRACKET_ENTRY_ID}))]),
+    )
+    .await;
+
+    let orders = adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    assert_eq!(orders.len(), 1);
+    assert_eq!(
+        orders[0].parent_order_id, None,
+        "a plain order must not gain a parent"
+    );
+}
+
+#[tokio::test]
+async fn submitting_a_bracket_records_the_leg_parents_for_later_lookups() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(&server, "POST", "/v2/orders", 200, bracket_entry_json()).await;
+    mount_json(
+        &server,
+        "GET",
+        &format!("/v2/orders/{BRACKET_SL_ID}"),
+        200,
+        alpaca_order_json(&json!({"id": BRACKET_SL_ID, "type": "stop", "side": "sell"})),
+    )
+    .await;
+
+    adapter
+        .submit_order(&market_buy("AAPL", dec!(10)))
+        .await
+        .unwrap();
+
+    // Alpaca returns the leg on its own with no reference to the entry; the
+    // link is only knowable from the submit response we already saw.
+    let leg = adapter.get_order(BRACKET_SL_ID).await.unwrap();
+    assert_eq!(leg.parent_order_id.as_deref(), Some(BRACKET_ENTRY_ID));
+}
+
+#[tokio::test]
+async fn get_order_on_an_unseen_leg_reports_no_parent() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        &format!("/v2/orders/{BRACKET_SL_ID}"),
+        200,
+        alpaca_order_json(&json!({"id": BRACKET_SL_ID, "type": "stop", "side": "sell"})),
+    )
+    .await;
+
+    let leg = adapter.get_order(BRACKET_SL_ID).await.unwrap();
+    assert_eq!(
+        leg.parent_order_id, None,
+        "without having seen the entry, the adapter cannot know the parent"
+    );
+}
+
+#[tokio::test]
+async fn get_order_history_reports_parent_on_native_bracket_legs() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/v2/orders",
+        200,
+        json!([bracket_entry_json()]),
+    )
+    .await;
+
+    let orders = adapter
+        .get_order_history(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    let mut ids: Vec<&str> = orders.iter().map(|o| o.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![BRACKET_ENTRY_ID, BRACKET_SL_ID, BRACKET_TP_ID]);
+
+    let leg = orders.iter().find(|o| o.id == BRACKET_SL_ID).unwrap();
+    assert_eq!(leg.parent_order_id.as_deref(), Some(BRACKET_ENTRY_ID));
+}
+
+#[tokio::test]
+async fn a_filled_leg_reports_its_parent_on_the_fill_then_releases_it() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/v2/orders",
+        200,
+        json!([bracket_entry_json()]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "GET",
+        &format!("/v2/orders/{BRACKET_SL_ID}"),
+        200,
+        alpaca_order_json(&json!({
+            "id": BRACKET_SL_ID,
+            "type": "stop",
+            "side": "sell",
+            "status": "filled",
+            "filled_qty": "10"
+        })),
+    )
+    .await;
+
+    // Observing the entry is what makes the link knowable.
+    adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    let filled = adapter.get_order(BRACKET_SL_ID).await.unwrap();
+    assert_eq!(filled.status, OrderStatus::Filled);
+    assert_eq!(
+        filled.parent_order_id.as_deref(),
+        Some(BRACKET_ENTRY_ID),
+        "the response reporting the fill still carries the link — that is when a \
+         strategy needs to know which entry the leg closed"
+    );
+
+    // The leg has resolved and cannot acquire a new link, so it is not retained.
+    let after = adapter.get_order(BRACKET_SL_ID).await.unwrap();
+    assert_eq!(after.parent_order_id, None);
+}
+
+#[tokio::test]
+async fn modifying_a_leg_keeps_its_parent_link() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/v2/orders",
+        200,
+        json!([bracket_entry_json()]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "PATCH",
+        &format!("/v2/orders/{BRACKET_TP_ID}"),
+        200,
+        alpaca_order_json(&json!({
+            "id": BRACKET_TP_ID,
+            "type": "limit",
+            "side": "sell",
+            "limit_price": "165.00"
+        })),
+    )
+    .await;
+
+    // Observing the entry is what makes the link knowable.
+    adapter
+        .get_orders(&OrderQueryParams::default())
+        .await
+        .unwrap();
+
+    let request = ModifyOrderRequest {
+        limit_price: Some(dec!(165)),
+        stop_price: None,
+        quantity: None,
+        stop_loss: None,
+        take_profit: None,
+        trailing_distance: None,
+    };
+    let result = adapter.modify_order(BRACKET_TP_ID, &request).await.unwrap();
+
+    assert_eq!(
+        result.order.parent_order_id.as_deref(),
+        Some(BRACKET_ENTRY_ID),
+        "moving a resting leg must not detach it from its entry"
+    );
+}
