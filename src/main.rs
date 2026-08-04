@@ -370,7 +370,12 @@ fn check_feature_enabled(provider: TradingPlatformKind) -> anyhow::Result<()> {
 }
 
 /// Register the single adapter based on explicit provider selection.
-#[allow(unused_variables, clippy::too_many_lines)]
+// `unused_async`: the only `.await` in this function is `SaxoAdapter::new`, which
+// sits behind `#[cfg(feature = "saxo")]`. Every other provider constructs its
+// adapter synchronously, so any feature set without `saxo` leaves zero await
+// points here. The function must stay `async` regardless — the saxo arm needs it,
+// and the caller awaits it unconditionally.
+#[allow(unused_variables, clippy::too_many_lines, clippy::unused_async)]
 async fn register_adapter(
     provider: TradingPlatformKind,
     platform: TradingPlatform,
