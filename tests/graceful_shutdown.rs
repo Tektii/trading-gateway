@@ -19,7 +19,6 @@ use tektii_gateway_core::exit_management::handler::ExitHandler;
 use tektii_gateway_core::exit_management::types::{ExitEntryParams, ExitLegType};
 use tektii_gateway_core::models::{Side, TradingPlatform};
 use tektii_gateway_core::shutdown::{ExitStateSnapshot, run_shutdown_sequence};
-use tektii_gateway_core::state::StateManager;
 use tektii_gateway_core::subscription::filter::SubscriptionFilter;
 use tektii_gateway_core::websocket::connection::{WsConnection, WsConnectionManager};
 use tektii_gateway_core::websocket::messages::{ConnectionEventType, WsMessage};
@@ -74,8 +73,7 @@ fn test_connection(port: u16) -> (WsConnection, mpsc::Receiver<(WsMessage, Optio
 
 /// Create an ExitHandlerRegistry with `n` pending exit entries.
 fn registry_with_pending(n: usize) -> Arc<ExitHandlerRegistry> {
-    let state_manager = Arc::new(StateManager::new());
-    let handler = ExitHandler::with_defaults(state_manager, PLATFORM);
+    let handler = ExitHandler::with_defaults(PLATFORM);
 
     for i in 0..n {
         let entry = tektii_gateway_core::exit_management::types::ExitEntry::new(ExitEntryParams {

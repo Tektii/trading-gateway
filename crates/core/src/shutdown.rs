@@ -263,11 +263,9 @@ mod tests {
     use super::*;
     use crate::exit_management::handler::ExitHandler;
     use crate::exit_management::types::{ExitEntry, ExitEntryParams, ExitLegType};
-    use crate::state::StateManager;
 
     fn test_registry_with_pending(n: usize) -> ExitHandlerRegistry {
-        let state_manager = Arc::new(StateManager::new());
-        let handler = ExitHandler::with_defaults(state_manager, TradingPlatform::AlpacaPaper);
+        let handler = ExitHandler::with_defaults(TradingPlatform::AlpacaPaper);
 
         for i in 0..n {
             let entry = ExitEntry::new(ExitEntryParams {

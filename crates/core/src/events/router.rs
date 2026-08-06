@@ -1361,11 +1361,9 @@ mod tests {
 
     fn create_test_router() -> (EventRouter, broadcast::Receiver<WsMessage>) {
         let state_manager = Arc::new(StateManager::new());
-        let exit_handler: Arc<dyn crate::exit_management::ExitHandling> =
-            Arc::new(crate::exit_management::ExitHandler::with_defaults(
-                Arc::clone(&state_manager),
-                TradingPlatform::AlpacaLive,
-            ));
+        let exit_handler: Arc<dyn crate::exit_management::ExitHandling> = Arc::new(
+            crate::exit_management::ExitHandler::with_defaults(TradingPlatform::AlpacaLive),
+        );
         let (broadcaster, receiver) = broadcast::channel(16);
 
         let router = EventRouter::new(
@@ -1786,7 +1784,6 @@ mod tests {
             ..ExitHandlerConfig::default()
         };
         let exit_handler = Arc::new(crate::exit_management::ExitHandler::new(
-            Arc::clone(&state_manager),
             TradingPlatform::AlpacaLive,
             config,
         ));
@@ -2599,7 +2596,6 @@ mod tests {
             ..ExitHandlerConfig::default()
         };
         let exit_handler = Arc::new(crate::exit_management::ExitHandler::new(
-            Arc::clone(&state_manager),
             TradingPlatform::AlpacaLive,
             exit_config,
         ));
@@ -3052,7 +3048,6 @@ mod tests {
             ..ExitHandlerConfig::default()
         };
         let exit_handler = Arc::new(crate::exit_management::ExitHandler::new(
-            Arc::clone(&state_manager),
             TradingPlatform::AlpacaLive,
             exit_config,
         ));
@@ -3161,7 +3156,6 @@ mod tests {
             ..ExitHandlerConfig::default()
         };
         let exit_handler = Arc::new(crate::exit_management::ExitHandler::new(
-            Arc::clone(&state_manager),
             TradingPlatform::AlpacaLive,
             exit_config,
         ));

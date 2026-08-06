@@ -7,7 +7,7 @@
 //! # Key Principles
 //!
 //! - **Provider is source of truth**: State Manager is cache only
-//! - **Used for internal operations**: Exit Handler queries, order/position correlation
+//! - **Used for internal operations**: Exit Handler queries, OCO group correlation
 //! - **Concurrent access**: Uses `DashMap` for lock-free operations
 //! - **Sync on connect**: Full state rebuilt from provider on connect/reconnect
 //!
@@ -27,7 +27,7 @@
 //! state.update_order_fill("order-1", dec!(50), OrderStatus::PartiallyFilled);
 //!
 //! // Query for Exit Handler
-//! let orders = state.get_orders_for_position("pos-1");
+//! let order = state.get_order("order-1");
 //! ```
 
 use crate::models::{Order, OrderStatus, Position, PositionSide, Side};
@@ -35,7 +35,7 @@ use dashmap::DashMap;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 
-/// Minimal order data for internal cache operations (exit tracking, position correlation).
+/// Minimal order data for internal cache operations (exit tracking, OCO grouping).
 #[derive(Debug, Clone)]
 pub struct CachedOrder {
     pub order_id: String,
@@ -45,10 +45,6 @@ pub struct CachedOrder {
     pub filled_quantity: Decimal,
     pub status: OrderStatus,
     pub position_id: Option<String>,
-    pub is_exit_order: bool,
-    pub parent_order_id: Option<String>,
-    /// For OCO pairs (SL ↔ TP)
-    pub sibling_order_id: Option<String>,
     pub oco_group_id: Option<String>,
 }
 
@@ -73,8 +69,6 @@ pub struct OcoFillRecord {
 pub struct StateManager {
     orders: DashMap<String, CachedOrder>,
     positions: DashMap<String, CachedPosition>,
-    orders_by_position: DashMap<String, HashSet<String>>,
-    orders_by_symbol: DashMap<String, HashSet<String>>,
     /// For netting mode - one position per symbol
     position_by_symbol: DashMap<String, String>,
     oco_groups: DashMap<String, HashSet<String>>,
@@ -88,8 +82,6 @@ impl StateManager {
         Self {
             orders: DashMap::new(),
             positions: DashMap::new(),
-            orders_by_position: DashMap::new(),
-            orders_by_symbol: DashMap::new(),
             position_by_symbol: DashMap::new(),
             oco_groups: DashMap::new(),
             oco_fills: DashMap::new(),
@@ -105,8 +97,6 @@ impl StateManager {
     pub fn sync_from_provider(&self, orders: Vec<Order>, positions: Vec<Position>) {
         self.orders.clear();
         self.positions.clear();
-        self.orders_by_position.clear();
-        self.orders_by_symbol.clear();
         self.position_by_symbol.clear();
         self.oco_groups.clear();
         self.oco_fills.clear();
@@ -121,8 +111,8 @@ impl StateManager {
 
     /// Insert or update an order.
     ///
-    /// If the order's `position_id` has changed from a previous upsert,
-    /// the old position index will be cleaned up automatically.
+    /// If the order's `oco_group_id` has changed from a previous upsert,
+    /// the old group index will be cleaned up automatically.
     ///
     /// Uses atomic insert to avoid TOCTOU race conditions.
     pub fn upsert_order(&self, order: &Order) {
@@ -134,54 +124,27 @@ impl StateManager {
             filled_quantity: order.filled_quantity,
             status: order.status,
             position_id: order.position_id.clone(),
-            is_exit_order: false,
-            parent_order_id: None,
-            sibling_order_id: None,
             oco_group_id: order.oco_group_id.clone(),
         };
 
         // Atomic insert-and-return-old eliminates the TOCTOU race with a get-then-insert.
         let old_cached = self.orders.insert(order.id.clone(), cached);
 
-        if let Some(ref old) = old_cached {
-            if old.position_id != order.position_id
-                && let Some(ref old_pos_id) = old.position_id
-                && let Some(mut orders) = self.orders_by_position.get_mut(old_pos_id)
-            {
-                orders.remove(&order.id);
-            }
-            if old.symbol != order.symbol
-                && let Some(mut orders) = self.orders_by_symbol.get_mut(&old.symbol)
-            {
-                orders.remove(&order.id);
-            }
-            if old.oco_group_id != order.oco_group_id
-                && let Some(ref old_group_id) = old.oco_group_id
-                && let Some(mut orders) = self.oco_groups.get_mut(old_group_id)
-            {
-                orders.remove(&order.id);
-                if orders.is_empty() {
-                    drop(orders);
-                    self.oco_groups.remove(old_group_id);
-                }
+        if let Some(ref old) = old_cached
+            && old.oco_group_id != order.oco_group_id
+            && let Some(ref old_group_id) = old.oco_group_id
+            && let Some(mut orders) = self.oco_groups.get_mut(old_group_id)
+        {
+            orders.remove(&order.id);
+            if orders.is_empty() {
+                drop(orders);
+                self.oco_groups.remove(old_group_id);
             }
         }
 
         if let Some(ref group_id) = order.oco_group_id {
             self.oco_groups
                 .entry(group_id.clone())
-                .or_default()
-                .insert(order.id.clone());
-        }
-
-        self.orders_by_symbol
-            .entry(order.symbol.clone())
-            .or_default()
-            .insert(order.id.clone());
-
-        if let Some(ref pos_id) = order.position_id {
-            self.orders_by_position
-                .entry(pos_id.clone())
                 .or_default()
                 .insert(order.id.clone());
         }
@@ -211,16 +174,6 @@ impl StateManager {
     #[must_use]
     pub fn remove_order(&self, order_id: &str) -> bool {
         if let Some((_, order)) = self.orders.remove(order_id) {
-            if let Some(mut orders) = self.orders_by_symbol.get_mut(&order.symbol) {
-                orders.remove(order_id);
-            }
-
-            if let Some(ref pos_id) = order.position_id
-                && let Some(mut orders) = self.orders_by_position.get_mut(pos_id)
-            {
-                orders.remove(order_id);
-            }
-
             if let Some(ref group_id) = order.oco_group_id
                 && let Some(mut orders) = self.oco_groups.get_mut(group_id)
             {
@@ -239,34 +192,6 @@ impl StateManager {
     #[must_use]
     pub fn get_order(&self, order_id: &str) -> Option<CachedOrder> {
         self.orders.get(order_id).map(|r| r.value().clone())
-    }
-
-    #[must_use]
-    pub fn get_orders_for_position(&self, position_id: &str) -> Vec<CachedOrder> {
-        let order_ids = self
-            .orders_by_position
-            .get(position_id)
-            .map(|r| r.value().clone())
-            .unwrap_or_default();
-
-        order_ids
-            .into_iter()
-            .filter_map(|id| self.get_order(&id))
-            .collect()
-    }
-
-    #[must_use]
-    pub fn get_orders_for_symbol(&self, symbol: &str) -> Vec<CachedOrder> {
-        let order_ids = self
-            .orders_by_symbol
-            .get(symbol)
-            .map(|r| r.value().clone())
-            .unwrap_or_default();
-
-        order_ids
-            .into_iter()
-            .filter_map(|id| self.get_order(&id))
-            .collect()
     }
 
     #[must_use]
@@ -326,7 +251,6 @@ impl StateManager {
                 self.position_by_symbol.remove(&position.symbol);
             }
 
-            self.orders_by_position.remove(position_id);
             true
         } else {
             false
@@ -354,63 +278,6 @@ impl StateManager {
     #[must_use]
     pub fn position_count(&self) -> usize {
         self.positions.len()
-    }
-
-    /// Mark orders as exit orders with sibling link.
-    ///
-    /// Called when SL/TP orders are placed for an entry order.
-    /// Returns false if either order is not found in the cache.
-    #[must_use]
-    pub fn link_exit_orders(
-        &self,
-        sl_order_id: &str,
-        tp_order_id: &str,
-        parent_order_id: &str,
-    ) -> bool {
-        let sl_updated = self.mark_as_exit_order(sl_order_id, parent_order_id, Some(tp_order_id));
-        let tp_updated = self.mark_as_exit_order(tp_order_id, parent_order_id, Some(sl_order_id));
-
-        sl_updated && tp_updated
-    }
-
-    /// Mark a single order as an exit order.
-    ///
-    /// Links the order to its parent and optionally to a sibling order
-    /// (for OCO pairs where SL and TP cancel each other).
-    fn mark_as_exit_order(
-        &self,
-        order_id: &str,
-        parent_order_id: &str,
-        sibling_order_id: Option<&str>,
-    ) -> bool {
-        if let Some(mut entry) = self.orders.get_mut(order_id) {
-            entry.is_exit_order = true;
-            entry.parent_order_id = Some(parent_order_id.to_string());
-            entry.sibling_order_id = sibling_order_id.map(String::from);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// For OCO cancellation
-    #[must_use]
-    pub fn get_sibling_order(&self, order_id: &str) -> Option<String> {
-        self.orders
-            .get(order_id)
-            .and_then(|r| r.sibling_order_id.clone())
-    }
-
-    #[must_use]
-    pub fn is_exit_order(&self, order_id: &str) -> bool {
-        self.orders.get(order_id).is_some_and(|r| r.is_exit_order)
-    }
-
-    #[must_use]
-    pub fn get_parent_order(&self, order_id: &str) -> Option<String> {
-        self.orders
-            .get(order_id)
-            .and_then(|r| r.parent_order_id.clone())
     }
 
     /// Add an order to an OCO group.
@@ -575,47 +442,24 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_order_cleans_old_position_index() {
-        let state = StateManager::new();
-
-        // Insert order with position_id = "pos-1"
-        let mut order = create_test_order("order-1", "AAPL", Side::Buy, dec!(100));
-        order.position_id = Some("pos-1".to_string());
-        state.upsert_order(&order);
-
-        // Verify it's in pos-1 index
-        let orders = state.get_orders_for_position("pos-1");
-        assert_eq!(orders.len(), 1);
-
-        // Update order with position_id = "pos-2"
-        order.position_id = Some("pos-2".to_string());
-        state.upsert_order(&order);
-
-        // Verify it's removed from pos-1 index
-        let old_orders = state.get_orders_for_position("pos-1");
-        assert!(old_orders.is_empty());
-
-        // Verify it's in pos-2 index
-        let new_orders = state.get_orders_for_position("pos-2");
-        assert_eq!(new_orders.len(), 1);
-    }
-
-    #[test]
     fn test_remove_order_cleans_up_indexes() {
         let state = StateManager::new();
         let mut order = create_test_order("order-1", "AAPL", Side::Buy, dec!(100));
-        order.position_id = Some("pos-1".to_string());
+        order.oco_group_id = Some("group-1".to_string());
         state.upsert_order(&order);
 
-        // Verify indexes were created
-        assert!(!state.get_orders_for_symbol("AAPL").is_empty());
-        assert!(!state.get_orders_for_position("pos-1").is_empty());
+        // Verify the index was created
+        assert_eq!(
+            state.get_oco_group_id("order-1"),
+            Some("group-1".to_string())
+        );
 
         let _ = state.remove_order("order-1");
 
-        // Verify indexes were cleaned
-        assert!(state.get_orders_for_symbol("AAPL").is_empty());
-        assert!(state.get_orders_for_position("pos-1").is_empty());
+        // Verify the index was cleaned. Once the order is gone from the orders
+        // map, `get_oco_group_id` falls back to scanning the group index, so a
+        // stale entry left behind would still be found here.
+        assert!(state.get_oco_group_id("order-1").is_none());
     }
 
     #[test]
@@ -639,89 +483,6 @@ mod tests {
             .get_position_by_symbol("AAPL")
             .expect("should still exist");
         assert_eq!(cached.position_id, "pos-2");
-    }
-
-    #[test]
-    fn test_link_exit_orders() {
-        let state = StateManager::new();
-
-        // Create entry order and exit orders
-        state.upsert_order(&create_test_order("entry-1", "AAPL", Side::Buy, dec!(100)));
-        state.upsert_order(&create_test_order("sl-1", "AAPL", Side::Sell, dec!(100)));
-        state.upsert_order(&create_test_order("tp-1", "AAPL", Side::Sell, dec!(100)));
-
-        // Link SL and TP as exit orders
-        let linked = state.link_exit_orders("sl-1", "tp-1", "entry-1");
-        assert!(linked);
-
-        // Verify SL
-        let sl = state.get_order("sl-1").unwrap();
-        assert!(sl.is_exit_order);
-        assert_eq!(sl.parent_order_id, Some("entry-1".to_string()));
-        assert_eq!(sl.sibling_order_id, Some("tp-1".to_string()));
-
-        // Verify TP
-        let tp = state.get_order("tp-1").unwrap();
-        assert!(tp.is_exit_order);
-        assert_eq!(tp.parent_order_id, Some("entry-1".to_string()));
-        assert_eq!(tp.sibling_order_id, Some("sl-1".to_string()));
-    }
-
-    #[test]
-    fn test_link_exit_orders_returns_false_if_order_missing() {
-        let state = StateManager::new();
-        state.upsert_order(&create_test_order("sl-1", "AAPL", Side::Sell, dec!(100)));
-        // tp-1 does not exist
-
-        let linked = state.link_exit_orders("sl-1", "tp-1", "entry-1");
-        assert!(!linked);
-    }
-
-    #[test]
-    fn test_is_exit_order() {
-        let state = StateManager::new();
-        state.upsert_order(&create_test_order("entry-1", "AAPL", Side::Buy, dec!(100)));
-        state.upsert_order(&create_test_order("sl-1", "AAPL", Side::Sell, dec!(100)));
-        state.upsert_order(&create_test_order("tp-1", "AAPL", Side::Sell, dec!(100)));
-
-        // Before linking
-        assert!(!state.is_exit_order("entry-1"));
-        assert!(!state.is_exit_order("sl-1"));
-        assert!(!state.is_exit_order("tp-1"));
-
-        let _ = state.link_exit_orders("sl-1", "tp-1", "entry-1");
-
-        // After linking
-        assert!(!state.is_exit_order("entry-1")); // Entry is not exit
-        assert!(state.is_exit_order("sl-1"));
-        assert!(state.is_exit_order("tp-1"));
-
-        // Unknown order
-        assert!(!state.is_exit_order("unknown"));
-    }
-
-    #[test]
-    fn test_get_sibling_order() {
-        let state = StateManager::new();
-        state.upsert_order(&create_test_order("sl-1", "AAPL", Side::Sell, dec!(100)));
-        state.upsert_order(&create_test_order("tp-1", "AAPL", Side::Sell, dec!(100)));
-        let _ = state.link_exit_orders("sl-1", "tp-1", "entry-1");
-
-        assert_eq!(state.get_sibling_order("sl-1"), Some("tp-1".to_string()));
-        assert_eq!(state.get_sibling_order("tp-1"), Some("sl-1".to_string()));
-        assert!(state.get_sibling_order("unknown").is_none());
-    }
-
-    #[test]
-    fn test_get_parent_order() {
-        let state = StateManager::new();
-        state.upsert_order(&create_test_order("entry-1", "AAPL", Side::Buy, dec!(100)));
-        state.upsert_order(&create_test_order("sl-1", "AAPL", Side::Sell, dec!(100)));
-        let _ = state.link_exit_orders("sl-1", "tp-nonexistent", "entry-1");
-
-        assert_eq!(state.get_parent_order("sl-1"), Some("entry-1".to_string()));
-        assert!(state.get_parent_order("entry-1").is_none()); // Entry has no parent
-        assert!(state.get_parent_order("unknown").is_none());
     }
 
     #[test]
@@ -807,8 +568,11 @@ mod tests {
         // Run multiple iterations to increase chance of hitting race conditions
         for iteration in 0..50 {
             let order_id = format!("order-{iteration}");
+            let old_group = format!("group-{iteration}-a");
+            let new_group = format!("group-{iteration}-b");
+
             let mut order = create_test_order(&order_id, "AAPL", Side::Buy, dec!(100));
-            order.position_id = Some("pos-1".to_string());
+            order.oco_group_id = Some(old_group.clone());
             state.upsert_order(&order);
 
             let state_clone1 = Arc::clone(&state);
@@ -816,11 +580,11 @@ mod tests {
             let order_id_for_upsert = order_id.clone();
             let order_id_for_remove = order_id.clone();
 
-            // Spawn concurrent upsert (position change) and remove
+            // Spawn concurrent upsert (OCO group change) and remove
             let upsert_handle = thread::spawn(move || {
                 let mut updated =
                     create_test_order(&order_id_for_upsert, "AAPL", Side::Buy, dec!(100));
-                updated.position_id = Some("pos-2".to_string());
+                updated.oco_group_id = Some(new_group);
                 state_clone1.upsert_order(&updated);
             });
 
@@ -835,14 +599,15 @@ mod tests {
                 .join()
                 .expect("remove thread should not panic");
 
-            // Verify index consistency: pos-1 index should not contain the order
-            let pos1_orders = state.get_orders_for_position("pos-1");
-            for o in &pos1_orders {
-                assert_ne!(
-                    o.order_id, order_id,
-                    "Order should not be in pos-1 index after position change"
-                );
-            }
+            // Verify index consistency: the old group must not still list the order.
+            // Deterministic against the current atomic insert-and-return-old, so this
+            // guards against a regression to a non-atomic get-then-insert.
+            assert!(
+                !state
+                    .get_oco_siblings(&old_group, "no-such-order")
+                    .contains(&order_id),
+                "Order should not be in the old OCO group after a group change"
+            );
         }
     }
 
@@ -903,24 +668,35 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_order_cleans_old_symbol_index() {
+    fn test_upsert_order_cleans_old_oco_group_index() {
         let state = StateManager::new();
 
-        // Insert order with symbol = "AAPL"
-        let order = create_test_order("order-1", "AAPL", Side::Buy, dec!(100));
+        // Insert order in group-1
+        let mut order = create_test_order("order-1", "AAPL", Side::Buy, dec!(100));
+        order.oco_group_id = Some("group-1".to_string());
         state.upsert_order(&order);
 
-        // Verify it's in AAPL index
-        assert_eq!(state.get_orders_for_symbol("AAPL").len(), 1);
+        // Verify it's in the group-1 index
+        assert_eq!(
+            state.get_oco_siblings("group-1", "no-such-order"),
+            vec!["order-1".to_string()]
+        );
 
-        // Update order with symbol = "MSFT" (unusual but possible)
-        let mut updated = create_test_order("order-1", "MSFT", Side::Buy, dec!(100));
-        updated.id = "order-1".to_string();
+        // Move the order to group-2
+        let mut updated = create_test_order("order-1", "AAPL", Side::Buy, dec!(100));
+        updated.oco_group_id = Some("group-2".to_string());
         state.upsert_order(&updated);
 
-        // Verify it's removed from AAPL index
-        assert!(state.get_orders_for_symbol("AAPL").is_empty());
-        // Verify it's in MSFT index
-        assert_eq!(state.get_orders_for_symbol("MSFT").len(), 1);
+        // Verify it's removed from the group-1 index
+        assert!(
+            state
+                .get_oco_siblings("group-1", "no-such-order")
+                .is_empty()
+        );
+        // Verify it's in the group-2 index
+        assert_eq!(
+            state.get_oco_siblings("group-2", "no-such-order"),
+            vec!["order-1".to_string()]
+        );
     }
 }

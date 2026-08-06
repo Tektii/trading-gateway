@@ -125,10 +125,7 @@ impl AlpacaAdapter {
 
         let state_manager = Arc::new(StateManager::new());
 
-        let exit_handler = Arc::new(ExitHandler::with_defaults(
-            Arc::clone(&state_manager),
-            platform,
-        ));
+        let exit_handler = Arc::new(ExitHandler::with_defaults(platform));
 
         let event_router = Arc::new(EventRouter::new(
             Arc::clone(&state_manager),
@@ -177,11 +174,7 @@ impl AlpacaAdapter {
     #[must_use]
     #[allow(dead_code)] // Public API - not yet used by callers
     pub fn with_exit_handler(mut self, config: ExitHandlerConfig) -> Self {
-        let exit_handler = Arc::new(ExitHandler::new(
-            Arc::clone(&self.state_manager),
-            self.platform,
-            config,
-        ));
+        let exit_handler = Arc::new(ExitHandler::new(self.platform, config));
         self.exit_handler = exit_handler;
         self
     }

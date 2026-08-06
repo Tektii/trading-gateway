@@ -33,9 +33,8 @@ fn setup() -> (
     Arc<StateManager>,
 ) {
     let state_manager = Arc::new(StateManager::new());
-    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> = Arc::new(
-        ExitHandler::with_defaults(Arc::clone(&state_manager), PLATFORM),
-    );
+    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> =
+        Arc::new(ExitHandler::with_defaults(PLATFORM));
     let (tx, rx) = broadcast::channel(64);
     let router = Arc::new(EventRouter::new(
         Arc::clone(&state_manager),
@@ -414,10 +413,7 @@ async fn fill_during_reconciliation_triggers_exit_management() {
 #[tokio::test]
 async fn failed_exit_entries_rebroadcast_on_reconnect() {
     let state_manager = Arc::new(StateManager::new());
-    let exit_handler = Arc::new(ExitHandler::with_defaults(
-        Arc::clone(&state_manager),
-        PLATFORM,
-    ));
+    let exit_handler = Arc::new(ExitHandler::with_defaults(PLATFORM));
 
     let entry = ExitEntry {
         placeholder_id: "exit:sl:order-fail".into(),
