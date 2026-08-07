@@ -86,10 +86,7 @@ impl BinanceCoinFuturesAdapter {
             .build()?;
 
         let state_manager = Arc::new(StateManager::new());
-        let exit_handler = Arc::new(ExitHandler::with_defaults(
-            Arc::clone(&state_manager),
-            platform,
-        ));
+        let exit_handler = Arc::new(ExitHandler::with_defaults(platform));
         let event_router = Arc::new(EventRouter::new(
             Arc::clone(&state_manager),
             Arc::clone(&exit_handler) as Arc<dyn ExitHandling>,

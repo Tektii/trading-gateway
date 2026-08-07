@@ -498,9 +498,8 @@ async fn reconnect_triggers_reconciliation() {
     let mut rx = strategy_connection(&ws_manager, &registry).await;
 
     let state_manager = Arc::new(StateManager::new());
-    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> = Arc::new(
-        ExitHandler::with_defaults(Arc::clone(&state_manager), PLATFORM),
-    );
+    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> =
+        Arc::new(ExitHandler::with_defaults(PLATFORM));
     let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(64);
     let router = Arc::new(EventRouter::new(
         Arc::clone(&state_manager),

@@ -128,9 +128,8 @@ pub fn create_ws_provider(
     ws_url: &str,
 ) -> (TektiiWebSocketProvider, broadcast::Receiver<WsMessage>) {
     let state_manager = Arc::new(StateManager::new());
-    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> = Arc::new(
-        ExitHandler::with_defaults(Arc::clone(&state_manager), TradingPlatform::Tektii),
-    );
+    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> =
+        Arc::new(ExitHandler::with_defaults(TradingPlatform::Tektii));
     let (tx, rx) = broadcast::channel::<WsMessage>(64);
     let event_router = Arc::new(EventRouter::new(
         state_manager,

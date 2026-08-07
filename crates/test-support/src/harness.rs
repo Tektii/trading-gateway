@@ -195,10 +195,7 @@ async fn spawn_gateway_inner(
 
     if with_exit_management {
         let state_manager = Arc::new(StateManager::new());
-        let exit_handler = Arc::new(ExitHandler::with_defaults(
-            Arc::clone(&state_manager),
-            platform,
-        ));
+        let exit_handler = Arc::new(ExitHandler::with_defaults(platform));
         exit_handler_registry.register(platform, Arc::clone(&exit_handler));
 
         let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(64);

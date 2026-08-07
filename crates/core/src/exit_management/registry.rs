@@ -122,11 +122,9 @@ impl ExitHandlerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::StateManager;
 
     fn create_test_handler(platform: TradingPlatform) -> Arc<ExitHandler> {
-        let state_manager = Arc::new(StateManager::new());
-        Arc::new(ExitHandler::with_defaults(state_manager, platform))
+        Arc::new(ExitHandler::with_defaults(platform))
     }
 
     #[test]

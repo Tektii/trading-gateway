@@ -8,7 +8,6 @@
 //! concrete `ExitHandler` struct that implements it.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -21,7 +20,6 @@ use tracing::{debug, info};
 use crate::adapter::TradingAdapter;
 use crate::error::{GatewayError, GatewayResult};
 use crate::models::{OrderRequest, TradingPlatform};
-use crate::state::StateManager;
 
 use super::{
     ActualOrder, CancelExitResult, CancellationReason, CircuitState, ExitBackupRegistration,
@@ -110,8 +108,6 @@ pub struct ExitHandler {
     /// processing of successive fills for the same parent could double-place
     /// exits.
     pub(super) fill_processing_lock: tokio::sync::Mutex<()>,
-    #[allow(dead_code)]
-    state_manager: Arc<StateManager>,
     pub(super) config: ExitHandlerConfig,
     pub(super) circuit_breaker: RwLock<ExitOrderCircuitBreaker>,
     platform: TradingPlatform,
@@ -129,11 +125,7 @@ impl std::fmt::Debug for ExitHandler {
 
 impl ExitHandler {
     #[must_use]
-    pub fn new(
-        state_manager: Arc<StateManager>,
-        platform: TradingPlatform,
-        config: ExitHandlerConfig,
-    ) -> Self {
+    pub fn new(platform: TradingPlatform, config: ExitHandlerConfig) -> Self {
         let circuit_breaker = ExitOrderCircuitBreaker::new(
             config.circuit_breaker_threshold,
             config.circuit_breaker_window,
@@ -144,7 +136,6 @@ impl ExitHandler {
             pending_by_primary: DashMap::new(),
             unmatched_fills: DashMap::new(),
             fill_processing_lock: tokio::sync::Mutex::new(()),
-            state_manager,
             config,
             circuit_breaker: RwLock::new(circuit_breaker),
             platform,
@@ -152,8 +143,8 @@ impl ExitHandler {
     }
 
     #[must_use]
-    pub fn with_defaults(state_manager: Arc<StateManager>, platform: TradingPlatform) -> Self {
-        Self::new(state_manager, platform, ExitHandlerConfig::default())
+    pub fn with_defaults(platform: TradingPlatform) -> Self {
+        Self::new(platform, ExitHandlerConfig::default())
     }
 
     #[must_use]
@@ -656,13 +647,11 @@ mod tests {
         CancelOrderResult, Capabilities, ConnectionStatus, Order, OrderHandle, OrderQueryParams,
         OrderStatus, OrderType, Position, PositionMode, Side, TimeInForce,
     };
-    use crate::state::StateManager;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     fn create_test_handler() -> ExitHandler {
-        let state_manager = Arc::new(StateManager::new());
-        ExitHandler::with_defaults(state_manager, TradingPlatform::AlpacaLive)
+        ExitHandler::with_defaults(TradingPlatform::AlpacaLive)
     }
 
     fn create_test_order_request(

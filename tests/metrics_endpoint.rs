@@ -19,9 +19,8 @@ use tektii_gateway_test_support::models::test_order;
 
 fn create_router() -> (EventRouter, broadcast::Receiver<WsMessage>) {
     let state_manager = Arc::new(StateManager::new());
-    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> = Arc::new(
-        ExitHandler::with_defaults(Arc::clone(&state_manager), TradingPlatform::AlpacaPaper),
-    );
+    let exit_handler: Arc<dyn tektii_gateway_core::exit_management::ExitHandling> =
+        Arc::new(ExitHandler::with_defaults(TradingPlatform::AlpacaPaper));
     let (tx, rx) = broadcast::channel(64);
     let router = EventRouter::new(
         state_manager,

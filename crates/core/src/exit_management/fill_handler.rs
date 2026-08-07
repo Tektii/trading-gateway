@@ -1258,12 +1258,8 @@ mod tests {
         assert_ne!(second.client_order_id, third.client_order_id);
     }
 
-    use crate::state::StateManager;
-    use std::sync::Arc;
-
     fn create_test_handler() -> ExitHandler {
-        let state_manager = Arc::new(StateManager::new());
-        ExitHandler::with_defaults(state_manager, TradingPlatform::BinanceSpotLive)
+        ExitHandler::with_defaults(TradingPlatform::BinanceSpotLive)
     }
 
     fn create_test_entry_with_status(
