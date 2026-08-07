@@ -2896,7 +2896,7 @@
       },
       "Trade": {
         "type": "object",
-        "description": "Individual trade/fill record.",
+        "description": "Individual trade/fill record.\n\nA trade is the raw execution record: what was filled, at what price, for what\nfee. It carries no profit and loss — PnL is a property of a position, not of a\nsingle fill. For PnL, read `unrealized_pnl` and `realized_pnl` on `Position`.",
         "required": [
           "id",
           "order_id",
