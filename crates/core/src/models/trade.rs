@@ -8,6 +8,10 @@ use utoipa::ToSchema;
 use super::Side;
 
 /// Individual trade/fill record.
+///
+/// A trade is the raw execution record: what was filled, at what price, for what
+/// fee. It carries no profit and loss — PnL is a property of a position, not of a
+/// single fill. For PnL, read `unrealized_pnl` and `realized_pnl` on `Position`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Trade {
