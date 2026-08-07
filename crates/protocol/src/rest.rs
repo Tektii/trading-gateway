@@ -104,7 +104,7 @@ pub struct SubmitOrderRequest {
     /// Order side (buy or sell).
     pub side: Side,
 
-    /// Order type (market, limit, or stop).
+    /// Order type (market, limit, stop, or stop-limit).
     pub order_type: OrderType,
 
     /// Order quantity.

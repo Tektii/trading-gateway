@@ -369,6 +369,34 @@ async fn get_order_stop_price_mapping() {
     assert_eq!(order.stop_price, Some(dec!(145)));
 }
 
+/// Stop-limit is the only order type whose two prices come from two different
+/// engine fields: the trigger arrives in `price`, the limit in `limit_price`.
+/// Getting them the wrong way round would silently swap a strategy's trigger
+/// and limit, so pick values where a swap cannot go unnoticed.
+#[tokio::test]
+async fn get_order_stop_limit_price_mapping() {
+    let (server, base_url) = start_mock_server().await;
+    let adapter = test_adapter(&base_url);
+
+    mount_json(
+        &server,
+        "GET",
+        "/api/v1/orders/order-abc-123",
+        200,
+        engine_order_json(&json!({
+            "order_type": "stop_limit",
+            "price": "145",
+            "limit_price": "144"
+        })),
+    )
+    .await;
+
+    let order = adapter.get_order("order-abc-123").await.unwrap();
+    assert_eq!(order.order_type, OrderType::StopLimit);
+    assert_eq!(order.stop_price, Some(dec!(145)));
+    assert_eq!(order.limit_price, Some(dec!(144)));
+}
+
 #[tokio::test]
 async fn get_order_enriches_oco_group() {
     let (server, base_url) = start_mock_server().await;

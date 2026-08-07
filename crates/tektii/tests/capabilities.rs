@@ -25,6 +25,20 @@ async fn capabilities_features_and_order_types() {
             .supported_order_types
             .contains(&OrderType::Stop)
     );
+    // The conversion layer maps StopLimit in both directions, so it must be
+    // advertised — otherwise a strategy checking capabilities first is told a
+    // working order type is unavailable.
+    assert!(
+        capabilities
+            .supported_order_types
+            .contains(&OrderType::StopLimit)
+    );
+    // TrailingStop is genuinely rejected by the conversion layer.
+    assert!(
+        !capabilities
+            .supported_order_types
+            .contains(&OrderType::TrailingStop)
+    );
     assert_eq!(capabilities.position_mode, PositionMode::Hedging);
     assert!(capabilities.features.contains(&"hedging".to_string()));
     assert!(capabilities.features.contains(&"reduce_only".to_string()));

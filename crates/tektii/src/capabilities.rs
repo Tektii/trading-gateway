@@ -1,7 +1,7 @@
 //! Tektii engine provider capabilities.
 //!
 //! The engine supports a minimal subset of order types:
-//! - Order types: Market, Limit, Stop
+//! - Order types: Market, Limit, Stop, StopLimit
 //! - No bracket/OCO/OTO orders (use gateway's pending SL/TP system)
 //! - Hedging position mode (multiple positions per symbol)
 
@@ -48,7 +48,12 @@ impl ProviderCapabilities for TektiiCapabilities {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             supported_asset_classes: vec![AssetClass::Stock, AssetClass::Crypto],
-            supported_order_types: vec![OrderType::Market, OrderType::Limit, OrderType::Stop],
+            supported_order_types: vec![
+                OrderType::Market,
+                OrderType::Limit,
+                OrderType::Stop,
+                OrderType::StopLimit,
+            ],
             position_mode: PositionMode::Hedging,
             features: vec![
                 "hedging".to_string(),
