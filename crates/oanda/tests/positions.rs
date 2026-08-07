@@ -202,7 +202,6 @@ async fn close_position_long_full() {
         quantity: None,
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
     let handle = adapter
         .close_position("EUR_USD_LONG", &request)
@@ -236,7 +235,6 @@ async fn close_position_short_partial() {
         quantity: Some(dec!(5000)),
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
     let handle = adapter
         .close_position("EUR_USD_SHORT", &request)
@@ -264,7 +262,6 @@ async fn close_position_error() {
         quantity: None,
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
     let err = adapter
         .close_position("EUR_USD_LONG", &request)

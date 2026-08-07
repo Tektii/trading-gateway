@@ -1772,10 +1772,6 @@
         "type": "object",
         "description": "Request to close a position.",
         "properties": {
-          "cancel_associated_orders": {
-            "type": "boolean",
-            "description": "Cancel pending SL/TP orders for this position (default: true)"
-          },
           "limit_price": {
             "type": [
               "string",

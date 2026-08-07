@@ -136,7 +136,6 @@ async fn close_position_full() {
         quantity: None,
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
 
     let handle = adapter.close_position("AAPL", &request).await.unwrap();
@@ -167,7 +166,6 @@ async fn close_position_partial() {
         quantity: Some(dec!(5)),
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
 
     let handle = adapter.close_position("AAPL", &request).await.unwrap();
@@ -189,7 +187,6 @@ async fn close_position_not_found() {
         quantity: None,
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
 
     let err = adapter.close_position("NOPE", &request).await.unwrap_err();

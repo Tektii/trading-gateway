@@ -111,7 +111,6 @@ async fn close_position_submits_sell() {
         quantity: None,
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: false,
     };
 
     let handle = adapter
