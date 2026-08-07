@@ -234,6 +234,5 @@ pub fn close_request() -> ClosePositionRequest {
         order_type: None,
         limit_price: None,
         quantity: None,
-        cancel_associated_orders: true,
     }
 }

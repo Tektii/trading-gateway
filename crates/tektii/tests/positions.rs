@@ -152,7 +152,6 @@ async fn close_position_full() {
         quantity: None,
         order_type: Some(tektii_gateway_core::models::OrderType::Market),
         limit_price: None,
-        cancel_associated_orders: false,
     };
     let handle = adapter.close_position("pos-001", &request).await.unwrap();
     assert_eq!(handle.id, "close-order-1");
@@ -188,7 +187,6 @@ async fn close_position_partial() {
         quantity: Some(dec!(5)),
         order_type: Some(tektii_gateway_core::models::OrderType::Market),
         limit_price: None,
-        cancel_associated_orders: false,
     };
     let handle = adapter.close_position("pos-001", &request).await.unwrap();
     assert_eq!(handle.id, "close-order-2");

@@ -70,15 +70,6 @@ pub struct ClosePositionRequest {
     /// Quantity to close (None = close entire position)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantity: Option<Decimal>,
-
-    /// Cancel pending SL/TP orders for this position (default: true)
-    #[serde(default = "default_true")]
-    pub cancel_associated_orders: bool,
-}
-
-/// Default value helper for serde
-const fn default_true() -> bool {
-    true
 }
 
 /// Request to move a position's resting stop-loss or take-profit.

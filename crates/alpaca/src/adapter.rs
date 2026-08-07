@@ -1136,7 +1136,6 @@ impl TradingAdapter for AlpacaAdapter {
                         quantity: None,
                         order_type: None,
                         limit_price: None,
-                        cancel_associated_orders: true,
                     },
                 )
                 .await?;

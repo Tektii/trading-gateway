@@ -161,7 +161,6 @@ async fn close_position_submits_sell_order() {
         quantity: None,
         order_type: None,
         limit_price: None,
-        cancel_associated_orders: true,
     };
 
     let handle = adapter.close_position("BTCUSDT", &request).await.unwrap();
