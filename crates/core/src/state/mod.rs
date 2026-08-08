@@ -271,11 +271,6 @@ impl StateManager {
     }
 
     #[must_use]
-    pub fn has_position_by_symbol(&self, symbol: &str) -> bool {
-        self.position_by_symbol.contains_key(symbol)
-    }
-
-    #[must_use]
     pub fn position_count(&self) -> usize {
         self.positions.len()
     }
@@ -483,6 +478,69 @@ mod tests {
             .get_position_by_symbol("AAPL")
             .expect("should still exist");
         assert_eq!(cached.position_id, "pos-2");
+    }
+
+    #[test]
+    fn test_remove_position_clears_own_symbol_index() {
+        let state = StateManager::new();
+
+        let position = create_test_position("pos-1", "AAPL", PositionSide::Long, dec!(100));
+        state.upsert_position(&position);
+        assert!(state.position_by_symbol.contains_key("AAPL"));
+
+        let removed = state.remove_position("pos-1");
+        assert!(removed);
+
+        // Probe the index directly. `get_position_by_symbol` filters through the
+        // positions map, so a key left behind pointing at the removed position
+        // would still read as `None` here and hide the leak.
+        assert!(!state.position_by_symbol.contains_key("AAPL"));
+        assert!(state.get_position_by_symbol("AAPL").is_none());
+    }
+
+    #[test]
+    fn test_upsert_position_clears_old_symbol_index() {
+        let state = StateManager::new();
+
+        let position = create_test_position("pos-1", "AAPL", PositionSide::Long, dec!(100));
+        state.upsert_position(&position);
+
+        // Same position id, different symbol - the AAPL key is now orphaned and
+        // must go, otherwise it points at a position that no longer holds AAPL.
+        let moved = create_test_position("pos-1", "MSFT", PositionSide::Long, dec!(100));
+        state.upsert_position(&moved);
+
+        assert!(!state.position_by_symbol.contains_key("AAPL"));
+        assert_eq!(
+            state
+                .position_by_symbol
+                .get("MSFT")
+                .map(|e| e.value().clone()),
+            Some("pos-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sync_from_provider_clears_symbol_index() {
+        let state = StateManager::new();
+
+        let position = create_test_position("pos-1", "AAPL", PositionSide::Long, dec!(100));
+        state.upsert_position(&position);
+
+        // The provider no longer reports AAPL, so its key must go with the
+        // wholesale clear. Clearing only `positions` would leave the key behind
+        // and the filtered accessor would still read `None`, hiding the leak.
+        let fresh = create_test_position("pos-2", "MSFT", PositionSide::Long, dec!(50));
+        state.sync_from_provider(vec![], vec![fresh]);
+
+        assert!(!state.position_by_symbol.contains_key("AAPL"));
+        assert_eq!(
+            state
+                .position_by_symbol
+                .get("MSFT")
+                .map(|e| e.value().clone()),
+            Some("pos-2".to_string())
+        );
     }
 
     #[test]
