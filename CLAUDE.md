@@ -56,6 +56,18 @@ Rust workspace monorepo. Root binary (`src/main.rs`) wires everything together. 
 
 All traffic on port `8080`: REST API, WebSocket (`/v1/ws`), and Prometheus metrics (`/metrics`).
 
+## Specs and Change Management
+
+Work is specced with [OpenSpec](https://github.com/Fission-AI/OpenSpec) in `openspec/`, committed in full:
+
+- `openspec/specs/` — living specs, the source of truth for current behaviour
+- `openspec/changes/` — in-flight proposals (proposal, design, delta specs, tasks); archived to `openspec/changes/archive/` once merged
+- `openspec/config.yaml` — project context and artifact rules
+
+Run `openspec init --tools claude` once to generate the local `/opsx:*` commands and skills (git-ignored). A change's artifacts ship in the same pull request as its code.
+
+**This repo is public.** Everything under `openspec/` must stand on its own — no private ticket ids, internal links, or commercial context.
+
 ## Conventions
 
 - Rust 2024 edition, MSRV 1.91.0
