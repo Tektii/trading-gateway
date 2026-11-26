@@ -1,0 +1,51 @@
+schema: spec-driven
+
+context: |
+  Repo: trading-gateway — open-source unified trading API gateway. Normalises broker
+  APIs (Alpaca, Binance, Oanda, Saxo, Tektii) into one REST + WebSocket interface.
+  Rust workspace: root binary in src/, shared code in crates/core and crates/protocol,
+  one feature-gated crate per provider, test helpers in crates/test-support.
+
+  This repository is public. Artifacts must stand on their own: no private ticket ids,
+  no internal links, no commercial or roadmap context.
+
+  Read before writing artifacts:
+  - CLAUDE.md — architecture, key abstractions, conventions
+  - .claude/rules/ — adapter crates, exit management, tests, websocket
+  - CONTRIBUTING.md
+
+  Hard constraints:
+  - Single-provider model: one gateway instance serves exactly one provider
+  - Event-driven: strategies consume the WebSocket stream; REST reads are for
+    reconnect reconciliation, never a polling loop
+  - rust_decimal for all monetary values, never f64
+  - No unsafe code (unsafe_code = "deny")
+  - tracing for logging, never println!
+  - thiserror for error types; anyhow only at the binary boundary
+  - Env-var-only configuration
+
+rules:
+  proposal:
+    - One feature or gap per change; state Non-goals explicitly
+    - Say which providers are affected and whether the change is breaking
+  specs:
+    - Spec observable behaviour (REST contract, WebSocket events, provider capabilities), not implementation
+    - A change to the public API surface says so; openapi.json is the public contract
+  design:
+    - Skip design.md unless the change crosses crates, alters a contract, or carries a real tradeoff
+    - Prefer the simplest solution that works; justify any new abstraction
+  tasks:
+    - Test-first — each behaviour task is preceded by a task writing its failing test
+    - Include an OpenAPI regen task (`cargo run --bin openapi-export > openapi.json`) when a ToSchema type, its doc comments, or a handler changes
+    - Final task is always `make check`
+
+operations:
+  apply:
+    guidance:
+      - Follow TDD — confirm each test fails before implementing
+      - Stop and report on any unexpected failure rather than retrying
+      - Work on a branch named with a conventional-commit type prefix; ship as a pull request, never commit to main
+      - The pull request body explains the why in full; it does not rely on the reader opening the change
+  archive:
+    guidance:
+      - Archive only after the pull request is merged
