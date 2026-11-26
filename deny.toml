@@ -3,8 +3,10 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = [
-    # Transitive dependency of utoipa-axum; no alternative available yet
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but no replacement exists for utoipa-axum" },
+    # Informational only (no vulnerability). chrono is a direct dependency of every crate
+    # and appears in the public protocol types, so moving to jiff/time is a deliberate
+    # migration rather than a version bump.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; replacing it changes public protocol types and needs its own migration" },
     # Transitive dependency of validator (via validator_derive); validator is already
     # at its latest release and still pulls this in, so there is no upgrade path yet.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained but reaches us only transitively through validator_derive, which has no fixed release" },

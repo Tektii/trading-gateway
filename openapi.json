@@ -360,10 +360,10 @@
             "schema": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "$ref": "#/components/schemas/Side"
                 },
                 {
-                  "$ref": "#/components/schemas/Side"
+                  "type": "null"
                 }
               ]
             }
@@ -637,10 +637,10 @@
             "schema": {
               "oneOf": [
                 {
-                  "type": "null"
+                  "$ref": "#/components/schemas/Side"
                 },
                 {
-                  "$ref": "#/components/schemas/Side"
+                  "type": "null"
                 }
               ]
             }
@@ -1099,10 +1099,10 @@
               "schema": {
                 "oneOf": [
                   {
-                    "type": "null"
+                    "$ref": "#/components/schemas/ClosePositionRequest"
                   },
                   {
-                    "$ref": "#/components/schemas/ClosePositionRequest"
+                    "type": "null"
                   }
                 ]
               }
@@ -1694,11 +1694,11 @@
           "rate_limits": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RateLimits",
                 "description": "Provider rate limits (None means unlimited, e.g., Tektii engine)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1782,11 +1782,11 @@
           "order_type": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/OrderType",
                 "description": "Order type for close (default: MARKET)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2056,22 +2056,22 @@
           "stop_loss": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ExitLegPlacement",
                 "description": "The stop-loss leg, if the request moved it"
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "take_profit": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ExitLegPlacement",
                 "description": "The take-profit leg, if the request moved it"
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -2195,11 +2195,11 @@
           "reject_reason": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RejectReason",
                 "description": "Rejection reason (if status is REJECTED)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2254,11 +2254,11 @@
           "trailing_type": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/TrailingType",
                 "description": "Trailing type (absolute or percent)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2346,11 +2346,11 @@
           "side": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Side",
                 "description": "Filter by side"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2434,11 +2434,11 @@
           "margin_mode": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/MarginMode",
                 "description": "Margin mode (cross or isolated)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -2515,11 +2515,11 @@
           "trailing_type": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/TrailingType",
                 "description": "Type of trailing stop (absolute or percent)"
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -2617,11 +2617,11 @@
           "margin_mode": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/MarginMode",
                 "description": "Margin mode (for leveraged positions)"
+              },
+              {
+                "type": "null"
               }
             ]
           },
