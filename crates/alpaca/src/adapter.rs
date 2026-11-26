@@ -78,7 +78,10 @@ pub struct AlpacaAdapter {
     feed: String,
 
     /// Entry↔leg links read off Alpaca's native bracket `legs` arrays.
-    bracket_links: BracketLinks,
+    ///
+    /// Shared with [`AlpacaWebSocketProvider`](crate::AlpacaWebSocketProvider),
+    /// which sees the same `legs` arrays on the `trade_updates` stream.
+    bracket_links: Arc<BracketLinks>,
 }
 
 impl AlpacaAdapter {
@@ -159,7 +162,7 @@ impl AlpacaAdapter {
             platform,
             circuit_breaker,
             feed,
-            bracket_links: BracketLinks::new(),
+            bracket_links: Arc::new(BracketLinks::new()),
         })
     }
 
@@ -705,6 +708,10 @@ impl TradingAdapter for AlpacaAdapter {
             self.bracket_links.release(order_id);
         }
         parent
+    }
+
+    fn native_bracket_links(&self) -> Option<Arc<BracketLinks>> {
+        Some(Arc::clone(&self.bracket_links))
     }
 
     #[instrument(skip(self), name = "alpaca_get_account")]

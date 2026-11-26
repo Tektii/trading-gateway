@@ -592,7 +592,29 @@ async fn connect_alpaca(
     use tektii_gateway_core::websocket::provider::{Credentials, ProviderConfig};
 
     let feed = env::var("ALPACA_FEED").unwrap_or_else(|_| "iex".to_string());
-    let provider = Box::new(AlpacaWebSocketProvider::new(feed));
+
+    // Share the adapter's bracket-link map with the provider: Alpaca reports a
+    // bracket on the entry only, and for a bracket placed outside the gateway
+    // the trading stream is where that entry is first seen. Without the shared
+    // handle the sighting is lost and the legs report no parent.
+    let mut provider = AlpacaWebSocketProvider::new(feed);
+    if let Some(links) = provider_registry
+        .get_trading_adapter(platform)
+        .await
+        .and_then(|adapter| adapter.native_bracket_links())
+    {
+        provider = provider.with_bracket_links(links);
+    } else {
+        // Registration precedes this call, so reaching here means the wiring
+        // broke: the provider would record into a map nobody reads, and the
+        // symptom — legs missing a parent — appears far from the cause.
+        warn!(
+            ?platform,
+            "Alpaca adapter shared no bracket links; brackets seen only on the \
+             trading stream will report no parent order on their legs"
+        );
+    }
+    let provider = Box::new(provider);
     let provider_config = ProviderConfig {
         platform,
         symbols: symbols.clone(),
@@ -675,10 +697,21 @@ async fn connect_oanda(
     // strategies receive from (deduped against the transaction stream's
     // copy by transaction id).
     let mut provider = OandaWebSocketProvider::new(&creds, platform);
-    if let Some(adapter) = provider_registry.get_trading_adapter(platform).await
-        && let Some(event_tx) = adapter.provider_event_sender()
+    if let Some(event_tx) = provider_registry
+        .get_trading_adapter(platform)
+        .await
+        .and_then(|adapter| adapter.provider_event_sender())
     {
         provider = provider.with_event_tx(event_tx);
+    } else {
+        // Same silent-failure hazard as the Alpaca path above: fills from the
+        // REST order response would reach strategies only if the transaction
+        // stream happens to deliver its copy.
+        warn!(
+            ?platform,
+            "Oanda adapter shared no event sender; REST order fills will reach \
+             strategies only via the transaction stream"
+        );
     }
     let provider = Box::new(provider);
     let provider_config = ProviderConfig {

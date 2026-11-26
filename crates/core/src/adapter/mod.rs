@@ -75,6 +75,19 @@ pub trait TradingAdapter: Send + Sync {
         None
     }
 
+    /// Shared handle to the links behind [`Self::parent_order_id_for`], for
+    /// adapters whose broker also reports brackets on the streaming side.
+    ///
+    /// The adapter is not the only observer of a native bracket: the same
+    /// entry-with-legs payload arrives on the provider's stream, and for a
+    /// bracket placed outside the gateway that is the first — often only —
+    /// sighting. Handing the map out lets the provider record what it sees into
+    /// the one place this adapter answers from. Adapters that record nothing, or
+    /// that see brackets only over REST, return `None`.
+    fn native_bracket_links(&self) -> Option<Arc<BracketLinks>> {
+        None
+    }
+
     /// Get account information.
     async fn get_account(&self) -> GatewayResult<Account>;
 

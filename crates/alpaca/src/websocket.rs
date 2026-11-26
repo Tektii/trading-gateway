@@ -25,6 +25,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use tektii_gateway_core::adapter::BracketLinks;
 use tektii_gateway_core::models::{
     Bar, Order, OrderStatus, OrderType, Quote, Side, TimeInForce, TradingPlatform,
 };
@@ -220,8 +221,10 @@ struct AlpacaTradingOrderInfo {
     #[serde(default)]
     updated_at: Option<String>,
     /// Leg orders for bracket/OTO orders.
+    ///
+    /// Alpaca reports the bracket on the entry only; a leg's own update says
+    /// nothing about the entry it protects.
     #[serde(default)]
-    #[allow(dead_code)]
     legs: Option<Vec<AlpacaTradingOrderInfo>>,
 }
 
@@ -255,6 +258,10 @@ pub struct AlpacaWebSocketProvider {
     trading_stream_enabled: Arc<RwLock<bool>>,
     /// Stored config from initial `connect()` for reconnection.
     stored_config: Arc<RwLock<Option<ProviderConfig>>>,
+    /// Entry↔leg links seen on the trading stream, shared with the adapter that
+    /// answers bracket-parent lookups. Empty and unread unless
+    /// [`Self::with_bracket_links`] wired it to an adapter's map.
+    bracket_links: Arc<BracketLinks>,
 }
 
 impl std::fmt::Debug for AlpacaWebSocketProvider {
@@ -272,6 +279,7 @@ impl std::fmt::Debug for AlpacaWebSocketProvider {
             .field("trading_connection_state", &self.trading_connection_state)
             .field("trading_stream_enabled", &self.trading_stream_enabled)
             .field("stored_config", &"<Config>")
+            .field("bracket_links", &self.bracket_links)
             .finish()
     }
 }
@@ -466,6 +474,7 @@ impl AlpacaWebSocketProvider {
             trading_connection_state: Arc::new(RwLock::new(ConnectionState::default())),
             trading_stream_enabled: Arc::new(RwLock::new(false)),
             stored_config: Arc::new(RwLock::new(None)),
+            bracket_links: Arc::new(BracketLinks::new()),
         }
     }
 
@@ -473,6 +482,17 @@ impl AlpacaWebSocketProvider {
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = Some(url.into());
+        self
+    }
+
+    /// Record bracket links seen on the trading stream into the adapter's map.
+    ///
+    /// Without this the stream's sighting is lost: a bracket placed outside the
+    /// gateway is first seen here, and its legs would report no parent until
+    /// some unrelated REST read happened to fetch the entry.
+    #[must_use]
+    pub fn with_bracket_links(mut self, links: Arc<BracketLinks>) -> Self {
+        self.bracket_links = links;
         self
     }
 
@@ -780,6 +800,7 @@ impl AlpacaWebSocketProvider {
             platform,
             self.cancellation_token.clone(),
             self.trading_connection_state.clone(),
+            self.bracket_links.clone(),
         );
 
         Ok(())
@@ -867,6 +888,7 @@ fn spawn_trading_stream_reader(
     platform: TradingPlatform,
     cancel_token: CancellationToken,
     trading_state: Arc<RwLock<ConnectionState>>,
+    bracket_links: Arc<BracketLinks>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -879,7 +901,7 @@ fn spawn_trading_stream_reader(
                     match msg_result {
                         Some(Ok(Message::Text(text))) => {
                             process_trading_stream_text(
-                                &text, platform, &tx,
+                                &text, platform, &tx, &bracket_links,
                             );
                         }
                         Some(Ok(Message::Binary(bytes))) => {
@@ -888,7 +910,7 @@ fn spawn_trading_stream_reader(
                             // payload is UTF-8 JSON, not Text frames.
                             match std::str::from_utf8(&bytes) {
                                 Ok(text) => process_trading_stream_text(
-                                    text, platform, &tx,
+                                    text, platform, &tx, &bracket_links,
                                 ),
                                 Err(e) => warn!(
                                     platform = ?platform,
@@ -939,10 +961,25 @@ fn spawn_trading_stream_reader(
     });
 }
 
+/// Note the entry each of `order`'s bracket legs belongs to.
+///
+/// No-op for the ordinary case of an update without legs. Mirrors the adapter's
+/// REST-side recording — the stream and the REST responses are two sightings of
+/// the same `legs` array, and both feed the one map.
+fn record_bracket_legs(links: &BracketLinks, order: &AlpacaTradingOrderInfo) {
+    let Some(legs) = order.legs.as_ref() else {
+        return;
+    };
+    for leg in legs {
+        links.record(leg.id.clone(), &order.id);
+    }
+}
+
 fn process_trading_stream_text(
     text: &str,
     platform: TradingPlatform,
     tx: &mpsc::UnboundedSender<ProviderEvent>,
+    bracket_links: &BracketLinks,
 ) {
     match serde_json::from_str::<AlpacaTradingStreamMessage>(text) {
         Ok(stream_msg) => {
@@ -950,6 +987,10 @@ fn process_trading_stream_text(
                 if let Some(data) = stream_msg.data {
                     match serde_json::from_value::<AlpacaTradingOrderUpdate>(data) {
                         Ok(update) => {
+                            // Recorded before the event goes out: the leg's own
+                            // update may follow immediately, and by then the
+                            // link is nowhere on the wire.
+                            record_bracket_legs(bracket_links, &update.order);
                             let ws_msg = parse_trading_event(&update);
                             let _ = tx.send(ws_msg.into());
                         }
@@ -1284,6 +1325,9 @@ const fn alpaca_provider_name(platform: TradingPlatform) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AlpacaCredentials;
+    use crate::adapter::AlpacaAdapter;
+    use tektii_gateway_core::adapter::TradingAdapter;
     use tektii_gateway_core::websocket::messages::WsMessage;
 
     /// Regression test: Alpaca's trading stream delivers
@@ -1321,7 +1365,8 @@ mod tests {
         let text = std::str::from_utf8(&bytes).expect("payload is valid UTF-8");
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        process_trading_stream_text(text, TradingPlatform::AlpacaPaper, &tx);
+        let links = Arc::new(BracketLinks::new());
+        process_trading_stream_text(text, TradingPlatform::AlpacaPaper, &tx, &links);
 
         let event = rx
             .try_recv()
@@ -1339,5 +1384,160 @@ mod tests {
             rx.try_recv().is_err(),
             "no further events expected on the channel"
         );
+    }
+
+    /// A bracket parent's `trade_updates` payload, carrying both legs the way
+    /// Alpaca reports them — on the entry only, never on the leg itself.
+    fn bracket_parent_payload() -> &'static str {
+        r#"{
+            "stream": "trade_updates",
+            "data": {
+                "event": "fill",
+                "timestamp": "2026-05-19T10:00:00.000000000Z",
+                "order": {
+                    "id": "entry-1",
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "type": "market",
+                    "qty": "10",
+                    "filled_qty": "10",
+                    "filled_avg_price": "150.0",
+                    "status": "filled",
+                    "time_in_force": "gtc",
+                    "legs": [
+                        {
+                            "id": "sl-1",
+                            "symbol": "AAPL",
+                            "side": "sell",
+                            "type": "stop",
+                            "qty": "10",
+                            "stop_price": "145.0",
+                            "status": "new",
+                            "time_in_force": "gtc"
+                        },
+                        {
+                            "id": "tp-1",
+                            "symbol": "AAPL",
+                            "side": "sell",
+                            "type": "limit",
+                            "qty": "10",
+                            "limit_price": "160.0",
+                            "status": "new",
+                            "time_in_force": "gtc"
+                        }
+                    ]
+                }
+            }
+        }"#
+    }
+
+    #[test]
+    fn trading_stream_records_the_entry_each_bracket_leg_belongs_to() {
+        let links = Arc::new(BracketLinks::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_trading_stream_text(
+            bracket_parent_payload(),
+            TradingPlatform::AlpacaPaper,
+            &tx,
+            &links,
+        );
+
+        assert_eq!(
+            links.parent_of("sl-1"),
+            Some("entry-1".to_string()),
+            "the stop leg's entry is only ever visible on the entry's own update"
+        );
+        assert_eq!(links.parent_of("tp-1"), Some("entry-1".to_string()));
+        assert_eq!(
+            links.parent_of("entry-1"),
+            None,
+            "the entry itself exits nothing"
+        );
+    }
+
+    /// The done-when: a bracket placed outside the gateway, first observed on
+    /// the stream, reports a parent on its legs without any REST read having
+    /// happened. The adapter answers the registry's lookup, so the link has to
+    /// land in the map the adapter reads from.
+    #[test]
+    fn a_bracket_seen_only_on_the_stream_gives_its_legs_a_parent() {
+        let (broadcaster, _) = tokio::sync::broadcast::channel(8);
+        let adapter = AlpacaAdapter::new(
+            &AlpacaCredentials::new("key", "secret"),
+            broadcaster,
+            TradingPlatform::AlpacaPaper,
+        )
+        .expect("adapter builds");
+
+        let links = adapter
+            .native_bracket_links()
+            .expect("Alpaca manages brackets natively and shares its links");
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_trading_stream_text(
+            bracket_parent_payload(),
+            TradingPlatform::AlpacaPaper,
+            &tx,
+            &links,
+        );
+
+        assert_eq!(
+            adapter
+                .parent_order_id_for("sl-1", OrderStatus::Open)
+                .as_deref(),
+            Some("entry-1"),
+            "no REST call was made; the stream is the only place the link appeared"
+        );
+        assert_eq!(
+            adapter
+                .parent_order_id_for("tp-1", OrderStatus::Open)
+                .as_deref(),
+            Some("entry-1")
+        );
+    }
+
+    /// The provider must hold the adapter's own map, not a copy of it: the
+    /// adapter answers parent lookups from its instance, so a builder that
+    /// dropped the argument would record into a map nothing ever reads.
+    #[test]
+    fn with_bracket_links_adopts_the_map_it_is_given() {
+        let links = Arc::new(BracketLinks::new());
+
+        let provider = AlpacaWebSocketProvider::new("iex").with_bracket_links(Arc::clone(&links));
+
+        assert!(
+            Arc::ptr_eq(&provider.bracket_links, &links),
+            "the provider records into the shared map, not one of its own"
+        );
+    }
+
+    #[test]
+    fn an_order_without_legs_records_nothing() {
+        let links = Arc::new(BracketLinks::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        process_trading_stream_text(
+            r#"{
+                "stream": "trade_updates",
+                "data": {
+                    "event": "new",
+                    "order": {
+                        "id": "plain-1",
+                        "symbol": "AAPL",
+                        "side": "buy",
+                        "type": "market",
+                        "qty": "10",
+                        "status": "new",
+                        "time_in_force": "gtc"
+                    }
+                }
+            }"#,
+            TradingPlatform::AlpacaPaper,
+            &tx,
+            &links,
+        );
+
+        assert_eq!(links.parent_of("plain-1"), None);
     }
 }
