@@ -76,7 +76,7 @@ subtle = "2"
 
 # API documentation
 utoipa = { version = "5", features = ["axum_extras", "chrono", "decimal"] }
-utoipa-axum = "0.2"
+utoipa-axum = "0.3"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Observability
