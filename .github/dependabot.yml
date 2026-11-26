@@ -4,7 +4,20 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # One PR for all minor and patch bumps; majors stay individual.
+      cargo:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      # One PR for all security fixes.
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
