@@ -75,9 +75,9 @@ secrecy = "0.10"
 subtle = "2"
 
 # API documentation
-utoipa = { version = "5", features = ["axum_extras", "chrono", "decimal"] }
-utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "decimal"] }
+utoipa-axum = "0.3"
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # Observability
 tracing = "0.1"
