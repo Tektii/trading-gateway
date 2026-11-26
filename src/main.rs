@@ -450,15 +450,9 @@ async fn register_adapter(
 
         #[cfg(feature = "oanda")]
         TradingPlatformKind::Oanda => {
-            use tektii_gateway_oanda::{OandaAdapter, OandaCredentials};
+            use tektii_gateway_oanda::OandaAdapter;
 
-            let mut creds = OandaCredentials::new(&credentials[0], &credentials[1]);
-            if let Ok(url) = env::var("OANDA_BASE_URL") {
-                creds = creds.with_rest_url(url);
-            }
-            if let Ok(stream_url) = env::var("OANDA_STREAM_URL") {
-                creds = creds.with_stream_url(stream_url);
-            }
+            let creds = oanda_credentials(&credentials[0], &credentials[1], |k| env::var(k).ok());
 
             let (tx, _) = broadcast::channel::<WsMessage>(256);
             let adapter = Arc::new(OandaAdapter::new(&creds, tx, platform)?);
@@ -672,6 +666,25 @@ async fn connect_binance(
     .await
 }
 
+/// Build OANDA credentials with the optional `OANDA_BASE_URL` / `OANDA_STREAM_URL`
+/// overrides. Shared by the adapter and the streaming provider so both honour
+/// the same variables.
+#[cfg(feature = "oanda")]
+fn oanda_credentials(
+    api_key: &str,
+    account_id: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> tektii_gateway_oanda::OandaCredentials {
+    let mut creds = tektii_gateway_oanda::OandaCredentials::new(api_key, account_id);
+    if let Some(url) = lookup("OANDA_BASE_URL") {
+        creds = creds.with_rest_url(url);
+    }
+    if let Some(url) = lookup("OANDA_STREAM_URL") {
+        creds = creds.with_stream_url(url);
+    }
+    creds
+}
+
 #[cfg(feature = "oanda")]
 async fn connect_oanda(
     platform: TradingPlatform,
@@ -680,17 +693,11 @@ async fn connect_oanda(
     provider_registry: &Arc<ProviderRegistry>,
 ) -> Result<(), String> {
     use tektii_gateway_core::websocket::provider::{Credentials, ProviderConfig};
-    use tektii_gateway_oanda::{OandaCredentials, OandaWebSocketProvider};
+    use tektii_gateway_oanda::OandaWebSocketProvider;
 
     let api_key = env::var("OANDA_API_KEY").unwrap_or_default();
     let account_id = env::var("OANDA_ACCOUNT_ID").unwrap_or_default();
-    let mut creds = OandaCredentials::new(&api_key, &account_id);
-    if let Ok(url) = env::var("OANDA_STREAM_URL") {
-        creds = creds.with_stream_url(url);
-    }
-    if let Ok(url) = env::var("OANDA_REST_URL") {
-        creds = creds.with_rest_url(url);
-    }
+    let creds = oanda_credentials(&api_key, &account_id, |k| env::var(k).ok());
 
     // Share the adapter's outbound event sender with the provider so the
     // adapter's REST order path can publish fills onto the same stream
@@ -974,5 +981,29 @@ async fn connect_providers(
             Ok(()) => info!(?platform, "Provider WebSocket connected"),
             Err(e) => error!(?platform, error = %e, "Failed to connect provider WebSocket"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "oanda"))]
+mod oanda_credentials_tests {
+    use super::oanda_credentials;
+
+    #[test]
+    fn applies_base_and_stream_url_overrides() {
+        let creds = oanda_credentials("key", "acct", |k| match k {
+            "OANDA_BASE_URL" => Some("http://mock-rest".to_string()),
+            "OANDA_STREAM_URL" => Some("http://mock-stream".to_string()),
+            _ => None,
+        });
+        assert_eq!(creds.rest_url.as_deref(), Some("http://mock-rest"));
+        assert_eq!(creds.stream_url.as_deref(), Some("http://mock-stream"));
+    }
+
+    #[test]
+    fn ignores_legacy_rest_url_name() {
+        let creds = oanda_credentials("key", "acct", |k| {
+            (k == "OANDA_REST_URL").then(|| "http://wrong".to_string())
+        });
+        assert!(creds.rest_url.is_none());
     }
 }
