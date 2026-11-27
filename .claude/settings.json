@@ -14,7 +14,10 @@
       "Bash(find:*)",
       "Bash(grep:*)",
       "Bash(wc:*)",
-      "Bash(git ls-remote:*)"
+      "Bash(git ls-remote:*)",
+      "Bash(gh pr *)",
+      "Bash(gh api *)",
+      "Bash(.claude/skills/pr-review/wait-for-review.sh *)"
     ],
     "deny": [
       "Read(./.env)",

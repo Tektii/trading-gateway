@@ -66,6 +66,10 @@ Work is specced with [OpenSpec](https://github.com/Fission-AI/OpenSpec) in `open
 
 Run `openspec init --tools claude` once to generate the local `/opsx:*` commands and skills (git-ignored). A change's artifacts ship in the same pull request as its code.
 
+Every change ships as a branch and a pull request, never a commit to `main`; an agent session may work in its own checkout with `claude --worktree <change-id>`. Once the pull request is open, work Copilot's review with the `pr-review` skill (`.claude/skills/pr-review/`), then stop — never merge, never enable auto-merge.
+
+Always run `/opsx:verify` before archiving; never fold it into apply.
+
 **This repo is public.** Everything under `openspec/` must stand on its own — no private ticket ids, internal links, or commercial context.
 
 ## Conventions
