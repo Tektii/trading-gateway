@@ -63,7 +63,7 @@ gh api --paginate --slurp "repos/$REPO/pulls/$N/reviews?per_page=100" \
 
 ```bash
 N=<pr number>; REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-gh api graphql --paginate -f query='query($owner:String!,$name:String!,$n:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved path line comments(first:20){nodes{databaseId author{login} body}}}}}}}' \
+gh api graphql --paginate -f query='query($owner:String!,$name:String!,$n:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved path line comments(first:100){nodes{databaseId author{login} body}}}}}}}' \
   -f owner=${REPO%/*} -f name=${REPO#*/} -F n=$N \
   --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)'
 ```
@@ -159,8 +159,8 @@ A conflict does:
 gh pr view $N --json mergeable,mergeStateStatus   # UNKNOWN means GitHub is still computing: ask again
 ```
 
-On `CONFLICTING`, rebase onto `origin/main` and resolve the conflicts, repeat
-the delta-spec check above, run `make check`, then push with
+On `CONFLICTING`, `git fetch origin`, rebase onto `origin/main` and resolve
+the conflicts, repeat the delta-spec check above, run `make check`, then push with
 `git push --force-with-lease` — never a bare `--force`. If a conflict cannot
 be resolved without choosing between two behaviours, stop and tell the
 maintainer which files conflict.

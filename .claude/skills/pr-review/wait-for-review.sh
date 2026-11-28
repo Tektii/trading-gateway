@@ -5,8 +5,9 @@
 set -euo pipefail
 N=$1
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-HEAD=$(gh pr view "$N" --json headRefOid -q .headRefOid)
 for _ in $(seq 15); do
+  # Read the head each time: a push during the wait moves it.
+  HEAD=$(gh pr view "$N" --json headRefOid -q .headRefOid)
   # One line per page of reviews: true if that page holds a review of HEAD.
   found=$(gh api --paginate "repos/$REPO/pulls/$N/reviews?per_page=100" \
     --jq "[.[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"$HEAD\")] | length > 0")
@@ -16,5 +17,5 @@ for _ in $(seq 15); do
   fi
   sleep 60
 done
-echo "No Copilot review of $HEAD after 15 minutes"
+echo "No Copilot review of the head ($HEAD) after 15 minutes"
 exit 1
