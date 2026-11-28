@@ -15,7 +15,12 @@
       "Bash(grep:*)",
       "Bash(wc:*)",
       "Bash(git ls-remote:*)",
-      "Bash(gh pr *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh pr edit *)",
+      "Bash(gh pr comment *)",
+      "Bash(gh repo view *)",
       "Bash(gh api *)",
       "Bash(.claude/skills/pr-review/wait-for-review.sh *)"
     ],
@@ -23,7 +28,8 @@
       "Read(./.env)",
       "Read(./.env.*)",
       "Bash(git add .:*)",
-      "Bash(git add -A:*)"
+      "Bash(git add -A:*)",
+      "Bash(gh pr merge *)"
     ]
   },
   "hooks": {

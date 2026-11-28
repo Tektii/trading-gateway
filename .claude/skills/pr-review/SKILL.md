@@ -29,10 +29,10 @@ typed inline. Run it in the background, never behind a foreground sleep:
 Shell variables do not outlive a call, so each command below sets its own `N`
 and `REPO`.
 
-It exits 0 once the review exists and 1 with "No Copilot review" when 15
-minutes pass without one. Any other failure is a `gh` error (authentication,
-rate limit, network), not a missing review: fix that and run it again rather
-than re-requesting. If nothing has come after the 15 minutes, re-request once
+It exits 0 once the review exists, 1 when 15 minutes pass without one, and 2
+when a `gh` call failed (authentication, rate limit, network). Exit 2 is not a
+missing review: fix the `gh` problem and run it again; do not re-request. On
+exit 1, re-request once
 (`gh pr edit $N --add-reviewer @copilot`) and run it again. Still nothing:
 post a pull request comment saying Copilot never reviewed, tell the
 maintainer, stop. That re-request retries a request that went unanswered; it
@@ -166,8 +166,10 @@ be resolved without choosing between two behaviours, stop and tell the
 maintainer which files conflict.
 
 Wait for the checks to finish on the head (`gh pr checks $N --watch`; without
-`--watch` it exits 8 while any check is pending). A red check is yours to fix
-as in step 4.
+`--watch` it exits 8 while any check is pending). On a fresh head it can
+return at once, before any check has registered: run it again, or ask
+`gh pr view $N --json mergeStateStatus` until it settles. A red check is yours
+to fix as in step 4.
 
 ## 8. Close
 
