@@ -29,7 +29,10 @@ typed inline. Run it in the background, never behind a foreground sleep:
 Shell variables do not outlive a call, so each command below sets its own `N`
 and `REPO`.
 
-It gives up after 15 minutes. If nothing has come by then, re-request once
+It exits 0 once the review exists and 1 with "No Copilot review" when 15
+minutes pass without one. Any other failure is a `gh` error (authentication,
+rate limit, network), not a missing review: fix that and run it again rather
+than re-requesting. If nothing has come after the 15 minutes, re-request once
 (`gh pr edit $N --add-reviewer @copilot`) and run it again. Still nothing:
 post a pull request comment saying Copilot never reviewed, tell the
 maintainer, stop. That re-request retries a request that went unanswered; it
@@ -44,8 +47,8 @@ reviews, not two requests.
 ```bash
 N=<pr number>; REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 HEAD=$(gh pr view $N --json headRefOid -q .headRefOid)
-gh api "repos/$REPO/pulls/$N/reviews?per_page=100" \
-  --jq "[.[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"$HEAD\")] | last | .body" \
+gh api --paginate --slurp "repos/$REPO/pulls/$N/reviews?per_page=100" \
+  | jq -r "[.[][] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"$HEAD\")] | last | .body" \
   | perl -pe 's/<picture>.*?alt="([^"]*)".*?<\/picture>/[$1]/g'   # severity icons down to their label
 ```
 
@@ -60,7 +63,7 @@ gh api "repos/$REPO/pulls/$N/reviews?per_page=100" \
 
 ```bash
 N=<pr number>; REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-gh api graphql -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved path line comments(first:20){nodes{databaseId author{login} body}}}}}}}' \
+gh api graphql --paginate -f query='query($owner:String!,$name:String!,$n:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved path line comments(first:20){nodes{databaseId author{login} body}}}}}}}' \
   -f owner=${REPO%/*} -f name=${REPO#*/} -F n=$N \
   --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)'
 ```
