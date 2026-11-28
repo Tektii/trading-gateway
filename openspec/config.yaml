@@ -37,7 +37,9 @@ rules:
   tasks:
     - Test-first — each behaviour task is preceded by a task writing its failing test
     - Include an OpenAPI regen task (`cargo run --bin openapi-export > openapi.json`) when a ToSchema type, its doc comments, or a handler changes
-    - Final task is always `make check`
+    - Every task ends with a verifiable completion criterion
+    - Final code task is always `make check`
+    - "Final task: Open the pull request and work Copilot's review through the `pr-review` skill. Verify every thread is resolved and the pull request is ready to merge; do not merge."
 
 operations:
   apply:
@@ -46,6 +48,9 @@ operations:
       - Stop and report on any unexpected failure rather than retrying
       - Work on a branch named with a conventional-commit type prefix; ship as a pull request, never commit to main
       - The pull request body explains the why in full; it does not rely on the reader opening the change
+      - Once the pull request is open, work Copilot's review with the `pr-review` skill, then stop; never merge, never enable auto-merge
+      - Verify reads the tree, not the task list — a ticked task is not evidence the work is there
   archive:
     guidance:
       - Archive only after the pull request is merged
+      - Always run `/opsx:verify` before archiving; never fold it into apply
